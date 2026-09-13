@@ -68,23 +68,30 @@
 #include "xenia/hid/xinput/xinput_hid.h"
 #endif  // XE_PLATFORM_WIN32
 
+// Available NUI (Kinect) systems:
+#include "xenia/nui/nop/nop_nui_system.h"
+
 #if XE_PLATFORM_WIN32
 #define APU_OPTIONS "[any, nop, sdl, xaudio2]"
 #define GPU_OPTIONS "[any, d3d12, vulkan, null]"
 #define HID_OPTIONS "[any, nop, sdl, keyboard, xinput]"
+#define NUI_OPTIONS "[any, nop]"
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[any, alsa, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
 #define HID_OPTIONS "[any, nop, sdl, keyboard]"
+#define NUI_OPTIONS "[any, nop]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
 #define HID_OPTIONS "[any, nop, sdl]"
+#define NUI_OPTIONS "[any, nop]"
 #endif
 
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
+DEFINE_string(nui, "any", "NUI (Kinect) system. Use: " NUI_OPTIONS, "Kinect");
 
 DEFINE_path(
     storage_root, "",
@@ -278,6 +285,7 @@ class EmulatorApp final : public xe::ui::WindowedApp {
   static std::unique_ptr<gpu::GraphicsSystem> CreateGraphicsSystem();
   static std::vector<std::unique_ptr<hid::InputDriver>> CreateInputDrivers(
       ui::Window* window);
+  static std::unique_ptr<nui::NuiSystem> CreateNuiSystem();
 
   void EmulatorThread();
   void ShutdownEmulatorThreadFromUIThread();
@@ -479,6 +487,12 @@ std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
   return drivers;
 }
 
+std::unique_ptr<nui::NuiSystem> EmulatorApp::CreateNuiSystem() {
+  Factory<nui::NuiSystem> factory;
+  factory.Add<nui::nop::NopNuiSystem>("nop");
+  return factory.Create(cvars::nui);
+}
+
 bool EmulatorApp::OnInitialize() {
   Profiler::Initialize();
   Profiler::ThreadEnter("Main");
@@ -593,9 +607,10 @@ void EmulatorApp::EmulatorThread() {
 
   // Setup and initialize all subsystems. If we can't do something
   // (unsupported system, memory issues, etc) this will fail early.
-  X_STATUS result = emulator_->Setup(
-      emulator_window_->window(), emulator_window_->imgui_drawer(), true,
-      CreateAudioSystem, CreateGraphicsSystem, CreateInputDrivers);
+  X_STATUS result = emulator_->Setup(emulator_window_->window(),
+                                     emulator_window_->imgui_drawer(), true,
+                                     CreateAudioSystem, CreateGraphicsSystem,
+                                     CreateInputDrivers, CreateNuiSystem);
   if (XFAILED(result)) {
     XELOGE("Failed to setup emulator: {:08X}", result);
     app_context().RequestDeferredQuit();

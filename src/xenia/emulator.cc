@@ -48,6 +48,7 @@
 #include "xenia/kernel/xbdm/xbdm_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/memory.h"
+#include "xenia/nui/nui_system.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
@@ -126,6 +127,7 @@ Emulator::Emulator(const std::filesystem::path& command_line,
       audio_media_player_(),
       graphics_system_(),
       input_system_(),
+      nui_system_(),
       export_resolver_(),
       file_system_(),
       kernel_state_(),
@@ -176,11 +178,15 @@ Emulator::~Emulator() {
   if (audio_system_) {
     audio_system_->Shutdown();
   }
+  if (nui_system_) {
+    nui_system_->Shutdown();
+  }
 
   input_system_.reset();
   graphics_system_.reset();
   audio_system_.reset();
   audio_media_player_.reset();
+  nui_system_.reset();
 
   kernel_state_.reset();
   file_system_.reset();
@@ -200,7 +206,8 @@ X_STATUS Emulator::Setup(
     std::function<std::unique_ptr<gpu::GraphicsSystem>()>
         graphics_system_factory,
     std::function<std::vector<std::unique_ptr<hid::InputDriver>>(ui::Window*)>
-        input_driver_factory) {
+        input_driver_factory,
+    std::function<std::unique_ptr<nui::NuiSystem>()> nui_system_factory) {
   X_STATUS result = X_STATUS_UNSUCCESSFUL;
 
   display_window_ = display_window;
@@ -302,6 +309,17 @@ X_STATUS Emulator::Setup(
   // Add inputSystem to UI
   imgui_drawer_->LoadInputSystem(input_system_.get());
 
+  XELOGI("{}: Initializing NUI...", __func__);
+  // Initialize the NUI (Kinect). Hosts that don't want one pass no factory and
+  // run without a nui_system().
+  if (nui_system_factory) {
+    nui_system_ = nui_system_factory();
+    if (!nui_system_) {
+      XELOGE("{}: Cannot initialize nui_system!", __func__);
+      return X_STATUS_NOT_IMPLEMENTED;
+    }
+  }
+
   XELOGI("{}: Initializing VFS...", __func__);
   // Bring up the virtual filesystem used by the kernel.
   file_system_ = std::make_unique<xe::vfs::VirtualFileSystem>();
@@ -346,6 +364,16 @@ X_STATUS Emulator::Setup(
     audio_media_player_ = std::make_unique<apu::AudioMediaPlayer>(
         audio_system_.get(), kernel_state_.get());
     audio_media_player_->Setup();
+  }
+
+  if (nui_system_) {
+    XELOGI("{}: Starting nui_system...", __func__);
+    result = nui_system_->Setup(kernel_state_.get());
+    if (result) {
+      XELOGE("{}: Failed to setup nui_system!", __func__);
+      return result;
+    }
+    XELOGI("NUI: system {} ready", nui_system_->name());
   }
 
   // Initialize emulator fallback exception handling last.

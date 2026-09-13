@@ -9,6 +9,7 @@
 
 #include "xenia/nui/nui_system.h"
 
+#include <cstddef>
 #include <utility>
 
 #include "xenia/base/assert.h"
@@ -33,7 +34,17 @@ X_STATUS NuiSystem::Setup(kernel::KernelState* kernel_state) {
   return X_STATUS_SUCCESS;
 }
 
-void NuiSystem::Shutdown() {}
+void NuiSystem::Shutdown() {
+  // The emulator destroys us right after this returns, so nobody may still be
+  // parked on our condition variable or holding a callback into us by then.
+  {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    shutting_down_ = true;
+  }
+  frame_published_.notify_all();
+  std::lock_guard<std::mutex> lock(device_status_callback_mutex_);
+  device_status_callback_ = nullptr;
+}
 
 std::shared_ptr<const DepthFrame> NuiSystem::AcquireLatestDepthFrame() const {
   std::lock_guard<std::mutex> lock(frame_mutex_);
@@ -43,9 +54,12 @@ std::shared_ptr<const DepthFrame> NuiSystem::AcquireLatestDepthFrame() const {
 bool NuiSystem::WaitForFrame(uint64_t after_sequence,
                              std::chrono::milliseconds timeout) {
   std::unique_lock<std::mutex> lock(frame_mutex_);
-  return frame_published_.wait_for(lock, timeout, [this, after_sequence]() {
-    return latest_sequence_.load(std::memory_order_relaxed) > after_sequence;
+  frame_published_.wait_for(lock, timeout, [this, after_sequence]() {
+    return shutting_down_ ||
+           latest_sequence_.load(std::memory_order_relaxed) > after_sequence;
   });
+  // A shutdown wakes waiters without having a frame to hand them.
+  return latest_sequence_.load(std::memory_order_relaxed) > after_sequence;
 }
 
 void NuiSystem::SetDeviceStatusCallback(DeviceStatusCallback callback) {
@@ -58,11 +72,17 @@ void NuiSystem::PublishFrame(std::shared_ptr<DepthFrame> frame) {
   if (!frame) {
     return;
   }
-  const auto now = std::chrono::steady_clock::now().time_since_epoch();
-  frame->timestamp_us = static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::microseconds>(now).count());
+  assert_true(frame->width == DepthFrame::kWidth &&
+              frame->height == DepthFrame::kHeight);
+  assert_true(frame->depth_mm.size() ==
+              static_cast<size_t>(frame->width) * frame->height);
   {
+    // Both stamps are taken under the lock so that they cannot disagree about
+    // the order in which two publishers got here.
     std::lock_guard<std::mutex> lock(frame_mutex_);
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    frame->timestamp_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(now).count());
     const uint64_t sequence =
         latest_sequence_.load(std::memory_order_relaxed) + 1;
     frame->sequence = sequence;

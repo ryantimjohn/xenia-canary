@@ -53,6 +53,8 @@ class NuiSystem {
   virtual std::string name() const = 0;
 
   virtual X_STATUS Setup(kernel::KernelState* kernel_state);
+  // Releases the waiters and the status callback so that nothing can re-enter
+  // this object while it is being torn down. Overrides must call the base.
   virtual void Shutdown();
 
   DeviceStatus device_status() const {
@@ -83,7 +85,7 @@ class NuiSystem {
 
   // Blocks until a frame newer than after_sequence has been published. Returns
   // true when latest_sequence() > after_sequence, false when the timeout
-  // elapsed first.
+  // elapsed or Shutdown() released the waiters first.
   bool WaitForFrame(uint64_t after_sequence, std::chrono::milliseconds timeout);
 
   void SetDeviceStatusCallback(DeviceStatusCallback callback);
@@ -107,6 +109,9 @@ class NuiSystem {
   std::condition_variable frame_published_;
   std::shared_ptr<const DepthFrame> latest_frame_;
   std::atomic<uint64_t> latest_sequence_ = {0};
+  // Set by Shutdown() so that waiters leave instead of parking on an object
+  // that is about to be destroyed. Guarded by frame_mutex_.
+  bool shutting_down_ = false;
 
   std::atomic<DeviceStatus> device_status_ = {DeviceStatus::kNotPresent};
 

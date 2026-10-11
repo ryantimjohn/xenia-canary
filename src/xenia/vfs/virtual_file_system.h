@@ -39,7 +39,15 @@ class VirtualFileSystem {
   bool IsSymbolicLinkRegistered(const std::string_view path);
   bool FindSymbolicLink(const std::string_view path, std::string& target);
 
-  Entry* ResolvePath(const std::string_view path);
+  // Resolves a guest path to the entry it names, or null when no device is
+  // mounted under its root or the device holds no such entry. A path whose
+  // device is not mounted is logged as an error, because for nearly every
+  // caller that means the guest asked for something xenia should have been
+  // able to give it. Pass false for log_missing_device where the miss is
+  // expected and handled - a title probing update:\ before game:\, say - and
+  // the resolve stays silent; nothing else about it changes.
+  Entry* ResolvePath(const std::string_view path,
+                     bool log_missing_device = true);
 
   Entry* CreatePath(const std::string_view path, uint32_t attributes);
   bool DeletePath(const std::string_view path);

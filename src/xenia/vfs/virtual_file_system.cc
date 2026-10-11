@@ -125,7 +125,8 @@ bool VirtualFileSystem::ResolveSymbolicLink(const std::string_view path,
   return was_resolved;
 }
 
-Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
+Entry* VirtualFileSystem::ResolvePath(const std::string_view path,
+                                      bool log_missing_device) {
   auto global_lock = global_critical_region_.Acquire();
 
   // Resolve relative paths
@@ -144,7 +145,7 @@ Entry* VirtualFileSystem::ResolvePath(const std::string_view path) {
   if (it == devices_.cend()) {
     // Supress logging the error for ShaderDumpxe:\CompareBackEnds as this is
     // not an actual problem nor something we care about.
-    if (path != "ShaderDumpxe:\\CompareBackEnds") {
+    if (log_missing_device && path != "ShaderDumpxe:\\CompareBackEnds") {
       XELOGE("ResolvePath({}) failed - device not found", path);
     }
     return nullptr;

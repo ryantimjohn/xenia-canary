@@ -1393,6 +1393,7 @@ class TestCommand(BaseBuildCommand):
             "xenia-gpu-tests",
             "xenia-kernel-tests",
             "xenia-nui-tests",
+            "xenia-vfs-tests",
             ]
         args["target"] = test_targets
 

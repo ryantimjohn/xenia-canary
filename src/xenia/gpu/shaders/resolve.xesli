@@ -45,6 +45,8 @@ push_const_begin_xe(b0, space0)
         uint xe_resolve_copy_ref;
         // RB_COPY_MASK.
         uint xe_resolve_copy_mask;
+        // Exact block counts, width in bits 0:15 and height in bits 16:31.
+        uint xe_resolve_copy_size_blocks;
       #endif
     #endif
   #endif

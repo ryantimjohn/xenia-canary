@@ -14,7 +14,7 @@
 // RB_COPY_FUNC holds 3 bit CompareFunction fields at bits 0, 4, 8 and 12.
 // RB_COPY_REF and RB_COPY_MASK hold one byte per component in the same order.
 //
-// Compare the reference against the source. 5345084D builds masks with
+// Compare the reference against the source. 0x4D5308ED builds masks with
 // RB_COPY_FUNC = 0x1111, RB_COPY_REF = 0x80808080 and
 // RB_COPY_MASK = 0xFFFFFFFF. Putting the source on the left inverted those
 // masks.
@@ -24,7 +24,7 @@
 #define XE_RESOLVE_COPY_DXT3A_AS_1111
 #include "resolve.xesli"
 
-byte_buffer_align16_wo_declare_xe(xe_resolve_dest, set=1, binding=0, u0, space0)
+byte_buffer_align8_wo_declare_xe(xe_resolve_dest, set=1, binding=0, u0, space0)
 #define LOCAL_SIZE_X_XE 32
 #define LOCAL_SIZE_Y_XE 2
 #define LOCAL_SIZE_Z_XE 1
@@ -126,9 +126,14 @@ entry_inputs_end_code_begin_compute_xe
 {
   // 1 thread = 8x4 pixels = 2 horizontally adjacent 4x4 blocks.
   XeResolveInfo resolve_info = XeResolveGetInfo(pass_push_consts_xe);
-  // Each group covers 8 rows, matching the resolve alignment.
+  // Each group covers 8 rows, but the inferred copy rectangle can end on
+  // any 4x4 block. Do not store the extra block row or column used by dispatch.
+  uint2_xe copy_size_blocks =
+      (uint_x2_xe(push_const_xe(xe_resolve_copy_size_blocks)) >>
+       uint2_xe(0u, 16u)) & 0xFFFFu;
   dont_flatten_xe
-  if (in_global_thread_id_xe.x >= resolve_info.width_div_8_scaled) {
+  if ((in_global_thread_id_xe.x << 1u) >= copy_size_blocks.x ||
+      in_global_thread_id_xe.y >= copy_size_blocks.y) {
     return;
   }
   uint func = push_const_xe(xe_resolve_copy_func);
@@ -163,8 +168,11 @@ entry_inputs_end_code_begin_compute_xe
                                       resolve_info.dest_row_pitch_macro_tiles,
                                       3u)) +
       resolve_info.dest_base;
-  byte_buffer_align16_store16_xe(
-      xe_resolve_dest, dest_address,
-      XeEndianSwap64(blocks, resolve_info.dest_endian_128));
+  blocks = XeEndianSwap64(blocks, resolve_info.dest_endian_128);
+  byte_buffer_align8_store8_xe(xe_resolve_dest, dest_address, blocks.xy);
+  dont_flatten_xe
+  if ((in_global_thread_id_xe.x << 1u) + 1u < copy_size_blocks.x) {
+    byte_buffer_align8_store8_xe(xe_resolve_dest, dest_address + 8u, blocks.zw);
+  }
 }
 entry_code_end_compute_xe

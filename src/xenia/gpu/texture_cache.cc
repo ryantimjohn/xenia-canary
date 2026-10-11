@@ -9,6 +9,9 @@
 
 #include "xenia/gpu/texture_cache.h"
 
+#include <mutex>
+#include <unordered_set>
+
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -1020,7 +1023,26 @@ void TextureCache::BindingInfoFromFetchConstant(
       uint32_t total_width = width_minus_1 + 1;
       uint32_t row_width = xenos::kTexture2DCubeMaxWidthHeight;
       uint32_t num_rows = (total_width + row_width - 1) / row_width;
-      num_rows = std::min(num_rows, xenos::kTexture1DWideMaxRows);
+      if (num_rows > xenos::kTexture1DWideMaxRows) {
+        // The tail of the texture is not materialized at all: fetches past the
+        // last row read the clamped row instead of the guest's data. This runs
+        // per binding rather than per texture, so it is said once per width.
+        static std::mutex clamped_1d_widths_mutex;
+        static std::unordered_set<uint32_t> clamped_1d_widths;
+        bool first_time;
+        {
+          std::lock_guard<std::mutex> lock(clamped_1d_widths_mutex);
+          first_time = clamped_1d_widths.emplace(total_width).second;
+        }
+        if (first_time) {
+          XELOGW(
+              "Wide 1D texture of {} texels needs {} rows of {}, but only {} "
+              "are materialized - its last {} rows read the clamped row",
+              total_width, num_rows, row_width, xenos::kTexture1DWideMaxRows,
+              num_rows - xenos::kTexture1DWideMaxRows);
+        }
+        num_rows = xenos::kTexture1DWideMaxRows;
+      }
       width_minus_1 = row_width - 1;
       height_minus_1 = num_rows - 1;
       // Disable mipmaps for wide 1D textures. The shader's coordinate remapping

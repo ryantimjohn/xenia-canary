@@ -107,6 +107,21 @@ static bool IsPrimitivePolygonal(const RegisterFile& regs) {
       regs.Get<reg::VGT_DRAW_INITIATOR>().prim_type);
 }
 
+// Whether the shader exports of the draw are discarded instead of being written
+// to the frame buffer, which is what SQ_PROGRAM_CNTL::vs_export_mode
+// kMultipass asks for - see SX_MISC::MULTIPASS on R6xx / R7xx, and
+// xenos::VertexShaderExportMode. The shaders themselves still run, so a pass
+// whose only result is a memory export can be issued this way, and the memory
+// it writes is the only thing the guest will ever read of it. Xenia therefore
+// keeps such a draw only when its pixel shader writes to memory, and discards
+// its color and depth / stencil output instead - see
+// IsRasterizationPotentiallyDone, GetNormalizedDepthControl and
+// GetNormalizedColorMask.
+inline bool IsFrameBufferExportSuppressed(const RegisterFile& regs) {
+  return regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode ==
+         xenos::VertexShaderExportMode::kMultipass;
+}
+
 // Whether with the current state, any samples to rasterize (for any reason, not
 // only to write something to a render target, but also to do sample counting or
 // pixel shader memexport) can be generated. Finally dropping draw calls can
@@ -114,8 +129,14 @@ static bool IsPrimitivePolygonal(const RegisterFile& regs) {
 // cases (for both the guest and usual host implementations), not everything
 // like whether viewport / scissor are empty (until this truly matters in any
 // game, of course).
+// pixel_shader_memexports tells whether the pixel shader that the draw would
+// use writes to memory (it must have had its ucode analyzed). It's the only
+// reason to rasterize a draw whose frame buffer export is suppressed, and every
+// caller must supply the same value, because the pipeline setup asserts that
+// the pixel shader is disabled when rasterization isn't done.
 bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
-                                    bool primitive_polygonal);
+                                    bool primitive_polygonal,
+                                    bool pixel_shader_memexports);
 
 // VIZ_QUERY survey geometry, killed after hi-Z on real hardware. Drawn only to
 // count coverage for its ID: no pixel shader, no color, depth/stencil writes.
@@ -318,6 +339,24 @@ inline bool DoesCoverageDependOnAlpha(reg::RB_COLORCONTROL rb_colorcontrol) {
 // shaders with side effects on depth or memory export will still be preserved).
 bool IsPixelShaderNeededWithRasterization(const Shader& shader,
                                           const RegisterFile& regs);
+
+// Reports, once per pixel shader, that a draw isn't running a pixel shader that
+// writes to memory. What such a shader writes is usually the only result of its
+// pass that the guest can read, so skipping it loses data rather than pixels,
+// and nothing else in the log says that it happened. The shader must have had
+// its ucode analyzed; a shader that doesn't write to memory is ignored.
+void ReportDroppedMemexportPixelShader(const Shader& shader,
+                                       const RegisterFile& regs);
+
+// The symmetric report: once per pixel shader, that a draw whose frame buffer
+// export is suppressed is being kept alive - and rasterized with its color and
+// depth / stencil output discarded - only because this pixel shader writes to
+// memory. Without it the log says when the path drops a shader but never when
+// it engages, so a regression in a title nobody tests would leave no trace.
+// The shader must have had its ucode analyzed; a shader that doesn't write to
+// memory, or a draw whose frame buffer export is not suppressed, is ignored.
+void ReportKeptMemexportPixelShader(const Shader& shader,
+                                    const RegisterFile& regs);
 
 struct ViewportInfo {
   // Offset from render target UV = 0 to +UV.
@@ -718,6 +757,8 @@ struct ResolveCopyShaderConstants {
   uint32_t copy_ref;
   // RB_COPY_MASK.
   uint32_t copy_mask;
+  // Exact block counts, width in bits 0:15 and height in bits 16:31.
+  uint32_t copy_size_blocks;
 };
 
 struct ResolveClearShaderConstants {
@@ -777,6 +818,9 @@ struct ResolveInfo {
   uint32_t rb_copy_func;
   uint32_t rb_copy_ref;
   uint32_t rb_copy_mask;
+  // Exact copy extent for the command-2 shader, excluding dispatch padding.
+  uint32_t copy_width_blocks;
+  uint32_t copy_height_blocks;
 
   bool IsCopyingDepth() const {
     return rb_copy_control.copy_src_select >= xenos::kMaxColorRenderTargets;

@@ -125,6 +125,26 @@ DEFINE_bool(
 namespace xe {
 namespace gpu {
 
+namespace {
+
+// Gives a config variable a value for the running session only. A config
+// variable keeps the command line's value separately from the config file's,
+// prefers it to everything else when it recomputes what it holds, and leaves
+// it out of the value the config file is written from - so a value set this
+// way takes effect at once and can never reach the user's config. It replaces
+// whatever the command line asked for, which is why only a value the user has
+// not chosen may be set this way.
+template <typename T>
+void SetConfigVarForSession(cvar::IConfigVar* var, const T& value) {
+  auto* typed_var = dynamic_cast<cvar::ConfigVar<T>*>(var);
+  assert_not_null(typed_var);
+  if (typed_var) {
+    typed_var->SetCommandLineValue(value);
+  }
+}
+
+}  // namespace
+
 // This should be written completely differently with support for different
 // types.
 void SaveGPUSetting(GPUSetting setting, uint64_t value) {
@@ -134,6 +154,19 @@ void SaveGPUSetting(GPUSetting setting, uint64_t value) {
       break;
     case GPUSetting::ReadbackMemexport:
       OVERRIDE_bool(readback_memexport, static_cast<bool>(value));
+      break;
+  }
+}
+
+void SetGPUSettingForSession(GPUSetting setting, uint64_t value) {
+  switch (setting) {
+    case GPUSetting::ClearMemoryPageState:
+      SetConfigVarForSession(&ACCESS_CVar(clear_memory_page_state),
+                             static_cast<bool>(value));
+      break;
+    case GPUSetting::ReadbackMemexport:
+      SetConfigVarForSession(&ACCESS_CVar(readback_memexport),
+                             static_cast<bool>(value));
       break;
   }
 }
@@ -162,6 +195,10 @@ ReadbackResolveMode GetReadbackResolveMode() {
 
 void SetReadbackResolveMode(const std::string& mode) {
   OVERRIDE_string(readback_resolve, mode);
+}
+
+void SetReadbackResolveModeForSession(const std::string& mode) {
+  SetConfigVarForSession(&ACCESS_CVar(readback_resolve), mode);
 }
 
 ZPDMode GetZPDMode() {

@@ -9,6 +9,9 @@
 
 #include "xenia/gpu/draw_util.h"
 
+#include <mutex>
+#include <unordered_set>
+
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
@@ -55,7 +58,8 @@ namespace gpu {
 namespace draw_util {
 
 bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
-                                    bool primitive_polygonal) {
+                                    bool primitive_polygonal,
+                                    bool pixel_shader_memexports) {
   // The sample counters live in the RB with depth/stencil testing.
   // kNoOperation and kCopy don't count. D3D sits in kCopy during
   // EVENT_WRITE_ZPD, which only snapshots the running counters.
@@ -64,9 +68,15 @@ bool IsRasterizationPotentiallyDone(const RegisterFile& regs,
       edram_mode != xenos::EdramMode::kDepthOnly) {
     return false;
   }
-  if (regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode ==
-          xenos::VertexShaderExportMode::kMultipass ||
-      !regs.Get<reg::RB_SURFACE_INFO>().surface_pitch) {
+  // Suppressing the frame buffer export doesn't stop the pixel shader from
+  // running, so a pass that only writes to memory is still rasterized - see
+  // IsFrameBufferExportSuppressed. Without a memory-writing pixel shader
+  // nothing observable is left of such a draw, so it's treated as not
+  // rasterized, which is also what lets it be dropped entirely.
+  if (IsFrameBufferExportSuppressed(regs) && !pixel_shader_memexports) {
+    return false;
+  }
+  if (!regs.Get<reg::RB_SURFACE_INFO>().surface_pitch) {
     return false;
   }
   // Geometry killed after hi-Z only feeds the VIZ survey. Without an ID,
@@ -95,8 +105,14 @@ bool IsVIZSurveyDraw(const RegisterFile& regs) {
 
 reg::RB_DEPTHCONTROL GetNormalizedDepthControl(const RegisterFile& regs) {
   xenos::EdramMode edram_mode = regs.Get<reg::RB_MODECONTROL>().edram_mode;
-  if (edram_mode != xenos::EdramMode::kColorDepth &&
-      edram_mode != xenos::EdramMode::kDepthOnly) {
+  // A draw whose frame buffer export is suppressed leaves the depth buffer
+  // alone as well as the color buffers, and disabling the test along with the
+  // write keeps it from taking ownership of a depth render target on the host
+  // for an image it never contributes to. If a title is ever found that needs
+  // its memory-exporting pass to be depth-tested, this is where to allow it.
+  if ((edram_mode != xenos::EdramMode::kColorDepth &&
+       edram_mode != xenos::EdramMode::kDepthOnly) ||
+      IsFrameBufferExportSuppressed(regs)) {
     // Both depth and stencil disabled (EDRAM depth and stencil ignored).
     reg::RB_DEPTHCONTROL disabled;
     disabled.value = 0;
@@ -296,6 +312,69 @@ bool IsPixelShaderNeededWithRasterization(const Shader& shader,
 
   // Only depth / stencil passthrough potentially.
   return false;
+}
+
+void ReportDroppedMemexportPixelShader(const Shader& shader,
+                                       const RegisterFile& regs) {
+  assert_true(shader.type() == xenos::ShaderType::kPixel);
+  assert_true(shader.is_ucode_analyzed());
+  if (!shader.memexport_eM_written()) {
+    return;
+  }
+  static std::mutex dropped_memexport_pixel_shader_mutex;
+  static std::unordered_set<uint64_t> dropped_memexport_pixel_shaders;
+  bool first_time;
+  {
+    std::lock_guard<std::mutex> lock(dropped_memexport_pixel_shader_mutex);
+    first_time =
+        dropped_memexport_pixel_shaders.emplace(shader.ucode_data_hash())
+            .second;
+  }
+  if (!first_time) {
+    return;
+  }
+  auto pa_su_sc_mode_cntl = regs.Get<reg::PA_SU_SC_MODE_CNTL>();
+  XELOGW(
+      "Pixel shader {:016X} writes to memory, but the draw isn't running it - "
+      "EDRAM mode {}, vertex shader export mode {}, RB_COLOR_MASK {:08X}, "
+      "cull_front {}, cull_back {}. Whatever the guest expects that shader to "
+      "leave in memory stays as it was",
+      shader.ucode_data_hash(),
+      uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode),
+      uint32_t(regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode),
+      uint32_t(regs[XE_GPU_REG_RB_COLOR_MASK]),
+      uint32_t(pa_su_sc_mode_cntl.cull_front),
+      uint32_t(pa_su_sc_mode_cntl.cull_back));
+}
+
+void ReportKeptMemexportPixelShader(const Shader& shader,
+                                    const RegisterFile& regs) {
+  assert_true(shader.type() == xenos::ShaderType::kPixel);
+  assert_true(shader.is_ucode_analyzed());
+  if (!shader.memexport_eM_written() || !IsFrameBufferExportSuppressed(regs)) {
+    return;
+  }
+  static std::mutex kept_memexport_pixel_shader_mutex;
+  static std::unordered_set<uint64_t> kept_memexport_pixel_shaders;
+  bool first_time;
+  {
+    std::lock_guard<std::mutex> lock(kept_memexport_pixel_shader_mutex);
+    first_time =
+        kept_memexport_pixel_shaders.emplace(shader.ucode_data_hash()).second;
+  }
+  if (!first_time) {
+    return;
+  }
+  XELOGI(
+      "Pixel shader {:016X} writes to memory, and the draw is kept and "
+      "rasterized for it although its frame buffer export is suppressed - "
+      "EDRAM mode {}, vertex shader export mode {}, RB_COLOR_MASK {:08X}. Its "
+      "color and depth / stencil output is discarded, and the memory it "
+      "writes is all the guest will read of the pass",
+      shader.ucode_data_hash(),
+      uint32_t(regs.Get<reg::RB_MODECONTROL>().edram_mode),
+      uint32_t(regs.Get<reg::SQ_PROGRAM_CNTL>().vs_export_mode),
+      uint32_t(regs[XE_GPU_REG_RB_COLOR_MASK]));
 }
 
 static float ViewportRecip2_0(float f) {
@@ -1038,9 +1117,12 @@ int32_t GetWindowOffsetTiles(const RegisterFile& XE_RESTRICT regs,
 
 uint32_t GetNormalizedColorMask(const RegisterFile& regs,
                                 uint32_t pixel_shader_writes_color_targets) {
+  // The color the pixel shader exports is thrown away by the hardware when the
+  // frame buffer export is suppressed, so nothing is written even though
+  // RB_COLOR_MASK says it would be.
   if (regs.Get<reg::RB_MODECONTROL>().edram_mode !=
           xenos::EdramMode::kColorDepth ||
-      IsVIZSurveyDraw(regs)) {
+      IsVIZSurveyDraw(regs) || IsFrameBufferExportSuppressed(regs)) {
     return 0;
   }
   uint32_t normalized_color_mask = 0;
@@ -1247,6 +1329,8 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   // captures. Also initialize an invalid resolve to empty.
   info_out.coordinate_info.packed = 0;
   info_out.height_div_8 = 0;
+  info_out.copy_width_blocks = 0;
+  info_out.copy_height_blocks = 0;
 
   auto rb_copy_control = regs.Get<reg::RB_COPY_CONTROL>();
   info_out.rb_copy_control = rb_copy_control;
@@ -1266,46 +1350,68 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
 
   // Get the extent of pixels covered by the resolve rectangle, according to the
   // top-left rasterization rule.
-  // D3D9 HACK: Vertices to use are always in vf0, and are written by the CPU.
+  // Direct3D 9 normally supplies three CPU-authored vertices in fetch 0.
   xenos::xe_gpu_vertex_fetch_t fetch = regs.GetVertexFetch(0);
-  if (fetch.type != xenos::FetchConstantType::kVertex || fetch.size != 3 * 2) {
-    XELOGE("Unsupported resolve vertex buffer format");
-    assert_always();
-    return false;
-  }
-  trace_writer.WriteMemoryRead(fetch.address * sizeof(uint32_t),
-                               fetch.size * sizeof(uint32_t));
-  const float* vertices_guest = reinterpret_cast<const float*>(
-      memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
-  // Most vertices have a negative half-pixel offset applied, which we reverse.
-  float half_pixel_offset =
-      regs.Get<reg::PA_SU_VTX_CNTL>().pix_center == xenos::PixelCenter::kD3DZero
-          ? 0.5f
-          : 0.0f;
-  int32_t vertices_fixed[6];
-  float vertices_swapped[6];
-  for (size_t i = 0; i < xe::countof(vertices_fixed); ++i) {
-    vertices_swapped[i] = xenos::GpuSwap(vertices_guest[i], fetch.endian);
-    vertices_fixed[i] =
-        ui::FloatToD3D11Fixed16p8(vertices_swapped[i] + half_pixel_offset);
-  }
+  bool inferred_rectangle =
+      fetch.type != xenos::FetchConstantType::kVertex || fetch.size != 3 * 2;
+  int32_t x0, y0, x1, y1;
+  if (!inferred_rectangle) {
+    trace_writer.WriteMemoryRead(fetch.address * sizeof(uint32_t),
+                                 fetch.size * sizeof(uint32_t));
+    const float* vertices_guest = reinterpret_cast<const float*>(
+        memory.TranslatePhysical(fetch.address * sizeof(uint32_t)));
+    // Most vertices have a negative half-pixel offset applied, which we
+    // reverse.
+    float half_pixel_offset = regs.Get<reg::PA_SU_VTX_CNTL>().pix_center ==
+                                      xenos::PixelCenter::kD3DZero
+                                  ? 0.5f
+                                  : 0.0f;
+    int32_t vertices_fixed[6];
+    float vertices_swapped[6];
+    for (size_t i = 0; i < xe::countof(vertices_fixed); ++i) {
+      vertices_swapped[i] = xenos::GpuSwap(vertices_guest[i], fetch.endian);
+      vertices_fixed[i] =
+          ui::FloatToD3D11Fixed16p8(vertices_swapped[i] + half_pixel_offset);
+    }
 
-  // Inclusive.
-  int32_t x0 = std::min(std::min(vertices_fixed[0], vertices_fixed[2]),
-                        vertices_fixed[4]);
-  int32_t y0 = std::min(std::min(vertices_fixed[1], vertices_fixed[3]),
-                        vertices_fixed[5]);
-  // Exclusive.
-  int32_t x1 = std::max(std::max(vertices_fixed[0], vertices_fixed[2]),
-                        vertices_fixed[4]);
-  int32_t y1 = std::max(std::max(vertices_fixed[1], vertices_fixed[3]),
-                        vertices_fixed[5]);
-  // Top-left - include .5 (0.128 treated as 0 covered, 0.129 as 0 not covered).
-  x0 = (x0 + 127) >> 8;
-  y0 = (y0 + 127) >> 8;
-  // Bottom-right - exclude .5.
-  x1 = (x1 + 127) >> 8;
-  y1 = (y1 + 127) >> 8;
+    // Inclusive.
+    x0 = std::min(std::min(vertices_fixed[0], vertices_fixed[2]),
+                  vertices_fixed[4]);
+    y0 = std::min(std::min(vertices_fixed[1], vertices_fixed[3]),
+                  vertices_fixed[5]);
+    // Exclusive.
+    x1 = std::max(std::max(vertices_fixed[0], vertices_fixed[2]),
+                  vertices_fixed[4]);
+    y1 = std::max(std::max(vertices_fixed[1], vertices_fixed[3]),
+                  vertices_fixed[5]);
+    // Top-left - include .5 (0.128 treated as 0 covered, 0.129 as 0 not
+    // covered).
+    x0 = (x0 + 127) >> 8;
+    y0 = (y0 + 127) >> 8;
+    // Bottom-right - exclude .5.
+    x1 = (x1 + 127) >> 8;
+    y1 = (y1 + 127) >> 8;
+  } else {
+    // 0x4D5308ED generates its tracker resolve rectangles in the vertex shader
+    // while fetch 0 contains a texture. Approximate these full-surface copies
+    // with the destination extent, then apply the scissor below. Destination
+    // pitch and height count 4x4 blocks for copy command 2, not source pixels.
+    // TODO(ryantimjohn): Run the resolve vertex shader to support partial or
+    // offset rectangles that cannot be inferred from the destination.
+    auto rb_copy_dest_pitch = regs.Get<reg::RB_COPY_DEST_PITCH>();
+    uint32_t block_size_log2 = is_convert_to_1111 ? 2 : 0;
+    x0 = 0;
+    y0 = 0;
+    x1 = int32_t(rb_copy_dest_pitch.copy_dest_pitch << block_size_log2);
+    y1 = int32_t(rb_copy_dest_pitch.copy_dest_height << block_size_log2);
+    static std::once_flag report_inferred_rectangle;
+    std::call_once(report_inferred_rectangle, [&]() {
+      XELOGW(
+          "Resolve without a vertex buffer in fetch constant 0 (type {}, size "
+          "{} dwords): inferring the rectangle from destination extents {}x{}",
+          uint32_t(fetch.type), uint32_t(fetch.size), x1, y1);
+    });
+  }
 
   auto pa_sc_window_offset = regs.Get<reg::PA_SC_WINDOW_OFFSET>();
 
@@ -1331,6 +1437,15 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
   y1 = std::clamp(y1, int32_t(scissor.offset[1]), scissor_bottom);
 
   assert_true(x0 <= x1 && y0 <= y1);
+
+  // An inferred block surface may end halfway through an 8-pixel resolve
+  // group. Retain its covered end so dispatch padding cannot overwrite the
+  // next block. Vertex-buffer resolves keep the usual 8-pixel expansion.
+  int32_t inferred_x1 = x1;
+  int32_t inferred_y1 = y1;
+  if (inferred_rectangle && (x0 >= x1 || y0 >= y1)) {
+    return true;
+  }
 
   // Direct3D 9's D3DDevice_Resolve internally rounds the right/bottom of the
   // rectangle internally to 8. While all the alignment should have already been
@@ -1383,6 +1498,13 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
     info_out.coordinate_info.width_div_8 = 0;
     info_out.height_div_8 = 0;
     return true;
+  }
+
+  if (is_convert_to_1111) {
+    int32_t copy_x1 = inferred_rectangle ? std::min(inferred_x1, x1) : x1;
+    int32_t copy_y1 = inferred_rectangle ? std::min(inferred_y1, y1) : y1;
+    info_out.copy_width_blocks = uint32_t((copy_x1 + 3) / 4 - x0 / 4);
+    info_out.copy_height_blocks = uint32_t((copy_y1 + 3) / 4 - y0 / 4);
   }
 
   info_out.coordinate_info.width_div_8 =
@@ -1540,9 +1662,11 @@ bool GetResolveInfo(const RegisterFile& regs, const Memory& memory,
       dest_addr_x0 += dest_macro_phase << xenos::kTextureTileWidthHeightLog2;
     }
     uint32_t dest_addr_x1 =
-        dest_addr_x0 + (uint32_t(x1 - x0) >> dest_block_size_log2);
+        dest_addr_x0 +
+        (is_convert_to_1111 ? info_out.copy_width_blocks : uint32_t(x1 - x0));
     uint32_t dest_addr_y1 =
-        dest_addr_y0 + (uint32_t(y1 - y0) >> dest_block_size_log2);
+        dest_addr_y0 +
+        (is_convert_to_1111 ? info_out.copy_height_blocks : uint32_t(y1 - y0));
     copy_dest_base_adjusted = dest_addr_base;
     // Keep the shader offsets in pixels / 8, not blocks / 8.
     info_out.copy_dest_coordinate_info.offset_x_div_8 =
@@ -1801,6 +1925,8 @@ ResolveCopyShaderIndex ResolveInfo::GetCopyShader(
   constants_out.copy_func = rb_copy_func;
   constants_out.copy_ref = rb_copy_ref;
   constants_out.copy_mask = rb_copy_mask;
+  constants_out.copy_size_blocks =
+      copy_width_blocks | (copy_height_blocks << 16);
 
   if (shader != ResolveCopyShaderIndex::kUnknown) {
     uint32_t width =

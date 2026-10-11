@@ -439,6 +439,8 @@ class D3D12CommandProcessor final : public CommandProcessor {
   // as when there are unfinished graphics pipeline creation requests that would
   // need to be fulfilled before actually submitting the command list.
   bool CanEndSubmissionImmediately() const;
+  // Waiting may close the current submission. Call BeginSubmission before
+  // recording any more commands after this returns.
   bool AwaitAllQueueOperationsCompletion() {
     CheckSubmissionCompletion(GetCurrentSubmission());
     return GetCompletedSubmission() + 1u >= GetCurrentSubmission();

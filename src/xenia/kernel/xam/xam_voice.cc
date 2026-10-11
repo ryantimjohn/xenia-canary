@@ -8,6 +8,7 @@
  */
 
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/nui_log.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/xbox.h"
 
@@ -48,6 +49,76 @@ dword_result_t XamVoiceGetMicArrayStatus_entry() {
   return 0;
 }
 DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayStatus, kNone, kStub);
+
+// The microphone array is the Kinect's four-element mic. None of it is
+// emulated, so the array never has audio to hand over and the control calls
+// quietly succeed. The arguments are logged for the same reason the rest of
+// the NUI surface is: to see what a title actually asks for.
+dword_result_t XamVoiceSetMicArrayIdleUsers_entry(dword_t user_mask) {
+  LogNuiCall("NUI: XamVoiceSetMicArrayIdleUsers({:08X})", user_mask.value());
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceSetMicArrayIdleUsers, kNone, kStub);
+
+dword_result_t XamVoiceMuteMicArray_entry(dword_t mute) {
+  LogNuiCall("NUI: XamVoiceMuteMicArray({})", mute.value());
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceMuteMicArray, kNone, kStub);
+
+dword_result_t XamVoiceDisableMicArray_entry(dword_t disable) {
+  LogNuiCall("NUI: XamVoiceDisableMicArray({})", disable.value());
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceDisableMicArray, kNone, kStub);
+
+dword_result_t XamVoiceSetMicArrayBeamAngle_entry(dword_t angle) {
+  LogNuiCall("NUI: XamVoiceSetMicArrayBeamAngle({})", angle.value());
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceSetMicArrayBeamAngle, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayUnderrunStatus_entry() {
+  LogNuiCall("NUI: XamVoiceGetMicArrayUnderrunStatus()");
+  return 0;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayUnderrunStatus, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayAudio_entry(lpvoid_t buffer_ptr,
+                                              dword_t buffer_size,
+                                              lpdword_t bytes_read_ptr) {
+  LogNuiCall("NUI: XamVoiceGetMicArrayAudio({:08X}, {}, {:08X})",
+             buffer_ptr.guest_address(), buffer_size.value(),
+             bytes_read_ptr.guest_address());
+  return X_ERROR_DEVICE_NOT_CONNECTED;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayAudio, kNone, kStub);
+
+dword_result_t XamVoiceGetMicArrayAudioEx_entry(lpvoid_t buffer_ptr,
+                                                dword_t buffer_size,
+                                                lpdword_t bytes_read_ptr,
+                                                dword_t flags) {
+  LogNuiCall("NUI: XamVoiceGetMicArrayAudioEx({:08X}, {}, {:08X}, {:08X})",
+             buffer_ptr.guest_address(), buffer_size.value(),
+             bytes_read_ptr.guest_address(), flags.value());
+  return X_ERROR_DEVICE_NOT_CONNECTED;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetMicArrayAudioEx, kNone, kStub);
+
+dword_result_t XamVoiceSetAudioCaptureRoutine_entry(lpvoid_t routine_ptr,
+                                                    lpvoid_t context_ptr) {
+  LogNuiCall("NUI: XamVoiceSetAudioCaptureRoutine({:08X}, {:08X})",
+             routine_ptr.guest_address(), context_ptr.guest_address());
+  return X_ERROR_DEVICE_NOT_CONNECTED;
+}
+DECLARE_XAM_EXPORT1(XamVoiceSetAudioCaptureRoutine, kNone, kStub);
+
+dword_result_t XamVoiceGetDirectionalData_entry(lpvoid_t data_ptr) {
+  LogNuiCall("NUI: XamVoiceGetDirectionalData({:08X})",
+             data_ptr.guest_address());
+  return X_ERROR_DEVICE_NOT_CONNECTED;
+}
+DECLARE_XAM_EXPORT1(XamVoiceGetDirectionalData, kNone, kStub);
 
 }  // namespace xam
 }  // namespace kernel

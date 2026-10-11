@@ -245,6 +245,26 @@ X_STATUS ObjectTable::RemoveHandle(X_HANDLE handle) {
   return X_STATUS_SUCCESS;
 }
 
+int32_t ObjectTable::GetHandleRefCount(X_HANDLE handle, const XObject* object) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  const ObjectTableEntry* entry = LookupTableInLock(handle);
+  if (!entry || !object || entry->object != object) {
+    return 0;
+  }
+  return entry->handle_ref_count;
+}
+
+X_STATUS ObjectTable::ReleaseHandleOf(X_HANDLE handle, const XObject* object) {
+  auto global_lock = global_critical_region_.Acquire();
+
+  const ObjectTableEntry* entry = LookupTableInLock(handle);
+  if (!entry || !object || entry->object != object) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+  return ReleaseHandleInLock(handle);
+}
+
 std::vector<object_ref<XObject>> ObjectTable::GetAllObjects() {
   auto lock = global_critical_region_.Acquire();
   std::vector<object_ref<XObject>> results;

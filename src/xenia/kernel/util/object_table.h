@@ -41,6 +41,14 @@ class ObjectTable {
   X_STATUS ReleaseHandleInLock(X_HANDLE handle);
   X_STATUS RemoveHandle(X_HANDLE handle);
 
+  // The references a handle holds while it names object, or 0 when it does
+  // not name that object.
+  int32_t GetHandleRefCount(X_HANDLE handle, const XObject* object);
+  // ReleaseHandle for a handle that is only released while it still names
+  // object. Code that runs between looking a handle up and releasing it can
+  // free the handle, and a freed slot is given to the next object added.
+  X_STATUS ReleaseHandleOf(X_HANDLE handle, const XObject* object);
+
   bool Save(ByteStream* stream);
   bool Restore(ByteStream* stream);
 

@@ -7,6 +7,13 @@
  ******************************************************************************
  */
 
+#include <algorithm>
+#include <cstdio>
+#include <span>
+#include <string>
+#include <vector>
+
+#include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/base/string_util.h"
@@ -15,6 +22,8 @@
 #include "xenia/kernel/smc.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/content_root_name.h"
+#include "xenia/kernel/xam/nui_log.h"
 #include "xenia/kernel/xam/xam_content_device.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_private.h"
@@ -24,6 +33,8 @@
 #include "xenia/ui/imgui_dialog.h"
 #include "xenia/ui/imgui_drawer.h"
 #include "xenia/vfs/devices/stfs_xbox.h"
+#include "xenia/vfs/entry.h"
+#include "xenia/vfs/file.h"
 #include "xenia/xbox.h"
 
 DEFINE_int32(
@@ -484,14 +495,157 @@ dword_result_t XamContentCreateInternal_entry(
 }
 DECLARE_XAM_EXPORT1(XamContentCreateInternal, kContent, kImplemented);
 
+namespace {
+
+// A guest string as two hex digits per byte. Used to report a root name that
+// was refused: the name is the guest's and may hold separators, control
+// characters or anything else, and a log line is not the place to reproduce
+// it as it stands.
+std::string HexEscapeRootName(const std::string_view name) {
+  std::string escaped;
+  escaped.reserve(name.size() * 2);
+  for (const char c : name) {
+    escaped += fmt::format("{:02X}", static_cast<uint8_t>(c));
+  }
+  return escaped;
+}
+
+// Copies a file that lives in the guest file system, such as a package on the
+// game disc, to a host file. The content manager mounts packages from host
+// files only, so a guest package has to be staged this way before it can be
+// mounted.
+bool CopyGuestFileToHost(vfs::Entry* entry,
+                         const std::filesystem::path& host_path) {
+  vfs::File* file = nullptr;
+  if (XFAILED(entry->Open(vfs::FileAccess::kGenericRead, &file))) {
+    return false;
+  }
+
+  bool ok = xe::filesystem::CreateParentFolder(host_path);
+  FILE* out = ok ? xe::filesystem::OpenFile(host_path, "wb") : nullptr;
+  ok = out != nullptr;
+  if (ok) {
+    std::vector<uint8_t> chunk(1 << 20);
+    size_t offset = 0;
+    while (ok && offset < entry->size()) {
+      const size_t wanted = std::min(chunk.size(), entry->size() - offset);
+      size_t bytes_read = 0;
+      if (XFAILED(file->ReadSync(std::span<uint8_t>(chunk.data(), wanted),
+                                 offset, &bytes_read)) ||
+          !bytes_read) {
+        ok = false;
+        break;
+      }
+      ok = fwrite(chunk.data(), 1, bytes_read, out) == bytes_read;
+      offset += bytes_read;
+    }
+    fclose(out);
+  }
+  file->Destroy();
+  return ok;
+}
+
+// Mounts the content package file at a guest path under root_name, the way
+// XamContentCreate mounts a package from the content directory. Kinect titles
+// use this for the skeletal tracking and identity databases on their disc.
+// Every failure is reported as X_ERROR_FILE_NOT_FOUND, the code every title
+// used to get from the stub this replaces, so a title that handles that code
+// keeps behaving as before; the real reason goes to the log.
+X_RESULT xeXamContentOpenFile(const std::string_view root_name,
+                              const std::string_view path,
+                              lpdword_t disposition_ptr,
+                              lpdword_t license_mask_ptr) {
+  if (root_name.empty() || path.empty()) {
+    XELOGW("XamContentOpenFile: missing root name or path");
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+  auto* content_manager = kernel_state()->content_manager();
+  if (content_manager->IsContentOpen(root_name)) {
+    XELOGW("XamContentOpenFile: root {} is already in use", root_name);
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  // A path that does not resolve is the ordinary not-found case (titles try
+  // an update:\ path before the game:\ one), so it is not worth a warning; the
+  // NUI trace line shows it. The resolve itself is asked to stay quiet for the
+  // same reason: no update device is mounted on a launch without a title
+  // update, and its own Error line would report an expected miss as a fault.
+  auto* entry = kernel_state()->file_system()->ResolvePath(
+      path, /*log_missing_device=*/false);
+  if (!entry || (entry->attributes() & vfs::kFileAttributeDirectory)) {
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  // The root name becomes a directory name under the cache root, so a guest
+  // that passes "..", a separator or a drive letter would have the copy below
+  // truncate a host file of its choosing. Refuse it before the path is built,
+  // and answer as if the content were simply not there. The name is logged
+  // hex-escaped so that the log line cannot carry a path of its own.
+  if (!IsSafeContentRootName(root_name)) {
+    XELOGW("XamContentOpenFile: refusing unsafe root name {}",
+           HexEscapeRootName(root_name));
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  // The copy is refreshed on every open. That costs a few milliseconds next to
+  // the package parsing that follows and cannot serve a stale copy after a
+  // title update replaces the file.
+  const std::filesystem::path host_path =
+      kernel_state()->emulator()->cache_root() / "content_files" /
+      fmt::format("{:08X}", kernel_state()->title_id()) /
+      std::string(root_name) / entry->name();
+  if (!CopyGuestFileToHost(entry, host_path)) {
+    XELOGW("XamContentOpenFile: could not stage {} at {}", path,
+           xe::path_to_utf8(host_path));
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  auto* package = content_manager->OpenAndMountPackage(host_path, root_name);
+  if (!package) {
+    XELOGW("XamContentOpenFile: {} is not a package that can be mounted as {}",
+           path, root_name);
+    return X_ERROR_FILE_NOT_FOUND;
+  }
+
+  if (disposition_ptr) {
+    *disposition_ptr = static_cast<uint32_t>(kDispositionState::Open);
+  }
+  if (license_mask_ptr) {
+    *license_mask_ptr = package->GetPackageLicense();
+  }
+  return X_ERROR_SUCCESS;
+}
+
+}  // namespace
+
 dword_result_t XamContentOpenFile_entry(
     dword_t user_index, lpstring_t root_name, lpstring_t path, dword_t flags,
     lpdword_t disposition_ptr, lpdword_t license_mask_ptr,
     pointer_t<XAM_OVERLAPPED> overlapped_ptr) {
-  // TODO(gibbed): arguments assumed based on XamContentCreate.
-  return X_ERROR_FILE_NOT_FOUND;
+  const std::string root_name_str = root_name ? root_name.value() : "";
+  const std::string path_str = path ? path.value() : "";
+
+  // The flags carry a Win32-style creation disposition in their low nibble;
+  // only opening an existing package is supported, which is what titles do.
+  const X_RESULT result = xeXamContentOpenFile(
+      root_name_str, path_str, disposition_ptr, license_mask_ptr);
+
+  // Kinect titles load their tracking and identity databases through here, so
+  // the call belongs in a NUI trace and is gated on the same cvar. It is not
+  // a NUI message, though, and every title's content opens would otherwise
+  // read as NUI traffic, so it carries its own name rather than the "NUI: "
+  // prefix Global Constraint 8 reserves for NUI messages.
+  LogNuiCall("XamContentOpenFile: ({}, {}, {}, {:08X}) = {:08X}",
+             user_index.value(), root_name_str, path_str, flags.value(),
+             result);
+
+  if (overlapped_ptr) {
+    kernel_state()->CompleteOverlappedImmediate(overlapped_ptr, result);
+    return X_ERROR_IO_PENDING;
+  }
+  return result;
 }
-DECLARE_XAM_EXPORT1(XamContentOpenFile, kContent, kStub);
+DECLARE_XAM_EXPORT1(XamContentOpenFile, kContent, kImplemented);
 
 dword_result_t XamContentFlush_entry(lpstring_t root_name,
                                      pointer_t<XAM_OVERLAPPED> overlapped_ptr) {

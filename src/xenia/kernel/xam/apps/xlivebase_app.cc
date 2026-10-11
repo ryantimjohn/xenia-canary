@@ -10,6 +10,11 @@
 #include "xenia/kernel/xam/apps/xlivebase_app.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/kernel/util/guest_range.h"
+#include "xenia/kernel/xam/apps/xlivebase_messages.h"
+#include "xenia/kernel/xam/xam_state.h"
+#include "xenia/memory.h"
+#include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
@@ -71,6 +76,11 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
              buffer_length);
       return 0x80151802;  // X_ONLINE_E_LOGON_NOT_LOGGED_ON
     }
+    case 0x0005800E: {
+      // XUserMuteListQuery. The second argument is the address of the
+      // caller's BOOL, not a length.
+      return UserMuteListQuery(buffer_ptr, buffer_length);
+    }
     case 0x00058020: {
       // 0x00058004 is called right before this.
       // We should create a XamEnumerate-able empty list here, but I'm not
@@ -105,6 +115,38 @@ X_HRESULT XLiveBaseApp::DispatchMessageSync(uint32_t message,
       "arg2={:08X}",
       app_id(), message, buffer_ptr, buffer_length);
   return X_E_FAIL;
+}
+
+X_HRESULT XLiveBaseApp::UserMuteListQuery(uint32_t buffer_ptr,
+                                          uint32_t on_mute_list_ptr) {
+  // Xenia keeps no mute list, so nobody is on it. 4D5308ED' voice
+  // code asks about each talker in its table for each signed-in user, many
+  // times a second for as long as a profile is signed in, and reads only the
+  // BOOL: FALSE leaves the talker audible. Its XLive library drops the
+  // message's own result and returns the buffer's, which none of its three
+  // callers looks at.
+  if (!util::IsGuestRangeWritable(memory_, buffer_ptr,
+                                  sizeof(X_USER_MUTE_LIST_QUERY)) ||
+      !util::IsGuestRangeWritable(memory_, on_mute_list_ptr,
+                                  sizeof(uint32_t))) {
+    XELOGD("XUserMuteListQuery({:08X}, {:08X}): not a writable request",
+           buffer_ptr, on_mute_list_ptr);
+    return X_E_INVALIDARG;
+  }
+  auto* query = memory_->TranslateVirtual<X_USER_MUTE_LIST_QUERY*>(buffer_ptr);
+  const uint32_t user_index = query->user_index;
+  const UserMuteListAnswer answer =
+      AnswerUserMuteListQuery(user_index, [this](uint32_t index) {
+        return kernel_state_->xam_state()->IsUserSignedIn(index);
+      });
+  if (answer.on_mute_list) {
+    xe::store_and_swap<uint32_t>(memory_->TranslateVirtual(on_mute_list_ptr),
+                                 *answer.on_mute_list);
+  }
+  query->result = answer.result;
+  XELOGD("XUserMuteListQuery({}, {:016X}, {:08X}) = {:08X}", user_index,
+         query->remote_xuid.get(), on_mute_list_ptr, answer.result);
+  return X_E_SUCCESS;
 }
 
 }  // namespace apps

@@ -10,6 +10,7 @@
 #include "xenia/apu/audio_media_player.h"
 #include "xenia/apu/audio_driver.h"
 #include "xenia/apu/audio_system.h"
+#include "xenia/apu/pacing_audio_driver.h"
 #include "xenia/apu/xma_context.h"
 #include "xenia/base/logging.h"
 
@@ -537,18 +538,22 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
     return false;
   }
 
-  driver_ = std::unique_ptr<AudioDriver>(audio_system_->CreateDriver(
-      driver_semaphore_.get(), sample_rate, channels, false));
+  // A title playing its music while the host's audio device is down keeps
+  // running on a pacing driver, as the audio system's clients do.
+  bool driver_is_fallback = false;
+  driver_ = InitializeDriverOrPace(
+      std::unique_ptr<AudioDriver>(audio_system_->CreateDriver(
+          driver_semaphore_.get(), sample_rate, channels, false)),
+      driver_semaphore_.get(), sample_rate, channels, &driver_is_fallback);
   if (!driver_) {
     driver_semaphore_.reset();
     return false;
   }
-
-  if (!driver_->Initialize()) {
-    driver_semaphore_.reset();
-    driver_->Shutdown();
-    driver_.reset();
-    return false;
+  if (driver_is_fallback) {
+    XELOGW(
+        "APU: {} could not create a driver for the media player (the host's "
+        "audio device is unavailable); pacing its music silently instead",
+        audio_system_->name());
   }
 
   return true;
@@ -557,11 +562,14 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
 void AudioMediaPlayer::DeleteDriver() {
   std::unique_lock<xe_mutex> guard(driver_mutex_);
   if (driver_) {
+    // Shut the driver down while its semaphore still exists: until Shutdown
+    // returns, its voice or thread may release a count.
+    driver_->Shutdown();
+
     if (driver_semaphore_) {
       driver_semaphore_.reset();
     }
 
-    driver_->Shutdown();
     driver_.reset();
   }
 }

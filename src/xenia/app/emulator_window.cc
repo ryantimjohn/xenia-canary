@@ -22,6 +22,7 @@
 
 #include "xenia/app/console_settings_dialog.h"
 #include "xenia/app/content_list_dialog.h"
+#include "xenia/app/nui_app_helpers.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -36,10 +37,13 @@
 #include "xenia/gpu/command_processor.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/hid/input_system.h"
+#include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/nui_state.h"
 #include "xenia/kernel/xam/profile_manager.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/xam_state.h"
 #include "xenia/kernel/xconfig.h"
+#include "xenia/nui/nui_flags.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/graphics_provider.h"
 #include "xenia/ui/imgui_dialog.h"
@@ -211,6 +215,11 @@ std::unique_ptr<EmulatorWindow> EmulatorWindow::Create(
 }
 
 EmulatorWindow::~EmulatorWindow() {
+  // The guide's observer calls back into this window, which is going away
+  // before the kernel does.
+  if (kernel::xam::NuiState* nui_state = GetNuiState(emulator_)) {
+    nui_state->SetGuideObserver(nullptr);
+  }
   // Notify the ImGui drawer that the immediate drawer is being destroyed.
   ShutdownGraphicsSystemPresenterPainting();
 }
@@ -248,6 +257,11 @@ void EmulatorWindow::SetupGraphicsSystemPresenterPainting() {
 }
 
 void EmulatorWindow::ShutdownGraphicsSystemPresenterPainting() {
+  // The preview's textures belong to the immediate drawer that is about to go
+  // away, so they have to go first.
+  if (nui_depth_preview_dialog_) {
+    nui_depth_preview_dialog_->ReleaseTextures();
+  }
   Profiler::SetUserIO(kZOrderProfiler, window_.get(), nullptr, nullptr);
   imgui_drawer_->SetPresenterAndImmediateDrawer(nullptr, nullptr);
   immediate_drawer_.reset();
@@ -263,6 +277,17 @@ void EmulatorWindow::OnEmulatorInitialized() {
            ->GetAccountCount()) {
     new NoProfileDialog(imgui_drawer_.get(), this);
     disable_hotkeys_ = true;
+  }
+
+  EnsureNuiDepthPreviewDialog();
+
+  // The guide opens and closes on a guest thread or from its own overlay's
+  // draw, so the overlay is put up or taken down later, from the UI thread's
+  // queue: never in the middle of the overlay's own draw.
+  if (kernel::xam::NuiState* nui_state = GetNuiState(emulator_)) {
+    nui_state->SetGuideObserver([this](bool) {
+      app_context_.CallInUIThreadDeferred([this]() { UpdateNuiGuideDialog(); });
+    });
   }
 
   emulator_initialized_ = true;
@@ -1083,8 +1108,12 @@ void EmulatorWindow::OnKeyDown(ui::KeyEvent& e) {
     } break;
 
     case ui::VirtualKey::kEscape: {
-      // Allow users to escape fullscreen (but not enter it).
-      if (!window_->IsFullscreen()) {
+      // Allow users to escape fullscreen (but not enter it). While the Kinect
+      // Guide's overlay is up, Escape is the key that closes the guide, so the
+      // window neither leaves fullscreen nor consumes the key, and the press
+      // goes on to the overlay. The next Escape, with the guide gone, leaves
+      // fullscreen as usual.
+      if (!window_->IsFullscreen() || nui_guide_dialog_) {
         return;
       }
       SetFullscreen(false);
@@ -2473,7 +2502,36 @@ void EmulatorWindow::ClearDialogs() {
   }
 
   imgui_drawer_.get()->ClearDialogs();
+  // That unregistered every dialog, the depth preview included. The preview is
+  // meant to stay up for the whole session rather than vanish the first time a
+  // title launches, so it goes back up here.
+  EnsureNuiDepthPreviewDialog();
+  // The guide's overlay went too; it comes back only if the guide is up.
+  nui_guide_dialog_.reset();
+  UpdateNuiGuideDialog();
   emulator_->kernel_state()->xam_state()->is_xam_dialog_present_.store(false);
+}
+
+void EmulatorWindow::EnsureNuiDepthPreviewDialog() {
+  if (!cvars::nui_show_depth_preview) {
+    return;
+  }
+  // Dropping the old overlay before building the new one keeps exactly one of
+  // them registered with the drawer at a time.
+  nui_depth_preview_dialog_.reset();
+  nui_depth_preview_dialog_ =
+      std::make_unique<NuiDepthPreviewDialog>(imgui_drawer_.get(), emulator_);
+}
+
+void EmulatorWindow::UpdateNuiGuideDialog() {
+  kernel::xam::NuiState* nui_state = GetNuiState(emulator_);
+  const bool guide_open = nui_state && nui_state->guide_open();
+  if (guide_open && !nui_guide_dialog_) {
+    nui_guide_dialog_ =
+        std::make_unique<NuiGuideDialog>(imgui_drawer_.get(), emulator_);
+  } else if (!guide_open && nui_guide_dialog_) {
+    nui_guide_dialog_.reset();
+  }
 }
 
 }  // namespace app

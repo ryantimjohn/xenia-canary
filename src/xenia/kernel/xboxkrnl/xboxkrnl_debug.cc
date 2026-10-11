@@ -190,6 +190,29 @@ DECLARE_XBOXKRNL_EXPORT2(KeBugCheckEx, kDebug, kStub, kImportant);
 void KeBugCheck_entry(dword_t code) { KeBugCheckEx_entry(code, 0, 0, 0, 0); }
 DECLARE_XBOXKRNL_EXPORT2(KeBugCheck, kDebug, kImplemented, kImportant);
 
+// Etx is the kernel's event tracing: a producer registers a provider id and a
+// description of its events, and logs only what a consumer has enabled in the
+// registration block it hands over. Xenia has no consumers, so nothing is
+// ever enabled. The Kinect NUI runtime registers from NuiInitializeInternal
+// (0x82d26510, the call at 0x82d26630) with a 16-byte provider id, its
+// description, 3, 0 and 64 - the size of the block it passes last, which it
+// has just zeroed - and ignores the result. Its logging helper (0x82d27410)
+// tests the enabled mask at +8 of that block before every EtxProducerLog, so
+// leaving the block alone registers the producer with nothing enabled - the
+// state of a producer nobody listens to - and the answer is success.
+dword_result_t EtxProducerRegister_entry(lpvoid_t provider_id_ptr,
+                                         lpvoid_t description_ptr, dword_t unk3,
+                                         dword_t unk4,
+                                         dword_t registration_length,
+                                         lpvoid_t registration_ptr) {
+  XELOGD("EtxProducerRegister({:08X}, {:08X}, {}, {}, {}, {:08X})",
+         provider_id_ptr.guest_address(), description_ptr.guest_address(),
+         unk3.value(), unk4.value(), registration_length.value(),
+         registration_ptr.guest_address());
+  return X_STATUS_SUCCESS;
+}
+DECLARE_XBOXKRNL_EXPORT1(EtxProducerRegister, kDebug, kStub);
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe

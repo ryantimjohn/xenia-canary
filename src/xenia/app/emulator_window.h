@@ -13,6 +13,8 @@
 #include <memory>
 #include <string>
 
+#include "xenia/app/nui_depth_preview_dialog.h"
+#include "xenia/app/nui_guide_dialog.h"
 #include "xenia/app/profile_dialogs.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/command_processor.h"
@@ -303,6 +305,14 @@ class EmulatorWindow {
                                 std::string title_name);
 
   void ClearDialogs();
+  // Puts the depth preview overlay up, when the cvar asks for one. Called both
+  // when the emulator comes up and after every ClearDialogs(), which
+  // unregisters it along with everything else.
+  void EnsureNuiDepthPreviewDialog();
+  // Puts the Kinect Guide overlay up while xam's guide is open and takes it
+  // down while it is closed. Runs on the UI thread whenever the guide opens or
+  // closes, and after every ClearDialogs().
+  void UpdateNuiGuideDialog();
 
   Emulator* emulator_;
   ui::WindowedAppContext& app_context_;
@@ -328,6 +338,12 @@ class EmulatorWindow {
   std::unique_ptr<ProfileConfigDialog> profile_config_dialog_;
 
   std::unique_ptr<XMPConfigDialog> xmp_config_dialog_;
+
+  // Only created when the nui_show_depth_preview cvar asks for it.
+  std::unique_ptr<NuiDepthPreviewDialog> nui_depth_preview_dialog_;
+
+  // Only exists while xam's Kinect Guide is open.
+  std::unique_ptr<NuiGuideDialog> nui_guide_dialog_;
 
   std::vector<RecentTitleEntry> recently_launched_titles_;
 };

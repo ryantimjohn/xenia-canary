@@ -8,54 +8,88 @@
  */
 
 #include "xenia/kernel/nui.h"
+
 #include "xenia/base/assert.h"
 #include "xenia/kernel/kernel_state.h"
+#include "xenia/kernel/xam/nui_state.h"
+#include "xenia/kernel/xam/xam_state.h"
 #include "xenia/xbox.h"
 
 namespace xe {
 namespace kernel {
-NUIController::NUIController() {};
+
+NUIController::NUIController(KernelState* kernel_state)
+    : kernel_state_(kernel_state) {}
+
 bool NUIController::NuiInitialized() {
-  // TODO(boma): Proper device readiness.
-  return (KernelState::shared()->xconfig()->ReadSetting<uint32_t>(
-              X_CONFIG_CATEGORY::XCONFIG_USER_CATEGORY,
-              XCONFIG_USER_RETAIL_FLAGS) &
-          X_RETAIL_FLAGS::KinectInitialized) != 0;
+  return kernel_state_->xam_state()->nui_state()->IsDevicePresent();
 }
-uint32_t NUIController::GetNUIDataPtr() { return nui_data_ptr; }
-char NUIController::GetUnknown2() { return nui_unknown_2; }
+
+uint32_t NUIController::GetNUIDataPtr() {
+  // This API has always returned a presence sentinel, not guest memory.
+  return kernel_state_->xam_state()->nui_state()->hud_enabled() ? 1 : 0;
+}
+
+char NUIController::GetUnknown2() { return GetNUIDataPtr() ? 1 : 0; }
+
 void NUIController::SetTiltCallback(uint32_t callback) {
-  tilt_callback_ = callback;
+  kernel_state_->xam_state()->nui_state()->runtime_state().SetTiltCallback(
+      callback);
 }
+
 void NUIController::SetEngagedTrackingId(uint32_t tracking_id) {
-  engaged_tracking_id = tracking_id;
+  kernel_state_->xam_state()->nui_state()->set_engaged_tracking_id(tracking_id);
 }
-uint32_t NUIController::GetEngagedTrackingId() { return engaged_tracking_id; }
-uint32_t NUIController::GetInitFlags() { return init_flags_; }
-void NUIController::SetInitFlags(uint32_t flags) { init_flags_ = flags; }
+
+uint32_t NUIController::GetEngagedTrackingId() {
+  return kernel_state_->xam_state()->nui_state()->engaged_tracking_id();
+}
+
+uint32_t NUIController::GetInitFlags() {
+  return kernel_state_->xam_state()->nui_state()->hud_init_flags();
+}
+
+void NUIController::SetInitFlags(uint32_t flags) {
+  kernel_state_->xam_state()->nui_state()->runtime_state().SetFlags(flags);
+}
+
 uint64_t NUIController::GetNUIVersion(uint32_t index) {
   if (index > 1) {
-    // You set index out of bounds
     assert_always();
     return 0;
   }
-  return nui_versions_[index];
+  const auto state =
+      kernel_state_->xam_state()->nui_state()->runtime_state().snapshot();
+  return index == 0 ? state.xam_version : state.xtl_version;
 }
+
 void NUIController::SetNUIVersion(uint64_t version, uint32_t index) {
-  nui_versions_[index] = version;
+  if (index > 1) {
+    assert_always();
+    return;
+  }
+  kernel_state_->xam_state()->nui_state()->runtime_state().SetVersion(version,
+                                                                      index);
 }
-uint64_t NUIController::GetSessionId() { return session_id; }
-void NUIController::SetSessionId(uint64_t id) { session_id = id; }
+
+uint64_t NUIController::GetSessionId() {
+  const auto state =
+      kernel_state_->xam_state()->nui_state()->runtime_state().snapshot();
+  return state.session_id;
+}
+
+void NUIController::SetSessionId(uint64_t id) {
+  kernel_state_->xam_state()->nui_state()->runtime_state().SetSessionId(id);
+}
 
 uint32_t NUIController::NuiHudCheck(uint64_t tracking_id) {
-  if (!GetNUIDataPtr() || !GetUnknown2() || !NuiInitialized()) {
+  auto* state = kernel_state_->xam_state()->nui_state();
+  if (!state->IsDevicePresent() || !state->runtime_state().EngageTrackingId(
+                                       static_cast<uint32_t>(tracking_id))) {
     return X_ERROR_ACCESS_DENIED;
   }
-  if (tracking_id) {
-    SetEngagedTrackingId(tracking_id);
-  };
   return X_ERROR_SUCCESS;
-};
+}
 
 }  // namespace kernel
 }  // namespace xe

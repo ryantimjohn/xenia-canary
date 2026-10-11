@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/xam/xam_state.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/xam/nui_state.h"
 
 namespace xe {
 namespace kernel {
@@ -16,6 +17,10 @@ namespace xam {
 
 XamState::XamState(Emulator* emulator, KernelState* kernel_state)
     : kernel_state_(kernel_state) {
+  // The NUI state has to exist before the apps are registered, because the xam
+  // app routes its Kinect messages straight at it.
+  nui_state_ = std::make_unique<NuiState>(kernel_state);
+
   app_manager_ = std::make_unique<AppManager>();
 
   auto content_root = emulator->content_root();
@@ -36,6 +41,8 @@ XamState::XamState(Emulator* emulator, KernelState* kernel_state)
 
   AppManager::RegisterApps(kernel_state, app_manager_.get());
 }
+
+XamState::~XamState() = default;
 
 void XamState::LoadLanguageLocaleFallback() {
   const std::array<std::u16string, 18> locale_data = {

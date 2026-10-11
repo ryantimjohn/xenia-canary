@@ -17,6 +17,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/user_module.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/nui_state.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_memory.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_module.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_ob.h"
@@ -66,7 +67,7 @@ KernelState::KernelState(Emulator* emulator)
   smc_ = std::make_unique<SystemManagementController>();
   xconfig_ =
       std::make_unique<XConfig>(emulator->storage_root() / "xconfig.settings");
-  nui_ = std::make_unique<NUIController>();
+  nui_ = std::make_unique<NUIController>(this);
 
   InitializeKernelGuestGlobals();
   kernel_version_ = KernelVersion(cvars::kernel_build_version);
@@ -895,6 +896,25 @@ void KernelState::TerminateTitle() {
   terminate_notifications_.clear();
   */
 
+  // The NUI frame feed is a host thread, so the loop below leaves it running,
+  // and what it runs are this title's own completion routines. It is quiesced
+  // here, before the loop, rather than after it: the loop steps each guest
+  // thread to a guest safe point and terminates it, which can leave a guest
+  // lock owned by a thread that no longer exists, and the wait for the feed
+  // has no timeout - a feed inside a completion routine that then blocks on
+  // such a lock would never come back. Stopping it while the title's threads
+  // are still alive lets a completion routine that is executing right now
+  // finish normally. From this point the camera refuses every new request and
+  // starts no feed, so a guest thread the loop has not reached yet cannot
+  // queue another frame or start a second feed behind us. The global lock is
+  // dropped around the call exactly as the loop below drops it to step a
+  // thread to a safe point, because the wait can be a wait on guest code.
+  if (xam_state_ && xam_state_->nui_state()) {
+    global_lock.unlock();
+    xam_state_->nui_state()->OnTitleTerminating();
+    global_lock.lock();
+  }
+
   // Kill all guest threads.
   for (auto it = threads_by_id_.begin(); it != threads_by_id_.end();) {
     if (!XThread::IsInThread(it->second) && it->second->is_guest_thread()) {
@@ -919,6 +939,21 @@ void KernelState::TerminateTitle() {
     } else {
       ++it;
     }
+  }
+
+  // The second half of the same quiesce. The feed is already stopped and
+  // joined; what is left is the state the title put into xam's NUI. The frame
+  // requests it never got back are dropped rather than completed, because a
+  // completion routine belongs to a thread the loop above has just killed and
+  // to a module that is about to be unloaded - which is also why this runs
+  // here and not after that unload. Everything else is put back the way a
+  // fresh process holds it, so the next title in this process configures the
+  // camera from scratch instead of inheriting this one's. The global lock is
+  // dropped around the call as it is above.
+  if (xam_state_ && xam_state_->nui_state()) {
+    global_lock.unlock();
+    xam_state_->nui_state()->OnTitleTerminated();
+    global_lock.lock();
   }
 
   // Third: Unload all user modules (including the executable).

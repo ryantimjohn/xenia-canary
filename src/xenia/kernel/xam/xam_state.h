@@ -33,10 +33,14 @@ namespace xe {
 namespace kernel {
 namespace xam {
 
+class NuiState;
+
 class XamState {
  public:
   XamState(Emulator* emulator, KernelState* kernel_state);
-  ~XamState() = default;
+  // Out of line so that nui_state.h, and with it the whole host NUI system,
+  // stays out of every translation unit that reaches KernelState.
+  ~XamState();
 
   AppManager* app_manager() const { return app_manager_.get(); }
   ContentManager* content_manager() const { return content_manager_.get(); }
@@ -44,6 +48,7 @@ class XamState {
     return achievement_manager_.get();
   }
   ProfileManager* profile_manager() const { return profile_manager_.get(); }
+  NuiState* nui_state() const { return nui_state_.get(); }
 
   UserTracker* user_tracker() const { return user_tracker_.get(); }
   SpaInfo* spa_info() const { return spa_info_.get(); }
@@ -83,6 +88,7 @@ class XamState {
 
   KernelState* kernel_state_;
 
+  std::unique_ptr<NuiState> nui_state_;
   std::unique_ptr<AppManager> app_manager_;
   std::unique_ptr<ContentManager> content_manager_;
   std::unique_ptr<UserTracker> user_tracker_;

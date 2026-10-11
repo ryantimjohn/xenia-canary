@@ -36,3 +36,8 @@ if(XENIA_BUILD_MISC)
   )
   xe_target_defaults(xenia-gpu-shader-compiler)
 endif()
+
+if(XENIA_BUILD_TESTS)
+  set(CMAKE_FOLDER "tests")
+  add_subdirectory(testing)
+endif()

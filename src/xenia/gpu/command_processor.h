@@ -56,6 +56,14 @@ void SaveGPUSetting(GPUSetting setting, uint64_t value);
 bool GetGPUSetting(GPUSetting setting);
 ReadbackResolveMode GetReadbackResolveMode();
 void SetReadbackResolveMode(const std::string& mode);
+
+// Like SaveGPUSetting and SetReadbackResolveMode, but for the running session
+// only: the value takes effect immediately and is never written to the user's
+// config, so a setting xenia raises by itself for one title does not follow
+// the user into the next one. Both replace a value given on the command line,
+// so call them only for a setting the user has not chosen.
+void SetGPUSettingForSession(GPUSetting setting, uint64_t value);
+void SetReadbackResolveModeForSession(const std::string& mode);
 ZPDMode GetZPDMode();
 void SetZPDMode(const std::string& mode);
 

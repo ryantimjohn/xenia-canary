@@ -1291,8 +1291,13 @@ bool PipelineCache::GetCurrentStateDescription(
               primitive_processing_result.host_vertex_shader_type);
   bool tessellated = primitive_processing_result.IsTessellated();
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
-  bool rasterization_enabled =
-      draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
+  // The same condition as in the command processor, which is what decided
+  // whether a pixel shader is passed here at all - a draw whose frame buffer
+  // export is suppressed is rasterized only for a pixel shader that writes to
+  // memory.
+  bool rasterization_enabled = draw_util::IsRasterizationPotentiallyDone(
+      regs, primitive_polygonal,
+      pixel_shader && pixel_shader->shader().memexport_eM_written() != 0);
   // In Direct3D, rasterization (along with pixel counting) is disabled by
   // disabling the pixel shader and depth / stencil. However, if rasterization
   // should be disabled, the pixel shader must be disabled externally, to ensure

@@ -2617,6 +2617,25 @@ Shader* D3D12CommandProcessor::LoadShader(xenos::ShaderType shader_type,
   return pipeline_cache_->LoadShader(shader_type, host_address, dword_count);
 }
 
+// Says why the backend refused a draw or a copy, once per distinct reason.
+// Most of those paths return false without a word, and the command processor's
+// own "Failed in backend" line carries no reason at all, so a title whose
+// draws are all rejected produces thousands of identical, uninformative lines.
+// One static per call site, because the reason is the site. #undef'ed after
+// the last use so it does not leak into the rest of this translation unit.
+//
+// The line opens with the same fixed "Draw refused by" phrase on the copy paths
+// as on the draw paths, so that a log can be grepped for every refused draw and
+// copy with one pattern.
+#define XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(reason)              \
+  do {                                                            \
+    static bool xe_refusal_reported = false;                      \
+    if (!xe_refusal_reported) {                                   \
+      xe_refusal_reported = true;                                 \
+      XELOGE("Draw refused by the Direct3D 12 backend: " reason); \
+    }                                                             \
+  } while (false)
+
 bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
                                       uint32_t index_count,
                                       IndexBufferInfo* index_buffer_info,
@@ -2653,37 +2672,61 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   auto vertex_shader = static_cast<D3D12Shader*>(active_vertex_shader());
   if (!vertex_shader) {
     // Always need a vertex shader.
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL("no vertex shader is bound");
     return false;
   }
   pipeline_cache_->AnalyzeShaderUcode(*vertex_shader);
 
   const bool memexport_used_vertex = vertex_shader->memexport_eM_written() != 0;
 
-  // Pixel shader analysis.
+  // Pixel shader analysis. The bound pixel shader has to be analyzed before it
+  // can be told whether the draw does anything at all, because a draw whose
+  // frame buffer export is suppressed is still rasterized for the sake of a
+  // pixel shader that writes to memory. The analysis is done once per shader
+  // and cached, so repeating it for every draw costs nothing.
   bool primitive_polygonal = draw_util::IsPrimitivePolygonal(regs);
-  bool is_rasterization_done =
-      draw_util::IsRasterizationPotentiallyDone(regs, primitive_polygonal);
+  auto bound_pixel_shader = static_cast<D3D12Shader*>(active_pixel_shader());
+  if (bound_pixel_shader) {
+    pipeline_cache_->AnalyzeShaderUcode(*bound_pixel_shader);
+  }
+  // The EDRAM mode is a part of this because the pixel shader is bound only
+  // for kColorDepth below - so in any other mode the shader cannot export
+  // anything, and claiming it can would make this disagree with the pipeline
+  // cache, which re-derives the same decision from the pixel shader it is
+  // handed. draw_util::IsRasterizationPotentiallyDone requires every caller to
+  // supply the same value.
+  bool memexport_used_bound_pixel =
+      !draw_util::IsVIZSurveyDraw(regs) && bound_pixel_shader &&
+      bound_pixel_shader->memexport_eM_written() != 0 &&
+      edram_mode == xenos::EdramMode::kColorDepth;
+  bool is_rasterization_done = draw_util::IsRasterizationPotentiallyDone(
+      regs, primitive_polygonal, memexport_used_bound_pixel);
   D3D12Shader* pixel_shader = nullptr;
   if (is_rasterization_done) {
     // See xenos::EdramMode for explanation why the pixel shader is only used
     // when it's kColorDepth here.
     if (edram_mode == xenos::EdramMode::kColorDepth) {
-      pixel_shader = static_cast<D3D12Shader*>(active_pixel_shader());
-      if (pixel_shader) {
-        pipeline_cache_->AnalyzeShaderUcode(*pixel_shader);
-        if (!draw_util::IsPixelShaderNeededWithRasterization(*pixel_shader,
-                                                             regs)) {
-          pixel_shader = nullptr;
-        }
+      pixel_shader = bound_pixel_shader;
+      if (pixel_shader && !draw_util::IsPixelShaderNeededWithRasterization(
+                              *pixel_shader, regs)) {
+        pixel_shader = nullptr;
       }
     }
-  } else {
-    // Disabling pixel shader for this case is also required by the pipeline
-    // cache.
-    if (!memexport_used_vertex) {
-      // This draw has no effect.
-      return true;
-    }
+  }
+  if (bound_pixel_shader && !pixel_shader) {
+    draw_util::ReportDroppedMemexportPixelShader(*bound_pixel_shader, regs);
+  } else if (pixel_shader && pixel_shader->memexport_eM_written() != 0) {
+    // The function checks this itself too, but this branch is taken by
+    // essentially every rasterized draw that binds a pixel shader, and almost
+    // none of them writes to memory - so keep the out-of-line call out of
+    // IssueDraw's hot path entirely.
+    draw_util::ReportKeptMemexportPixelShader(*pixel_shader, regs);
+  }
+  if (!is_rasterization_done && !memexport_used_vertex) {
+    // This draw has no effect - without rasterization the pixel shader can't
+    // run either, so it can write neither pixels nor memory. Leaving the pixel
+    // shader disabled in this case is also required by the pipeline cache.
+    return true;
   }
 
   const bool memexport_used_pixel =
@@ -2701,12 +2744,15 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   }
 
   if (!BeginSubmission(true)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL("the submission could not be started");
     return false;
   }
 
   // Process primitives.
   PrimitiveProcessor::ProcessingResult primitive_processing_result;
   if (!primitive_processor_->Process(primitive_processing_result)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+        "the primitive processor refused the primitive");
     return false;
   }
   if (!primitive_processing_result.host_draw_vertex_count) {
@@ -2777,6 +2823,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   if (!render_target_cache_->Update(
           is_rasterization_done, normalized_depth_control,
           normalized_color_mask, *vertex_shader, window_offset_tiles)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+        "the render target cache could not be updated");
     return false;
   }
 
@@ -2813,6 +2861,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           viz_survey, bound_depth_and_color_render_target_bits,
           bound_depth_and_color_render_target_formats, &pipeline_handle,
           &root_signature)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+        "the pipeline could not be configured");
     return false;
   }
 
@@ -2942,6 +2992,7 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
   // Update constant buffers, descriptors and root parameters.
   if (!UpdateBindings(vertex_shader, pixel_shader, root_signature,
                       memexport_used)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL("the bindings could not be updated");
     return false;
   }
   // Must not call anything that can change the descriptor heap from now on!
@@ -3164,6 +3215,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
           scratch_index_buffer = RequestScratchGPUBuffer(
               index_buffer_view.SizeInBytes, D3D12_RESOURCE_STATE_COPY_DEST);
           if (scratch_index_buffer == nullptr) {
+            XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+                "no scratch index buffer was available for a memexport draw");
             return false;
           }
           shared_memory_->UseAsCopySource();
@@ -3196,6 +3249,8 @@ bool D3D12CommandProcessor::IssueDraw(xenos::PrimitiveType primitive_type,
         break;
       default:
         assert_unhandled_case(primitive_processing_result.index_buffer_type);
+        XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+            "the processed index buffer type is not handled");
         return false;
     }
     deferred_command_list_.D3DIASetIndexBuffer(&index_buffer_view);
@@ -3310,14 +3365,22 @@ bool D3D12CommandProcessor::IssueCopy() {
   SCOPE_profile_cpu_f("gpu");
 #endif  // XE_GPU_FINE_GRAINED_DRAW_SCOPES
   if (!BeginSubmission(true)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+        "the submission could not be started for a copy");
     return false;
   }
   ReadbackResolveMode readback_mode = GetReadbackResolveMode();
   if (readback_mode == ReadbackResolveMode::kDisabled) {
     uint32_t written_address, written_length;
-    return render_target_cache_->Resolve(*memory_, *shared_memory_,
-                                         *texture_cache_, written_address,
-                                         written_length);
+    if (!render_target_cache_->Resolve(*memory_, *shared_memory_,
+                                       *texture_cache_, written_address,
+                                       written_length)) {
+      XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+          "the render target cache could not resolve a copy that is not read "
+          "back");
+      return false;
+    }
+    return true;
   } else {
     return IssueCopy_ReadbackResolvePath();
   }
@@ -3330,6 +3393,8 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   if (!render_target_cache_->Resolve(*memory_, *shared_memory_, *texture_cache_,
                                      written_address, written_length,
                                      &copy_dest_info, &is_scaled)) {
+    XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL(
+        "the render target cache could not resolve");
     return false;
   }
   if (!written_length) {
@@ -3613,6 +3678,7 @@ bool D3D12CommandProcessor::IssueCopy_ReadbackResolvePath() {
   }
   return true;
 }
+#undef XE_D3D12_REPORT_DRAW_OR_COPY_REFUSAL
 
 void D3D12CommandProcessor::CheckSubmissionCompletion(
     uint64_t await_submission) {

@@ -315,9 +315,11 @@ bool COMMAND_PROCESSOR::ExecutePacket() {
 XE_NOINLINE
 XE_COLD
 bool COMMAND_PROCESSOR::ExecutePacketType0_CountOverflow(uint32_t count) {
-  XELOGE("ExecutePacketType0 overflow (read count {:08X}, packet count {:08X})",
-         COMMAND_PROCESSOR::GetCurrentRingReadCount(),
-         count * sizeof(uint32_t));
+  XELOGE(
+      "GPU packet failed: ExecutePacketType0 overflow (read count {:08X}, "
+      "packet "
+      "count {:08X})",
+      COMMAND_PROCESSOR::GetCurrentRingReadCount(), count * sizeof(uint32_t));
   return false;
 }
 /*
@@ -383,9 +385,11 @@ uint32_t COMMAND_PROCESSOR::GetCurrentRingReadCount() {
 XE_NOINLINE
 XE_COLD
 bool COMMAND_PROCESSOR::ExecutePacketType3_CountOverflow(uint32_t count) {
-  XELOGE("ExecutePacketType3 overflow (read count {:08X}, packet count {:08X})",
-         COMMAND_PROCESSOR::GetCurrentRingReadCount(),
-         count * sizeof(uint32_t));
+  XELOGE(
+      "GPU packet failed: ExecutePacketType3 overflow (read count {:08X}, "
+      "packet "
+      "count {:08X})",
+      COMMAND_PROCESSOR::GetCurrentRingReadCount(), count * sizeof(uint32_t));
   return false;
 }
 XE_NOINLINE
@@ -610,6 +614,18 @@ XE_COLD
 bool COMMAND_PROCESSOR::HitUnimplementedOpcode(uint32_t opcode,
                                                uint32_t count) XE_RESTRICT {
   XELOGGPU("Unimplemented GPU OPCODE: 0x{:02X}\t\tCOUNT: {}\n", opcode, count);
+  // Say it once per opcode at Error level as well: the executor's caller only
+  // reports that a packet failed, and that is useless without the reason.
+  // GPU-category logging is off in most runs and assert_always() does nothing
+  // in a release build, so this was silent exactly where it mattered. Opcodes
+  // are seven bits, so one flag each keeps a failing packet from filling the
+  // log.
+  static bool opcode_reported[128] = {};
+  if (opcode < xe::countof(opcode_reported) && !opcode_reported[opcode]) {
+    opcode_reported[opcode] = true;
+    XELOGE("GPU packet failed: unimplemented type-3 opcode 0x{:02X}, count {}",
+           opcode, count);
+  }
   assert_always();
   reader_.AdvanceRead(count * sizeof(uint32_t));
   trace_writer_.WritePacketEnd();
@@ -1290,9 +1306,16 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_IM_LOAD(uint32_t packet,
     case xenos::ShaderType::kPixel:
       active_pixel_shader_ = shader;
       break;
-    default:
+    default: {
+      static bool reported = false;
+      if (!reported) {
+        reported = true;
+        XELOGE("GPU packet failed: shader load with unknown shader type {}",
+               static_cast<uint32_t>(shader_type));
+      }
       assert_unhandled_case(shader_type);
       return false;
+    }
   }
   return true;
 }
@@ -1321,9 +1344,16 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_IM_LOAD_IMMEDIATE(
     case xenos::ShaderType::kPixel:
       active_pixel_shader_ = shader;
       break;
-    default:
+    default: {
+      static bool reported = false;
+      if (!reported) {
+        reported = true;
+        XELOGE("GPU packet failed: shader load with unknown shader type {}",
+               static_cast<uint32_t>(shader_type));
+      }
       assert_unhandled_case(shader_type);
       return false;
+    }
   }
   reader_.AdvanceRead(size_dwords * sizeof(uint32_t));
   return true;

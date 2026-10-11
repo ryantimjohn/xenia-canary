@@ -11,6 +11,7 @@
 
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/nop/nop_audio_driver.h"
+#include "xenia/apu/pacing_audio_driver.h"
 #include "xenia/base/assert.h"
 
 namespace xe {
@@ -30,6 +31,7 @@ X_STATUS NopAudioSystem::CreateDriver(size_t index,
                                       xe::threading::Semaphore* semaphore,
                                       AudioDriver** out_driver) {
   assert_not_null(out_driver);
+  // The audio worker already paces registered guest clients.
   *out_driver = new NopAudioDriver(semaphore);
   return X_STATUS_SUCCESS;
 }
@@ -37,10 +39,27 @@ X_STATUS NopAudioSystem::CreateDriver(size_t index,
 AudioDriver* NopAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
                                           uint32_t frequency, uint32_t channels,
                                           bool need_format_conversion) {
-  return new NopAudioDriver(semaphore);
+  // Media playback submits directly, without the guest-client worker, and
+  // must consume silent frames at the requested playback rate.
+  // A frame holds kFrameSamplesMax samples whatever its channel count, as the
+  // XAudio2 and SDL drivers lay it out: 256 per channel for 5.1, 768 for
+  // stereo.
+  const uint32_t channel_samples =
+      channels ? AudioDriver::kFrameSamplesMax / channels
+               : AudioDriver::kChannelSamplesDefault;
+  auto driver = std::make_unique<PacingAudioDriver>(semaphore, frequency,
+                                                    channel_samples);
+  if (!driver->Initialize()) {
+    return nullptr;
+  }
+  return driver.release();
 }
 
-void NopAudioSystem::DestroyDriver(AudioDriver* driver) { delete driver; }
+void NopAudioSystem::DestroyDriver(AudioDriver* driver) {
+  assert_not_null(driver);
+  driver->Shutdown();
+  delete driver;
+}
 
 }  // namespace nop
 }  // namespace apu

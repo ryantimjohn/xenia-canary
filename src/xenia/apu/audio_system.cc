@@ -13,6 +13,7 @@
 
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/audio_driver.h"
+#include "xenia/apu/pacing_audio_driver.h"
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_stream.h"
@@ -220,11 +221,10 @@ void AudioSystem::Shutdown() {
     auto global_lock = global_critical_region_.Acquire();
     for (size_t i = 0; i < kMaximumClientCount; ++i) {
       if (clients_[i].in_use) {
-        DestroyDriver(clients_[i].driver);
+        DestroyClientDriver(i);
         if (clients_[i].wrapped_callback_arg) {
           memory()->SystemHeapFree(clients_[i].wrapped_callback_arg);
         }
-        clients_[i].driver = nullptr;
         clients_[i].callback = 0;
         clients_[i].callback_arg = 0;
         clients_[i].wrapped_callback_arg = 0;
@@ -245,8 +245,10 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   auto ret = client_semaphore->Release(kMaximumQueuedFrames, nullptr);
   assert_true(ret);
 
-  AudioDriver* driver;
-  auto result = CreateDriver(index, client_semaphore, &driver);
+  AudioDriver* driver = nullptr;
+  bool driver_is_fallback = false;
+  auto result =
+      CreateClientDriver(index, client_semaphore, &driver, &driver_is_fallback);
   if (XFAILED(result)) {
     XELOGE("AudioSystem::RegisterClient: CreateDriver failed for index={}",
            index);
@@ -261,6 +263,7 @@ X_STATUS AudioSystem::RegisterClient(uint32_t callback, uint32_t callback_arg,
   xe::store_and_swap<uint32_t>(memory()->TranslateVirtual(ptr), callback_arg);
 
   clients_[index].driver = driver;
+  clients_[index].driver_is_fallback = driver_is_fallback;
   clients_[index].callback = callback;
   clients_[index].callback_arg = callback_arg;
   clients_[index].wrapped_callback_arg = ptr;
@@ -312,9 +315,8 @@ void AudioSystem::UnregisterClient(size_t index) {
 
   std::lock_guard<std::mutex> guard(clients_[index].lock);
 
-  DestroyDriver(clients_[index].driver);
+  DestroyClientDriver(index);
   memory()->SystemHeapFree(clients_[index].wrapped_callback_arg);
-  clients_[index].driver = nullptr;
   clients_[index].callback = 0;
   clients_[index].callback_arg = 0;
   clients_[index].wrapped_callback_arg = 0;
@@ -388,7 +390,9 @@ bool AudioSystem::Restore(ByteStream* stream) {
     assert_true(ret);
 
     AudioDriver* driver = nullptr;
-    auto status = CreateDriver(id, client_semaphore, &driver);
+    bool driver_is_fallback = false;
+    auto status =
+        CreateClientDriver(id, client_semaphore, &driver, &driver_is_fallback);
     if (XFAILED(status)) {
       XELOGE(
           "AudioSystem::Restore - Call to CreateDriver failed with status "
@@ -399,6 +403,7 @@ bool AudioSystem::Restore(ByteStream* stream) {
 
     assert_not_null(driver);
     client.driver = driver;
+    client.driver_is_fallback = driver_is_fallback;
   }
 
   return true;
@@ -425,6 +430,44 @@ void AudioSystem::Resume() {
   resume_event_->Set();
 
   xma_decoder_->Resume();
+}
+
+X_STATUS AudioSystem::CreateClientDriver(size_t index,
+                                         xe::threading::Semaphore* semaphore,
+                                         AudioDriver** out_driver,
+                                         bool* out_is_fallback) {
+  *out_is_fallback = false;
+  X_STATUS result = CreateDriver(index, semaphore, out_driver);
+  if (XSUCCEEDED(result)) {
+    return result;
+  }
+
+  // Without a driver the client never registers and the title waits on its
+  // audio for good. It needs its frames consumed at the rate a device would
+  // play them, not sound, so pace it without a device.
+  auto driver = std::make_unique<PacingAudioDriver>(semaphore);
+  if (!driver->Initialize()) {
+    return result;
+  }
+  XELOGW(
+      "APU: {} could not create a driver for client {} (the host's audio "
+      "device is unavailable); pacing the client silently instead",
+      name(), index);
+  *out_driver = driver.release();
+  *out_is_fallback = true;
+  return X_STATUS_SUCCESS;
+}
+
+void AudioSystem::DestroyClientDriver(size_t index) {
+  auto& client = clients_[index];
+  if (client.driver_is_fallback) {
+    client.driver->Shutdown();
+    delete client.driver;
+  } else {
+    DestroyDriver(client.driver);
+  }
+  client.driver = nullptr;
+  client.driver_is_fallback = false;
 }
 
 }  // namespace apu

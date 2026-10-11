@@ -14,6 +14,7 @@
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/nui_log.h"
 #include "xenia/kernel/xam/xam_content_device.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/ui/file_picker.h"
@@ -619,6 +620,13 @@ dword_result_t XamShowNuiDeviceSelectorUI_entry(
     dword_t tracking_id, dword_t user_index, dword_t content_type,
     dword_t content_flags, qword_t total_requested, lpdword_t device_id_ptr,
     pointer_t<XAM_OVERLAPPED> overlapped) {
+  LogNuiCall(
+      "NUI: XamShowNuiDeviceSelectorUI({}, {}, {:08X}, {:08X}, {}, {:08X}, "
+      "{:08X})",
+      tracking_id.value(), user_index.value(), content_type.value(),
+      content_flags.value(), total_requested.value(),
+      device_id_ptr.guest_address(), overlapped.guest_address());
+
   auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
   if (result) {
     return result;
@@ -1174,6 +1182,9 @@ DECLARE_XAM_EXPORT1(XamShowEditProfileUI, kUserProfiles, kImplemented);
 dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
                                                 dword_t tracking_id,
                                                 dword_t flags) {
+  LogNuiCall("NUI: XamShowNuiTroubleshooterUI({}, {:08X}, {:08X})",
+             user_index.value(), tracking_id.value(), flags.value());
+
   /* Notes:
      - calls XamPackageManagerGetExperienceMode(&var) with var = 1
      - If returns less than zero or (var & 1) == 0 then get error message:
@@ -1222,6 +1233,8 @@ dword_result_t XamShowNuiTroubleshooterUI_entry(dword_t user_index,
 DECLARE_XAM_EXPORT1(XamShowNuiTroubleshooterUI, kNone, kStub);
 
 dword_result_t XamShowNuiHardwareRequiredUI_entry(unknown_t unk1) {
+  LogNuiCall("NUI: XamShowNuiHardwareRequiredUI({:08X})", unk1.value());
+
   if (unk1 != 0) {
     return X_ERROR_INVALID_PARAMETER;
   }
@@ -1231,6 +1244,9 @@ dword_result_t XamShowNuiHardwareRequiredUI_entry(unknown_t unk1) {
 DECLARE_XAM_EXPORT1(XamShowNuiHardwareRequiredUI, kNone, kImplemented);
 
 dword_result_t XamShowNuiGuideUI_entry(unknown_t tracking_id, unknown_t unk2) {
+  LogNuiCall("NUI: XamShowNuiGuideUI({:08X}, {:08X})", tracking_id.value(),
+             unk2.value());
+
   auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
   if (result) {
     return result;
@@ -1245,6 +1261,119 @@ dword_result_t XamShowNuiGuideUI_entry(unknown_t tracking_id, unknown_t unk2) {
   return X_ERROR_ACCESS_DENIED;
 }
 DECLARE_XAM_EXPORT1(XamShowNuiGuideUI, kNone, kStub);
+
+// The NUI variants of the shell dialogs are the same dialogs, opened from the
+// Kinect Guide rather than from a controller. Existing dialogs are forwarded
+// to; the remaining entry points are still stubs.
+//
+// Each of them has an argument in front of the user index that the controller
+// export it mirrors does not (XamShowNuiTroubleshooterUI and
+// XamShowNuiHardwareRequiredUI are the exceptions;
+// the Troubleshooter takes the user index first). 4D5308ED' wrappers
+// around the imports (0x831af900-0x831af950, and 0x831af958 for the disc
+// error) leave r3 untouched: the Guide wrapper only adds `li r4, 255`, the
+// Signin wrapper `mr r5, r4; li r4, 255`, and the Marketplace wrapper fills in
+// the offer type (-1) and the title id (0) behind the arguments it was given.
+// The value is not a user index, since the user index follows it: the Signin
+// call site (0x82aab850) maps -1 to 0 for it, the Guide and Signin call sites
+// read it from a per-player record's +156 field (0x82b74a20, 0x82b7681c), the
+// Achievements and controller-required call sites start it at 0 and replace it
+// with a looked-up value (0x82b5ee6c, 0x82b7a42c), and the disc error call
+// sites pass 0. It is most likely the NUI tracking id of the skeleton that
+// drives the UI [inference]. The HUD check uses it for engagement; the
+// dialogs themselves still accept controller input.
+dword_result_t XamShowNuiControllerRequiredUI_entry(dword_t tracking_id,
+                                                    dword_t user_index) {
+  const auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
+  if (result) {
+    return result;
+  }
+
+  LogNuiCall("NUI: XamShowNuiControllerRequiredUI({}, {})", tracking_id.value(),
+             user_index.value());
+
+  if (cvars::headless) {
+    return X_ERROR_SUCCESS;
+  }
+
+  std::string title = "Controller Required";
+  std::string desc = "The game is asking for a controller to carry on with.";
+
+  // xeXamDispatchDialog only clears this on close; putting it up is the
+  // caller's job, and XamIsNuiUIActive reads it.
+  kernel_state()->xam_state()->is_xam_dialog_present_.store(true);
+
+  const Emulator* emulator = kernel_state()->emulator();
+  xe::ui::ImGuiDrawer* imgui_drawer = emulator->imgui_drawer();
+  xeXamDispatchDialog<MessageBoxDialog>(
+      new MessageBoxDialog(imgui_drawer, title, desc, {"OK"}, 0),
+      [](MessageBoxDialog*) -> X_RESULT { return X_ERROR_SUCCESS; }, 0);
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiControllerRequiredUI, kUI, kStub);
+
+dword_result_t XamShowNuiFriendsUI_entry(dword_t tracking_id,
+                                         dword_t user_index) {
+  const auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
+  if (result) {
+    return result;
+  }
+
+  LogNuiCall("NUI: XamShowNuiFriendsUI({}, {})", tracking_id.value(),
+             user_index.value());
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiFriendsUI, kUI, kStub);
+
+// The fourth argument is what the wrapper (0x831af930) adds with `li r6, 0`;
+// its meaning is unknown.
+dword_result_t XamShowNuiGamerCardUIForXUID_entry(dword_t tracking_id,
+                                                  dword_t user_index,
+                                                  qword_t xuid, unknown_t unk) {
+  const auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
+  if (result) {
+    return result;
+  }
+
+  LogNuiCall("NUI: XamShowNuiGamerCardUIForXUID({}, {}, {:016X}, {:08X})",
+             tracking_id.value(), user_index.value(), xuid.value(),
+             unk.value());
+  return X_ERROR_SUCCESS;
+}
+DECLARE_XAM_EXPORT1(XamShowNuiGamerCardUIForXUID, kUI, kStub);
+
+dword_result_t XamShowNuiAchievementsUI_entry(dword_t tracking_id,
+                                              dword_t user_index,
+                                              dword_t title_id) {
+  const auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
+  if (result) {
+    return result;
+  }
+
+  LogNuiCall("NUI: XamShowNuiAchievementsUI({}, {}, {:08X})",
+             tracking_id.value(), user_index.value(), title_id.value());
+  return XamShowAchievementsUI_entry(user_index, title_id);
+}
+DECLARE_XAM_EXPORT1(XamShowNuiAchievementsUI, kUI, kStub);
+
+dword_result_t XamShowNuiMarketplaceUI_entry(
+    dword_t tracking_id, dword_t user_index, dword_t ui_type, qword_t offer_id,
+    dword_t offer_type, dword_t content_category, dword_t title_id) {
+  const auto result = kernel_state()->nui()->NuiHudCheck(tracking_id);
+  if (result) {
+    return result;
+  }
+
+  LogNuiCall(
+      "NUI: XamShowNuiMarketplaceUI({}, {}, {}, {:016X}, {:08X}, {:08X}, "
+      "{:08X})",
+      tracking_id.value(), user_index.value(), ui_type.value(),
+      offer_id.value(), offer_type.value(), content_category.value(),
+      title_id.value());
+  return XamShowMarketplaceUI_entry(user_index, ui_type, offer_id, offer_type,
+                                    content_category, title_id);
+}
+DECLARE_XAM_EXPORT1(XamShowNuiMarketplaceUI, kUI, kStub);
 
 }  // namespace xam
 }  // namespace kernel

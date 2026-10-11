@@ -56,6 +56,9 @@ class ImGuiDrawer : public WindowInputListener, public UIDrawer {
   // SetPresenter may be called from the destructor.
   void SetPresenter(Presenter* new_presenter);
   void SetImmediateDrawer(ImmediateDrawer* new_immediate_drawer);
+  // The drawer that owns the textures ImGui draws, or null while none is
+  // attached. Textures created through it must be destroyed before it is.
+  ImmediateDrawer* immediate_drawer() const { return immediate_drawer_; }
   void SetPresenterAndImmediateDrawer(Presenter* new_presenter,
                                       ImmediateDrawer* new_immediate_drawer) {
     SetPresenter(new_presenter);

@@ -16,21 +16,12 @@
 namespace xe {
 namespace kernel {
 
+class KernelState;
+
+// Compatibility API for kernel callers; guest NUI state belongs to NuiState.
 class NUIController {
-  /* NUI Notes:
-     - init_flags_:
-       - set by 0x2B003
-       - set to 0 by title shutdown, alongside version_id
-       - known values:
-          - 0x40000000
-          - 0x200
-     - nui_versions_:
-       - set by 0x2B003 (XAM and XTL versions)
-       - set to 0 by title shutdown, alongside init_flags_
-       - must be XAM vesion 5
-  */
  public:
-  NUIController();
+  explicit NUIController(KernelState* kernel_state);
   ~NUIController() = default;
 
   bool NuiInitialized();
@@ -48,14 +39,7 @@ class NUIController {
   uint32_t NuiHudCheck(uint64_t tracking_id);
 
  private:
-  uint32_t nui_data_ptr = 0x1;  // Meant to be a ptr to a larger structure
-  char nui_unknown_2 = 0x1;     // exists at 0x50 within nui data structure
-  uint32_t engaged_tracking_id =
-      0x0;  // exists at 0x118 within nui data structure
-  uint64_t session_id = 0x0;
-  uint32_t tilt_callback_ = 0x0;
-  uint32_t init_flags_ = 0x0;
-  uint64_t nui_versions_[2] = {};
+  KernelState* kernel_state_;
 };
 
 enum X_TILT_STATUS_FLAGS : uint32_t {

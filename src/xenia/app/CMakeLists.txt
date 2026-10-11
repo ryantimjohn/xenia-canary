@@ -61,6 +61,9 @@ target_link_libraries(xenia-app PRIVATE
   xenia-hid
   xenia-hid-nop
   xenia-kernel
+  xenia-nui
+  xenia-nui-nop
+  xenia-nui-replay
   xenia-patcher
   xenia-ui
   xenia-vfs
@@ -110,6 +113,7 @@ if(WIN32)
     xenia-apu-xaudio2
     xenia-gpu-d3d12
     xenia-hid-xinput
+    xenia-nui-kinect
     xenia-ui-d3d12
   )
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")

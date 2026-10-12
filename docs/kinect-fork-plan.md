@@ -80,6 +80,9 @@ in their own voice. The monitor never posts replies as the owner.
 - Direct fork bug reports to this repository, including build revision, title ID,
   sensor/backend, settings, patches and reproduction steps.
 - Retain binary names and storage behavior to avoid an incidental migration.
+- Ship an opt-in Kinect config template enabling avatar initialization. Copy it
+  to isolated test storage before selecting it with `--config`, because Xenia
+  saves settings to the selected file. Keep the general default disabled.
 - Keep the current repository URL. Prepare the optional rename as a later
   decision, not a prerequisite for releasing.
 
@@ -88,7 +91,8 @@ in their own voice. The monitor never posts replies as the owner.
 - Add a manually triggered workflow for the `kinect` branch.
 - Build the exact selected revision and run relevant automated checks.
 - Package a clearly named Windows archive with license, README, setup guidance,
-  protocol documentation, third-party notices and source/upstream identity;
+  the Kinect config template, protocol documentation, third-party notices and
+  source/upstream identity;
   include SHA-256 checksums.
 - Create only a **draft prerelease**, never an automatic public release on push.
 - Reject attempts to replace an existing tag or release's files. A revised
@@ -137,7 +141,8 @@ received the same end-to-end verification. Depth replay needs no Kinect runtime.
 For title `4D5308ED`, existing evidence includes live completion of all five
 activities reported by the tester, depth-based player tracking, cursor input and
 a visibly verified Guide open/close. Body-controlled gameplay requires
-`allow_avatar_initialization=true`. The obstacle activity requires a separate
+`allow_avatar_initialization=true` through the opt-in Kinect launch preset (or
+the equivalent command-line flag). The obstacle activity requires a separate
 external loading workaround; the repeated first-activity startup has a separate
 optional workaround. These are not included in the emulator package.
 
@@ -199,6 +204,8 @@ For each release, record:
 ## Status
 
 - Identity and release preparation: **implemented locally for owner review**.
+- Opt-in Kinect launch preset and archive inclusion: **prepared locally;
+  packaged build not yet run**.
 - Hosted release workflow and downloaded release candidate: **not yet run**.
 - Identity push, default-branch/settings changes and release: **await owner review**.
 - Upstream PR series: **continues separately**.

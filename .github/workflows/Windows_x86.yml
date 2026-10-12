@@ -163,14 +163,15 @@ jobs:
           }
           $stage = Join-Path $env:RUNNER_TEMP ("xenia_canary_kinect_windows_{0}" -f [guid]::NewGuid().ToString('N'))
           New-Item -ItemType Directory -Path $stage | Out-Null
-          foreach ($directory in @('docs', '.github')) {
+          foreach ($directory in @('docs', '.github', 'config-presets')) {
             New-Item -ItemType Directory -Path (Join-Path $stage $directory) | Out-Null
           }
           Copy-Item $exe (Join-Path $stage 'xenia_canary.exe')
           foreach ($file in @(
             'LICENSE', 'README.md', '.github/CONTRIBUTING.md',
             'docs/kinect-setup.md', 'docs/nui.md', 'docs/building.md',
-            'docs/kinect-fork-plan.md', 'docs/style_guide.md'
+            'docs/kinect-fork-plan.md', 'docs/style_guide.md',
+            'config-presets/kinect.config.toml'
           )) {
             if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
               throw "Required package file is missing: $file"
@@ -226,6 +227,7 @@ jobs:
             'xenia_canary.exe', 'LICENSE', 'README.md', 'BUILD-INFO.txt',
             '.github/CONTRIBUTING.md', 'docs/kinect-setup.md', 'docs/nui.md',
             'docs/building.md', 'docs/kinect-fork-plan.md', 'docs/style_guide.md',
+            'config-presets/kinect.config.toml',
             'third-party-notices/README.txt'
           ) + $includedNotices
           Push-Location $stage

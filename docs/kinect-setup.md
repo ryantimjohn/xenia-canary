@@ -29,18 +29,28 @@ automatic tilt. Do not force it if it resists movement.
 
 Keep this build in its own directory, separate from an existing Xenia setup.
 From PowerShell, use your own build and a game image you are authorized to use.
-This example selects the tested D3D12 graphics path and keeps default
-configuration, cache, and guest storage under a new folder in the current
-directory. Use a fresh folder for each test. An existing configuration can set
-separate content or cache paths, so do not reuse a test folder that contains an
-older config if you need to isolate saves:
+This example selects the tested D3D12 graphics path. The opt-in
+[Kinect launch preset](../config-presets/kinect.config.toml) enables avatar
+initialization without changing the general default. Xenia writes settings to
+the file selected by `--config`, so copy the shipped template into a new test
+folder before launching. Use a fresh folder for each test: an existing config
+can set separate content or cache paths, affecting storage isolation. These
+commands assume the extracted archive directory. For a source build, run from
+the repository root and replace `.\xenia_canary.exe` with the path to your built
+executable; the preset path is relative to the repository root.
 
 ```powershell
-.\xenia_canary.exe "<path-to-game-image>" --storage_root=".\kinect-test-data" --gpu=d3d12 --nui=kinect --mute=true --allow_avatar_initialization=true
+$testRoot = ".\kinect-test-data"
+if (Test-Path -LiteralPath $testRoot) { throw "Choose a fresh test folder." }
+New-Item -ItemType Directory -Path $testRoot -ErrorAction Stop | Out-Null
+Copy-Item ".\config-presets\kinect.config.toml" "$testRoot\kinect.config.toml" -ErrorAction Stop
+.\xenia_canary.exe "<path-to-game-image>" --storage_root="$testRoot" --config="$testRoot\kinect.config.toml" --gpu=d3d12 --nui=kinect --mute=true
 ```
 
-The `--allow_avatar_initialization=true` flag is needed for body-controlled
-gameplay. Title ID `4D5308ED` is the only title with established live gameplay
+The preset sets `allow_avatar_initialization=true`, which is needed for
+body-controlled gameplay. You can instead pass
+`--allow_avatar_initialization=true` explicitly if you do not use the preset.
+Title ID `4D5308ED` is the only title with established live gameplay
 in the current test record; one tester reported live completion of all five
 activities. D3D12 is the recommended first graphics backend because it is the
 route used for that gameplay evidence. For diagnostics, add
@@ -50,15 +60,21 @@ placement advice.
 ## Replay a recording on Windows
 
 Replay needs no Kinect hardware or runtime. Point `--nui_replay` at a depth
-recording you created yourself, and keep the test storage isolated:
+recording you created yourself, and copy the same preset into a different fresh
+folder so replay settings, cache and saves stay isolated:
 
 ```powershell
-.\xenia_canary.exe "<path-to-game-image>" --storage_root=".\kinect-replay-data" --nui=replay --nui_replay="<path-to-recording.xdepth>" --mute=true --allow_avatar_initialization=true
+$testRoot = ".\kinect-replay-data"
+if (Test-Path -LiteralPath $testRoot) { throw "Choose a fresh test folder." }
+New-Item -ItemType Directory -Path $testRoot -ErrorAction Stop | Out-Null
+Copy-Item ".\config-presets\kinect.config.toml" "$testRoot\kinect.config.toml" -ErrorAction Stop
+.\xenia_canary.exe "<path-to-game-image>" --storage_root="$testRoot" --config="$testRoot\kinect.config.toml" --nui=replay --nui_replay="<path-to-recording.xdepth>" --mute=true
 ```
 
-On Linux, run your built emulator executable (`./xenia_canary`) with the
-same `--nui=replay` and `--nui_replay=<path>` options and a fresh
-`--storage_root=<new-directory>`.
+On Linux, copy the preset into a fresh storage folder and run your built
+`./xenia_canary` with `--config` pointing to that copy, alongside the same
+`--nui=replay`, `--nui_replay=<path>`, and `--storage_root=<new-directory>`
+options. The preset does not select a sensor backend; the `--nui` flag does.
 
 To create a local recording, run the live example with
 `--nui_record=".\person.xdepth"`. Recordings can be large (about 18 MB/s).

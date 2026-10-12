@@ -1,0 +1,4 @@
+# Copy this file into a fresh test storage folder and select the copy with
+# --config. Xenia writes changes to the selected config file.
+[Kernel]
+allow_avatar_initialization = true

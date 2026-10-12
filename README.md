@@ -27,9 +27,16 @@ for safe setup and testing instructions, or [docs/building.md](docs/building.md)
 to build from source. The [fork plan](docs/kinect-fork-plan.md) describes the
 first rollout.
 
+The opt-in [Kinect launch preset](config-presets/kinect.config.toml) enables
+avatar initialization for body-controlled play. Copy it into a fresh test
+storage folder and select that copy with `--config`; the emulator saves
+settings to the selected file. The general default remains `false`. The setup
+guide gives live and replay commands with isolated storage.
+
 A tester reported live completion of all five activities for title ID
-`4D5308ED`. Body-controlled play requires `--allow_avatar_initialization=true`. The
-obstacle activity needs a matching external title patch, which is not bundled.
+`4D5308ED`. Body-controlled play requires avatar initialization, supplied by
+the opt-in preset or `--allow_avatar_initialization=true`. The obstacle activity
+needs a matching external title patch, which is not bundled.
 The emulator package alone does not provide that complete five-activity setup.
 The loading figure is a translucent stand-in.
 Other known gaps include slow tutorial movies, black color frames, incomplete

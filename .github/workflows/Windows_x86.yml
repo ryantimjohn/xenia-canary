@@ -2,6 +2,11 @@ name: Windows (x86-64)
 
 on:
   workflow_call:
+    inputs:
+      kinect_release:
+        description: 'Run Kinect release tests and produce the branded Windows package'
+        type: boolean
+        default: false
 
 jobs:
   build:
@@ -10,12 +15,45 @@ jobs:
 
     env:
       POWERSHELL_TELEMETRY_OPTOUT: 1
+      PYTHONUTF8: 1
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Identify incorporated upstream commit
+        if: ${{ inputs.kinect_release }}
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_COMMIT) {
+            throw 'Checkout does not match the dispatched commit.'
+          }
+          # The version generator reads the local branch name. Attach the exact
+          # dispatched commit without resolving a potentially newer branch tip.
+          git switch -C kinect $env:SOURCE_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw 'Could not attach the release branch.' }
+          git fetch --no-tags https://github.com/xenia-canary/xenia-canary.git `
+            '+refs/heads/canary_experimental:refs/remotes/kinect-upstream/canary_experimental'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not fetch the official upstream branch.' }
+          $upstreamTip = git rev-parse refs/remotes/kinect-upstream/canary_experimental
+          if ($LASTEXITCODE -ne 0) { throw 'Could not resolve the upstream tip.' }
+          $bases = @(git merge-base --all HEAD refs/remotes/kinect-upstream/canary_experimental)
+          if ($LASTEXITCODE -ne 0 -or $bases.Count -ne 1) {
+            throw 'Expected one common ancestor with official canary_experimental.'
+          }
+          git merge-base --is-ancestor $bases[0] HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'Upstream base is not an ancestor of the packaged commit.' }
+          if ((git rev-parse HEAD) -ne $env:SOURCE_COMMIT) {
+            throw 'Fetching upstream changed the packaged commit.'
+          }
+          "UPSTREAM_BASE_SHA=$($bases[0])" >> $env:GITHUB_ENV
+          "UPSTREAM_TIP_SHA=$upstreamTip" >> $env:GITHUB_ENV
 
       - name: Cache Vulkan SDK
         id: cache-vulkan-sdk
@@ -66,8 +104,16 @@ jobs:
       - name: Build Xenia
         run: python xenia-build.py build --config=Release --target=xenia-app
 
+      - name: Test Kinect, audio, and kernel subsystems
+        if: ${{ inputs.kinect_release }}
+        run: >-
+          python xenia-build.py test --config=Release --build-tests
+          --target=xenia-nui-tests --target=xenia-apu-tests
+          --target=xenia-kernel-tests
+
       - name: Prepare artifacts
         id: prepare_artifacts
+        if: ${{ !inputs.kinect_release }}
         run: |-
           if ((Get-Item "build\bin\Windows\Release\xenia_canary.exe").Length -le 100000) {
             echo "::error:: Executable is too small."
@@ -82,10 +128,135 @@ jobs:
           echo "path=$path" >> $env:GITHUB_OUTPUT
 
       - name: Upload Xenia Canary artifact
-        if: ${{ steps.prepare_artifacts.outcome == 'success' }}
+        if: ${{ !inputs.kinect_release && steps.prepare_artifacts.outcome == 'success' }}
         uses: actions/upload-artifact@v7
         with:
           path: ${{ steps.prepare_artifacts.outputs.path }}
           if-no-files-found: error
           retention-days: 7
           archive: false
+
+      - name: Prepare Xenia Canary Kinect archive
+        if: ${{ inputs.kinect_release }}
+        env:
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |-
+          $ErrorActionPreference = 'Stop'
+          foreach ($variable in @('SOURCE_COMMIT', 'UPSTREAM_BASE_SHA', 'UPSTREAM_TIP_SHA')) {
+            $value = [Environment]::GetEnvironmentVariable($variable)
+            if ($value -cnotmatch '^[0-9a-f]{40}$') {
+              throw "Missing or invalid $variable"
+            }
+          }
+          $exe = 'build/bin/Windows/Release/xenia_canary.exe'
+          if ((Get-Item $exe).Length -le 100000) {
+            throw 'Executable is too small.'
+          }
+
+          $archive = 'xenia_canary_kinect_windows.7z'
+          $archivePath = Join-Path $env:GITHUB_WORKSPACE $archive
+          if (Test-Path -LiteralPath $archivePath) {
+            throw "Archive already exists: $archivePath"
+          }
+          if (Test-Path -LiteralPath "$archivePath.sha256") {
+            throw "Checksum already exists: $archivePath.sha256"
+          }
+          $stage = Join-Path $env:RUNNER_TEMP ("xenia_canary_kinect_windows_{0}" -f [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          foreach ($directory in @('docs', '.github')) {
+            New-Item -ItemType Directory -Path (Join-Path $stage $directory) | Out-Null
+          }
+          Copy-Item $exe (Join-Path $stage 'xenia_canary.exe')
+          foreach ($file in @(
+            'LICENSE', 'README.md', '.github/CONTRIBUTING.md',
+            'docs/kinect-setup.md', 'docs/nui.md', 'docs/building.md',
+            'docs/kinect-fork-plan.md', 'docs/style_guide.md'
+          )) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Required package file is missing: $file"
+            }
+            Copy-Item -LiteralPath $file -Destination (Join-Path $stage $file) -Force
+          }
+
+          # Copy only tracked notice text from initialized dependencies. This is
+          # a notice bundle, not a claim that every listed component ships in the exe.
+          $tracked = @(git ls-files --recurse-submodules -- third_party)
+          if ($LASTEXITCODE -ne 0) { throw 'Could not enumerate tracked third-party files.' }
+          $noticeFiles = @($tracked | Where-Object {
+            $basename = [System.IO.Path]::GetFileName($_).ToUpperInvariant()
+            ($basename -match '^(LICENSE|LICENCE|COPYING|NOTICE|NOTICES)([._-]|$)') -or
+            ($basename -match '^THIRDPARTYNOTICES([._-]|$)') -or
+            (($basename -match '(^|[-_])(LICENSE|LICENCE)([._-]|$)') -and
+              (($basename -notmatch '\.') -or ($basename -match '\.(TXT|MD|RST)$')))
+          } | Sort-Object -Unique)
+          foreach ($required in @(
+            'third_party/fmt/LICENSE', 'third_party/imgui/LICENSE.txt',
+            'third_party/zstd/LICENSE'
+          )) {
+            if ($required -notin $noticeFiles -or -not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Required third-party notice is missing: $required"
+            }
+          }
+          $includedNotices = @()
+          foreach ($file in $noticeFiles) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+            $relative = "third-party-notices/$file"
+            $destination = Join-Path $stage $relative
+            New-Item -ItemType Directory -Force -Path (Split-Path $destination -Parent) | Out-Null
+            Copy-Item -LiteralPath $file -Destination $destination
+            $includedNotices += $relative
+          }
+          @(
+            'Tracked LICENSE, COPYING, and NOTICE files from initialized third-party dependencies.'
+            'This includes optional and development-only components; it does not mean all are used by this executable.'
+          ) | Set-Content -LiteralPath (Join-Path $stage 'third-party-notices/README.txt') -Encoding ascii
+
+          @(
+            'Project: Xenia Canary Kinect'
+            'Repository: https://github.com/ryantimjohn/xenia-canary'
+            'Development branch: kinect'
+            "Source commit: $env:SOURCE_COMMIT"
+            'Upstream: https://github.com/xenia-canary/xenia-canary'
+            'Upstream branch: canary_experimental'
+            "Upstream tip at build: $env:UPSTREAM_TIP_SHA"
+            "Incorporated upstream base: $env:UPSTREAM_BASE_SHA"
+          ) | Set-Content -LiteralPath (Join-Path $stage 'BUILD-INFO.txt') -Encoding ascii
+
+          $packageFiles = @(
+            'xenia_canary.exe', 'LICENSE', 'README.md', 'BUILD-INFO.txt',
+            '.github/CONTRIBUTING.md', 'docs/kinect-setup.md', 'docs/nui.md',
+            'docs/building.md', 'docs/kinect-fork-plan.md', 'docs/style_guide.md',
+            'third-party-notices/README.txt'
+          ) + $includedNotices
+          Push-Location $stage
+          try {
+            & 7z a $archivePath @packageFiles -mx9 -bb3
+            if ($LASTEXITCODE -ne 0) { throw "7z failed with exit code $LASTEXITCODE" }
+          } finally {
+            Pop-Location
+          }
+          if ((Get-Item $archivePath).Length -le 100000) {
+            throw 'Archive is too small.'
+          }
+          $listing = & 7z l -slt $archivePath
+          if ($LASTEXITCODE -ne 0) { throw "7z listing failed with exit code $LASTEXITCODE" }
+          $entries = @($listing | Select-String '^Path = ' | ForEach-Object {
+            $_.Line.Substring(7).Replace('\', '/')
+          })
+          foreach ($required in $packageFiles) {
+            if ($required -notin $entries) { throw "Archive is missing $required" }
+          }
+          $digest = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText(
+            "$archivePath.sha256", "$digest  $archive`n", [System.Text.Encoding]::ASCII)
+
+      - name: Upload Xenia Canary Kinect package
+        if: ${{ inputs.kinect_release }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: xenia-canary-kinect-windows
+          path: |
+            xenia_canary_kinect_windows.7z
+            xenia_canary_kinect_windows.7z.sha256
+          if-no-files-found: error
+          retention-days: 7

@@ -88,10 +88,13 @@ in their own voice. The monitor never posts replies as the owner.
 - Add a manually triggered workflow for the `kinect` branch.
 - Build the exact selected revision and run relevant automated checks.
 - Package a clearly named Windows archive with license, README, setup guidance,
-  protocol documentation and source identity; include SHA-256 checksums.
+  protocol documentation, third-party notices and source/upstream identity;
+  include SHA-256 checksums.
 - Create only a **draft prerelease**, never an automatic public release on push.
 - Reject attempts to replace an existing tag or release's files. A revised
   candidate receives a new version.
+- A failed upload or conflicting tag can leave an unpublished draft. Inspect
+  it before retrying and use a new version; retries never replace its assets.
 - Keep hosted workflow execution separate from local checks: a local syntax or
   packaging check is not evidence that GitHub Actions completed successfully.
 
@@ -195,7 +198,8 @@ For each release, record:
 
 ## Status
 
-- Identity and release preparation: **in progress locally**.
+- Identity and release preparation: **implemented locally for owner review**.
+- Hosted release workflow and downloaded release candidate: **not yet run**.
 - Identity push, default-branch/settings changes and release: **await owner review**.
 - Upstream PR series: **continues separately**.
 - Repository rename: **deferred; current URL retained**.

@@ -1,0 +1,217 @@
+name: Xenia Canary Kinect draft release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'New tag, for example kinect-v0.1.0-preview.1'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kinect-draft-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Validate repository, ref, and unused tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check dispatch and release identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != workflow_dispatch ||
+                "$GITHUB_REPOSITORY" != ryantimjohn/xenia-canary ||
+                "$GITHUB_REF" != refs/heads/kinect ]]; then
+            echo '::error::Run this workflow manually on the kinect branch of ryantimjohn/xenia-canary.'
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^kinect-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Tag must look like kinect-v0.1.0-preview.1"
+            exit 1
+          fi
+          if [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Dispatch did not provide a full commit SHA.'
+            exit 1
+          fi
+
+          for endpoint in "git/ref/tags/$RELEASE_TAG" "releases/tags/$RELEASE_TAG"; do
+            status=$(curl --silent --show-error --location \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/$endpoint")
+            case "$status" in
+              404) ;;
+              200)
+                echo "::error::Tag or release $RELEASE_TAG already exists ($endpoint). Choose a new version; reruns never replace assets."
+                exit 1
+                ;;
+              *)
+                echo "::error::Could not check $endpoint (HTTP $status)."
+                exit 1
+                ;;
+            esac
+          done
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
+            echo "::error::Draft release $RELEASE_TAG already exists. Reruns never replace assets."
+            exit 1
+          fi
+
+  build-windows:
+    name: Build and test Windows package
+    needs: preflight
+    uses: ./.github/workflows/Windows_x86.yml
+    permissions:
+      contents: read
+    with:
+      kinect_release: true
+
+  draft-release:
+    name: Create draft prerelease
+    needs: [preflight, build-windows]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'ryantimjohn/xenia-canary' &&
+      github.ref == 'refs/heads/kinect' &&
+      needs.preflight.result == 'success' &&
+      needs.build-windows.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download package from this run
+        uses: actions/download-artifact@v8
+        with:
+          name: xenia-canary-kinect-windows
+          path: release_assets
+
+      - name: Check package digest and create draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        shell: bash
+        run: |-
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^kinect-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]] ||
+             [[ ! "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Invalid release tag or source SHA.'
+            exit 1
+          fi
+          cd release_assets
+          sha256sum --check xenia_canary_kinect_windows.7z.sha256
+
+          # Recheck immediately before creating the draft, including draft releases
+          # that may not yet have a remote git tag.
+          for endpoint in "git/ref/tags/$RELEASE_TAG" "releases/tags/$RELEASE_TAG"; do
+            status=$(curl --silent --show-error --location \
+              --header "Authorization: Bearer $GH_TOKEN" \
+              --header 'Accept: application/vnd.github+json' \
+              --output /dev/null --write-out '%{http_code}' \
+              "https://api.github.com/repos/$GITHUB_REPOSITORY/$endpoint")
+            case "$status" in
+              404) ;;
+              200)
+                echo "::error::Tag or release $RELEASE_TAG already exists ($endpoint). Nothing was replaced."
+                exit 1
+                ;;
+              *)
+                echo "::error::Could not check $endpoint (HTTP $status)."
+                exit 1
+                ;;
+            esac
+          done
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json tagName >/dev/null 2>&1; then
+            echo "::error::Draft release $RELEASE_TAG already exists. Nothing was replaced."
+            exit 1
+          fi
+
+          cat > release_notes.md <<EOF
+          Draft experimental Windows build of Xenia Canary Kinect from commit
+          [\`$GITHUB_SHA\`](https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA)
+          on the \`kinect\` development branch.
+
+          The verified live setup uses an Xbox 360 Kinect with its PC power/USB
+          adapter and the Kinect for Windows SDK 1.8 installation, which provides
+          the runtime and drivers. D3D12 is the tested graphics path. A runtime-only
+          install and other sensor models have not received the same verification.
+          Read the [setup guide](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/kinect-setup.md)
+          before testing and the [protocol and limitations](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/docs/nui.md)
+          for the scope of current evidence.
+
+          One tester reported live completion of all five activities in title ID
+          \`4D5308ED\`. The obstacle activity requires a matching external title
+          patch that is not bundled, and a separate optional startup workaround
+          has been used. This package alone does not provide that full setup.
+          Other titles are not established as compatible.
+
+          This run built and ran the Release Windows \`xenia-nui-tests\`,
+          \`xenia-apu-tests\`, and \`xenia-kernel-tests\` suites before packaging.
+          Hosted CI does not test a live Kinect or gameplay. Linux remains a
+          development and replay platform; this draft contains no Linux binary.
+
+          Fork: https://github.com/$GITHUB_REPOSITORY
+          Upstream: https://github.com/xenia-canary/xenia-canary
+
+          Download \`xenia_canary_kinect_windows.7z\` and verify it with the
+          accompanying \`.sha256\` file. The executable remains \`xenia_canary.exe\`
+          for existing configuration compatibility.
+
+          Before publishing, review and update this draft's hardware and gameplay
+          coverage against the current test record.
+          EOF
+          if ! gh release create "$RELEASE_TAG" \
+              xenia_canary_kinect_windows.7z \
+              xenia_canary_kinect_windows.7z.sha256 \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Xenia Canary Kinect $RELEASE_TAG (Windows experimental)" \
+              --notes-file release_notes.md \
+              --draft --prerelease --latest=false; then
+            echo '::error::Draft creation or asset upload failed. A partial draft may exist; inspect it manually. This workflow will not overwrite that tag. Use a new version after recovery.'
+            exit 1
+          fi
+
+          # A draft may have a tag_name without a remote git tag until publication.
+          # The target option is ignored if another actor creates the tag first.
+          metadata=''
+          for attempt in 1 2 3 4 5; do
+            if metadata=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --json tagName,targetCommitish,isDraft,isPrerelease \
+                --jq '[.tagName, .targetCommitish, .isDraft, .isPrerelease] | @tsv' 2>/dev/null); then
+              break
+            fi
+            sleep 2
+          done
+          expected=$(printf '%s\t%s\ttrue\ttrue' "$RELEASE_TAG" "$GITHUB_SHA")
+          if [[ "$metadata" != "$expected" ]]; then
+            echo '::error::Created draft metadata does not match the dispatched commit. Leave the draft unpublished and inspect it manually.'
+            exit 1
+          fi
+          tag_status=$(curl --silent --show-error --location \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")
+          case "$tag_status" in
+            404) ;; # GitHub may create the tag only when the draft is published.
+            200)
+              tag_type=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.type')
+              tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')
+              if [[ "$tag_type" != commit || "$tag_sha" != "$GITHUB_SHA" ]]; then
+                echo '::error::The tag target differs from the dispatched commit. Leave the draft unpublished and inspect it manually.'
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Could not verify the new tag (HTTP $tag_status). Leave the draft unpublished and inspect it manually."
+              exit 1
+              ;;
+          esac

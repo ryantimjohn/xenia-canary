@@ -171,7 +171,7 @@ using namespace xe::hid;
 using namespace xe::gpu;
 
 constexpr std::string_view kRecentlyPlayedTitlesFilename = "recent.toml";
-constexpr std::string_view kBaseTitle = "Xenia-canary";
+constexpr std::string_view kBaseTitle = "Xenia Canary Kinect (Experimental)";
 
 EmulatorWindow::EmulatorWindow(Emulator* emulator,
                                ui::WindowedAppContext& app_context,
@@ -938,25 +938,25 @@ bool EmulatorWindow::Initialize() {
   auto help_menu = MenuItem::Create(MenuItem::Type::kPopup, "&Help");
   {
     help_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "FA&Q...", "F1",
-                         std::bind(&EmulatorWindow::ShowFAQ, this)));
-    help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
-    help_menu->AddChild(
-        MenuItem::Create(MenuItem::Type::kString, "Game &compatibility...",
-                         std::bind(&EmulatorWindow::ShowCompatibility, this)));
+        MenuItem::Create(MenuItem::Type::kString, "Kinect setup and &help...",
+                         "F1", std::bind(&EmulatorWindow::ShowFAQ, this)));
     help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     help_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Build commit on GitHub...", "F2",
+        MenuItem::Type::kString, "Game &compatibility (upstream)...",
+        std::bind(&EmulatorWindow::ShowCompatibility, this)));
+    help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
+    help_menu->AddChild(MenuItem::Create(
+        MenuItem::Type::kString, "Fork build commit on GitHub...", "F2",
         std::bind(&EmulatorWindow::ShowBuildCommit, this)));
     help_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "Recent changes on GitHub...", []() {
+        MenuItem::Type::kString, "Fork recent changes on GitHub...", []() {
           LaunchWebBrowser(
-              "https://github.com/xenia-canary/xenia-canary/"
+              "https://github.com/ryantimjohn/xenia-canary/"
               "compare/" XE_BUILD_COMMIT "..." XE_BUILD_BRANCH);
         }));
     help_menu->AddChild(MenuItem::Create(MenuItem::Type::kSeparator));
     help_menu->AddChild(MenuItem::Create(
-        MenuItem::Type::kString, "&About...",
+        MenuItem::Type::kString, "&About Xenia (upstream)...",
         []() { LaunchWebBrowser("https://xenia.jp/about/"); }));
   }
   main_menu->AddChild(std::move(help_menu));
@@ -1783,16 +1783,18 @@ void EmulatorWindow::ShowCompatibility() {
 }
 
 void EmulatorWindow::ShowFAQ() {
-  LaunchWebBrowser("https://github.com/xenia-canary/xenia-canary/wiki/FAQ");
+  LaunchWebBrowser(
+      "https://github.com/ryantimjohn/xenia-canary/blob/" XE_BUILD_COMMIT
+      "/docs/kinect-setup.md");
 }
 
 void EmulatorWindow::ShowBuildCommit() {
 #ifdef XE_BUILD_IS_PR
   LaunchWebBrowser(
-      "https://github.com/xenia-canary/xenia-canary/pull/" XE_BUILD_PR_NUMBER);
+      "https://github.com/ryantimjohn/xenia-canary/pull/" XE_BUILD_PR_NUMBER);
 #else
   LaunchWebBrowser(
-      "https://github.com/xenia-canary/xenia-canary/commit/" XE_BUILD_COMMIT);
+      "https://github.com/ryantimjohn/xenia-canary/commit/" XE_BUILD_COMMIT);
 #endif
 }
 

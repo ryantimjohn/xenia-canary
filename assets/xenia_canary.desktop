@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Xenia Canary
+Name=Xenia Canary Kinect (Experimental)
 GenericName=Xbox 360 Emulator
-Comment=Xbox 360 Research Emulator
+Comment=Experimental Kinect support for the Xbox 360 research emulator
 Exec=xenia_canary %f
 Icon=xenia_canary
 Terminal=false

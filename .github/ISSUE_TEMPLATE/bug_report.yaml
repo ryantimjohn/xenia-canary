@@ -1,55 +1,116 @@
-name: Bug report
-description: Template for bug reports.
-labels: bug
+name: Kinect fork bug report
+description: Report a reproducible bug in Xenia Canary Kinect.
+title: "[Kinect] "
+labels: [bug]
 body:
-  - id: disclaimer
-    type: markdown
+  - type: markdown
     attributes:
       value: |
-        Try to create a very concise title that's straight to the point.
-
-        **THIS IS NOT A SUPPORT FORUM!** For support, first read the wiki: https://github.com/xenia-canary/xenia-canary/wiki
-        If your question wasn't answered there or you need help, proceed to #help in the Discord server: https://discord.gg/Q9mxZf9
-
-        DO NOT CREATE ISSUES ABOUT SPECIFIC GAMES IN THIS REPOSITORY!
-        A game specific issue would be e.g. "Game X crashes after you hit a character a certain way"
-        A Xenia issue would be e.g. "Kernel export NtDoSomething does nothing"
-        For specific games, visit https://github.com/xenia-canary/game-compatibility#game-compatibility
-  - id: validation
-    type: checkboxes
+        Use this form for reproducible bugs in Xenia Canary Kinect. It collects
+        the build revision, platform, sensor, backend, title ID, settings,
+        patches, reproduction steps, and relevant logs.
+  - type: input
+    id: fork-commit
     attributes:
-      label: Validation
+      label: Fork commit
+      description: The short commit hash shown by your build, or say unknown.
+      placeholder: e.g. abc1234 or unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
       options:
-      - label: I've read the [FAQ](https://github.com/xenia-canary/xenia-canary/wiki/FAQ).
-        required: true
-      - label: The Xenia build used is from a Canary branch. (not UWP/MLBS/AlexVS/master/pull requests, etc)
-        required: true
-      - label: This issue isn't for tech support (help with Xenia).
-        required: true
-      - label: If this issue occurs in a specific game, I've done analysis to locate the faulty subsystem of the emulator and a potential reason in it.
-        required: true
-      - label: I've checked if this issue hasn't already been reported.
-        required: true
-      - label: 'My device meets the minimum requirements: https://github.com/xenia-canary/xenia-canary/wiki/Quickstart#system-requirements'
-        required: true
-      - label: '(If building) I have read the building doc: https://github.com/xenia-canary/xenia-canary/blob/master/docs/building.md'
-  - id: problem
-    type: textarea
-    attributes:
-      label: Describe what's going wrong
+        - Windows
+        - Linux
+        - Other
     validations:
       required: true
-  - id: what-should-happen
-    type: textarea
+  - type: dropdown
+    id: sensor
     attributes:
-      label: Describe what should happen
+      label: Sensor
+      options:
+        - Xbox 360 Kinect (verified setup)
+        - Kinect for Windows sensor (not verified in current test record)
+        - No live sensor (replay or nop)
+        - Other
     validations:
       required: true
-  - id: callstack
-    type: textarea
+  - type: dropdown
+    id: backend
     attributes:
-      label: If applicable, provide a callstack here, especially for crashes
-  - id: logfile
-    type: textarea
+      label: NUI backend
+      options:
+        - kinect
+        - replay
+        - nop
+        - any
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: title-id
     attributes:
-      label: If applicable, upload a logfile and link it here
+      label: Title ID
+      description: Use the hexadecimal title ID from the emulator title bar, not the game name. For a startup failure before a title loads, enter N/A or 00000000.
+      placeholder: 8-digit hexadecimal ID, N/A, or 00000000
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu-backend
+    attributes:
+      label: Graphics backend
+      options:
+        - D3D12
+        - Vulkan
+        - Other or unknown
+    validations:
+      required: true
+  - type: dropdown
+    id: title-patch
+    attributes:
+      label: External title patch or startup workaround
+      description: Say whether your setup uses one; do not attach game data or patch files.
+      options:
+        - None
+        - External title patch
+        - Separate startup workaround
+        - Both
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: settings
+    attributes:
+      label: Relevant settings
+      description: Include command-line flags and any relevant config values, especially Kinect settings.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Give the shortest sequence that reproduces the problem.
+      placeholder: |
+        1. Start the emulator with ...
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+      description: Describe what you expected, what happened, and whether it is repeatable.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Attach a relevant emulator log or screenshot after checking it for private information. Do not attach personal recordings, game images, SDK files, or driver files.
+    validations:
+      required: false

@@ -1,75 +1,58 @@
-<p align="center">
-    <a href="https://github.com/xenia-canary/xenia-canary/tree/canary_experimental/assets/icon">
-        <img height="256px" src="https://raw.githubusercontent.com/xenia-canary/xenia/master/assets/icon/256.png" />
-    </a>
-</p>
+# Xenia Canary Kinect
 
-<h1 align="center">Xenia Canary - Xbox 360 Emulator</h1>
+Xenia Canary Kinect is an independent experimental fork of Xenia Canary for
+researching and developing Xbox 360 Kinect support. It is based on the
+[Xenia Canary project](https://github.com/xenia-canary/xenia-canary), and is
+not an official release or support channel for that project.
 
-Xenia Canary is an experimental fork of the Xenia emulator. For more information, see the
-[Xenia Canary wiki](https://github.com/xenia-canary/xenia-canary/wiki).
+This fork is under active development. The work is intended to be contributed
+upstream as an 11-part series in response to
+[issue #1290](https://github.com/xenia-canary/xenia-canary/issues/1290), with
+[the first pull request #1291](https://github.com/xenia-canary/xenia-canary/pull/1291)
+open. The series is pending; standard Xenia Canary releases should not be
+assumed to include this work.
 
-Come chat with us about **emulator-related topics** on [Discord](https://discord.gg/Q9mxZf9).
-For developer chat join `#dev` but stay on topic. Lurking is not only fine, but encouraged!
-Please check the [FAQ](https://github.com/xenia-canary/xenia-canary/wiki/FAQ) page before asking questions.
-We've got jobs/lives/etc, so don't expect instant answers.
+## What works
 
-Discussing illegal activities will get you banned.
+The live backend is Windows-only and targets Kinect sensors through the Kinect
+for Windows 1.8 runtime. The verified hardware setup is an Xbox 360 Kinect with
+its PC adapter and the SDK 1.8 installation. Other sensor models have not had
+the same end-to-end verification. Linux builds support recorded-frame replay
+and the no-sensor backend, but not live hardware.
+The implemented protocol, current settings, test evidence, and limitations are
+documented in [docs/nui.md](docs/nui.md).
 
-## Status
+There is no fork-specific binary release yet. See [docs/kinect-setup.md](docs/kinect-setup.md)
+for safe setup and testing instructions, or [docs/building.md](docs/building.md)
+to build from source. The [fork plan](docs/kinect-fork-plan.md) describes the
+first rollout.
 
-Buildbot | Status | Releases
--------- | ------ | --------
-Canary (🪟, 🐧) | [![CI](https://github.com/xenia-canary/xenia-canary/actions/workflows/Orchestrator.yml/badge.svg?branch=canary_experimental)](https://github.com/xenia-canary/xenia-canary/actions/workflows/Orchestrator.yml/badge.svg?branch=canary_experimental) [![Codacy Badge](https://app.codacy.com/project/badge/Grade/cd506034fd8148309a45034925648499)](https://app.codacy.com/gh/xenia-canary/xenia-canary/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade) | [Latest](https://github.com/xenia-canary/xenia-canary/releases/latest) ◦ [All](https://github.com/xenia-canary/xenia-canary/releases) ◦ [Old](https://github.com/xenia-canary/xenia-canary-releases/releases)
+A tester reported live completion of all five activities for title ID
+`4D5308ED`. Body-controlled play requires `--allow_avatar_initialization=true`. The
+obstacle activity needs a matching external title patch, which is not bundled.
+The emulator package alone does not provide that complete five-activity setup.
+The loading figure is a translucent stand-in.
+Other known gaps include slow tutorial movies, black color frames, incomplete
+microphone support, and a rendering freeze in Debug builds after using
+File > Close and reopening a title in the same emulator process. Restart the
+emulator after that close/reopen path.
 
-### Experimental Netplay
+## Issues and contributions
 
-Buildbot | Status | Releases
--------- | ------ | --------
-Windows | [![Codacy Badge](https://app.codacy.com/project/badge/Grade/d814c4b6aa444dcc9c1631e0224b2739)](https://app.codacy.com/gh/AdrianCassar/xenia-canary/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade) | [Latest](https://github.com/AdrianCassar/xenia-canary/releases/latest)
+The issue tracker will be enabled with the first rollout. Use this repository's
+issue form for reproducible bugs in this fork once it is available. Include
+the fork commit, platform, sensor, backend, title ID (or `N/A` for a startup
+failure before a title loads), settings, and relevant logs.
 
-## Quickstart
+For source contributions, read [CONTRIBUTING.md](.github/CONTRIBUTING.md) and
+the [style guide](docs/style_guide.md). The project follows Xenia's source and
+information-sourcing rules. Please use title IDs rather than game trademarks
+when describing compatibility, and do not submit copyrighted game data, Kinect
+drivers, or SDK files.
 
-See the [Quickstart](https://github.com/xenia-canary/xenia-canary/wiki/Quickstart) page.
+## License and credits
 
-## FAQ
-
-See the [frequently asked questions](https://github.com/xenia-canary/xenia-canary/wiki/FAQ) page.
-
-## Game Compatibility
-
-See the [Game compatibility list](https://github.com/xenia-canary/game-compatibility/issues)
-for currently tracked games, and feel free to contribute your own updates,
-screenshots, and information there following the [existing conventions](https://github.com/xenia-canary/game-compatibility/blob/canary/README.md).
-
-## Building
-
-See [building.md](docs/building.md) for setup and information about the
-`xb` script. When writing code, check the [style guide](docs/style_guide.md)
-and be sure to run clang-format!
-
-## Contributors Wanted!
-
-Have some spare time, know advanced C++, and want to write an emulator?
-Contribute! There's a ton of work that needs to be done, a lot of which
-is wide open greenfield fun.
-
-**For general rules and guidelines please see [CONTRIBUTING.md](.github/CONTRIBUTING.md).**
-
-Fixes and optimizations are always welcome (please!), but in addition to
-that there are some major work areas still untouched:
-
-* Help work through [missing functionality/bugs in games](https://github.com/xenia-canary/xenia-canary/labels/compat)
-* Reduce the size of Xenia's [huge log files](https://github.com/xenia-canary/xenia-canary/issues/1526)
-* Skilled with Linux? A strong contributor is needed to [help with porting](https://github.com/xenia-canary/xenia-canary/labels/platform-linux)
-
-See more projects [good for contributors](https://github.com/xenia-canary/xenia-canary/labels/good%20first%20issue). It's a good idea to ask on Discord and check the issues page before beginning work on
-something.
-
-## Disclaimer
-
-The goal of this project is to experiment, research, and educate on the topic
-of emulation of modern devices and operating systems. **It is not for enabling
-illegal activity**. All information is obtained via reverse engineering of
-legally purchased devices and games and information made public on the internet
-(you'd be surprised what's indexed on Google...).
+This fork retains the Xenia codebase's 3-clause BSD license; see
+[LICENSE](LICENSE) and the notices in source files for copyright attribution.
+Third-party components remain under their respective licenses. Xenia Canary is
+the upstream project on which this experimental fork is based.

@@ -10,22 +10,19 @@ work changes, and read it before starting a new session.
 
 ## Current decision
 
-Use **Xenia Canary Kinect** as the public identity. Keep the existing repository
-at [ryantimjohn/xenia-canary](https://github.com/ryantimjohn/xenia-canary) for the
-initial rollout. A later rename to `xenia-canary-kinect` is optional and requires
-a coordinated update of remotes, links, workflows and the PR monitor.
+Use **Xenia Canary Kinect** as the public identity and keep the existing
+[ryantimjohn/xenia-canary repository](https://github.com/ryantimjohn/xenia-canary).
+The owner approved `kinect` as the public development and default branch; do not
+rename the repository. Local identity preparation is on `codex/kinect-identity`;
+it contains the complete eleven-part implementation and an integration of
+upstream `canary_experimental`.
 
-The proposed public development and default branch is `kinect`. Local identity
-preparation is on `codex/kinect-identity`; it contains the complete eleven-part
-implementation and an integration of upstream `canary_experimental`.
-This preparation must be reviewed by the owner before any identity changes are
-pushed. No new branch, tag, release, repository rename or settings change has
-been published as part of this preparation.
-
-The first public build channel will be experimental Windows x86-64 releases.
-Linux remains useful for building, tests and depth replay; live sensor support is
-currently Windows-only. Keep the executable and existing configuration names
-compatible while changing display names and downloadable archive branding.
+The owner approved the saved rollout plan. Pushes, repository settings and
+release work remain to be completed and verified during rollout. The first
+public build channel is experimental Windows x86-64 releases. Linux remains
+useful for building, tests and depth replay; live sensor support is currently
+Windows-only. Keep executable and existing configuration names compatible while
+changing display names and downloadable archive branding.
 
 ## Principles
 
@@ -57,8 +54,8 @@ The initial upstream series is eleven parts responding to
 [xenia-canary#1290](https://github.com/xenia-canary/xenia-canary/issues/1290).
 [The first PR](https://github.com/xenia-canary/xenia-canary/pull/1291) is open.
 The existing three-hour monitor handles merges, review comments and subsequent
-submissions. Its publication authorization covers that series; it does not
-authorize publishing this fork identity.
+submissions. Its publication authorization covers that series; separate owner
+approval covers the fork identity rollout.
 
 Fork branding, issue templates and release workflows stay out of the upstream
 series. Keep its prepared source commits available. When maintainers revise a
@@ -83,8 +80,7 @@ in their own voice. The monitor never posts replies as the owner.
 - Ship an opt-in Kinect config template enabling avatar initialization. Copy it
   to isolated test storage before selecting it with `--config`, because Xenia
   saves settings to the selected file. Keep the general default disabled.
-- Keep the current repository URL. Prepare the optional rename as a later
-  decision, not a prerequisite for releasing.
+- Keep the current repository URL and do not rename the repository.
 
 ### 2. Local release preparation
 
@@ -102,33 +98,34 @@ in their own voice. The monitor never posts replies as the owner.
 - Keep hosted workflow execution separate from local checks: a local syntax or
   packaging check is not evidence that GitHub Actions completed successfully.
 
-Initial version example: `kinect-v0.1.0-preview.1`. This is a naming proposal;
-the tag does not exist as part of local preparation.
+The first candidate is planned as `kinect-v0.1.0-preview.1`. The release index is
+the durable public link; do not use a `latest` alias or a tag link until it has
+been confirmed that the release exists.
 
 ### 3. Owner review and repository rollout
 
-Present the plan, README, setup guide, UI changes, workflow diff and validation
-results to the owner. After explicit approval of the rollout:
+The owner approved the rollout. Complete and verify these external steps before
+calling the rollout complete:
 
 1. Push the approved integration to the new `kinect` branch.
 2. Set `kinect` as the default branch so the fork's landing page and manual
    workflow use the new identity.
-3. Enable this fork's issues and confirm its issue form works. Review Actions
-   settings without copying personal credentials into workflows.
+3. Enable this fork's issues and confirm its issue form works. Issues are
+   currently disabled; enabling them before publication is an approved step.
+   Review Actions settings without copying personal credentials into workflows.
 4. Check all rendered links and the visible relationship to upstream.
-5. Before tagging, update the README's initial no-release/closed-tracker status
-   to match the rollout and provide the intended release and patch links. Run
-   the manual build workflow to prepare a draft prerelease.
+5. Before tagging, confirm the issue tracker is enabled and the README's release
+   and patch links resolve. Run the manual build workflow for the planned
+   `kinect-v0.1.0-preview.1` draft prerelease.
 6. Inspect the actual downloaded archive and release notes, verify checksums,
    and verify startup using separate settings and storage.
 7. Publish only after the release candidate's results and limitations are
    reviewed. Keep the previous usable version available.
 
-The existing repository has issues disabled at the time of preparation; local
-issue templates do not change that setting. Manual workflows must be present
-on the default branch to be dispatched. Changing the default branch, enabling
-issues, running hosted workflows and publishing a release are external rollout
-steps, not completed by a local commit.
+Local issue templates do not change the repository's issue setting. Manual
+workflows must be present on the default branch to be dispatched. Changing the
+default branch, enabling issues, running hosted workflows and publishing a
+release are external rollout steps, not completed by a local commit.
 
 ## Release evidence and compatibility
 
@@ -139,17 +136,17 @@ import libraries. A runtime-only installation and other sensor models have not
 received the same end-to-end verification. Depth replay needs no Kinect runtime.
 
 For title `4D5308ED`, existing evidence includes live completion of all five
-activities reported by the tester, depth-based player tracking, cursor input and
+activities reported by a tester, depth-based player tracking, cursor input and
 a visibly verified Guide open/close. Body-controlled gameplay requires
 `allow_avatar_initialization=true` through the opt-in Kinect launch preset (or
-the equivalent command-line flag). The obstacle activity requires a separate
-external loading workaround; the repeated first-activity startup has a separate
-optional workaround. These are not included in the emulator package.
-
-Before describing an activity as usable from a public download, provide an
-accessible, version-matched path to any required external patches and their
-instructions. Do not claim a patch is publicly released merely because a local
-copy was tested.
+the equivalent command-line flag). The obstacle activity needs the external
+loading workaround matched to Rev 2 module hash `FEF1C9FF272B3BD9`. The exact
+patch payload is publicly readable at the pinned [game-patches file](https://github.com/ryantimjohn/game-patches/blob/5a675635196223bb48c0a3e0e7769d67eb36bc36/patches/4D5308ED%20-%20Kinect%20Adventures!.patch.toml);
+its [pull request #521](https://github.com/xenia-canary/game-patches/pull/521)
+is open. The setup guide explains how to place and enable the matching entry.
+Both entries are disabled in the file, and enabling both together has not been
+verified across all activities. Do not claim that upstream accepted or released
+this patch. Neither patch is included in the emulator package.
 
 Known limitations to keep visible:
 
@@ -197,19 +194,21 @@ For each release, record:
 3. Identify whether the task belongs to development, release or upstream review.
 4. Preserve original saves, recordings, binaries and diagnostic work.
 5. Serialize builds, tests and game runs; use focused delegated work as needed.
-6. Check the current permission for foreground use and publication. Local
-   preparation may continue while release approval is pending.
+6. Confirm the current rollout step and external status in the work-session
+   checkpoint. The saved identity and rollout plan is approved.
 7. Update this plan's status and record the next concrete action before stopping.
 
 ## Status
 
-- Identity and release preparation: **implemented locally for owner review**.
-- Opt-in Kinect launch preset and archive inclusion: **prepared locally;
-  packaged build not yet run**.
-- Hosted release workflow and downloaded release candidate: **not yet run**.
-- Identity push, default-branch/settings changes and release: **await owner review**.
+- Identity and documentation: **prepared locally; rollout approved**.
+- Repository URL: **retained**; `kinect` is the approved public/default branch.
+- Issues: **currently disabled; enable before publication**.
+- Planned first release: **`kinect-v0.1.0-preview.1`, draft then inspect and
+  publish after checks**; no fork-specific binary release exists yet.
+- Hosted workflow, downloaded release candidate and runtime checks on that
+  candidate: **not yet confirmed**.
 - Upstream PR series: **continues separately**.
-- Repository rename: **deferred; current URL retained**.
+- Repository rename: **not planned; current URL retained**.
 
 ## References
 

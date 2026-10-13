@@ -87,13 +87,42 @@ replay commands are described in more detail in [nui.md](nui.md).
 ## Current limits
 
 One tester reported live completion of all five activities in title
-`4D5308ED`, with these qualifications: the obstacle activity needs a matching
-external title patch, which is not bundled; a separate optional startup
-workaround has been used to avoid forced selection of the first rafting
-activity. The emulator package alone does not provide the complete five-activity
-setup; the matching patches and instructions are maintained separately.
+`4D5308ED`. The obstacle activity needs the version-matched external loading
+patch described below. A separate optional startup workaround skips forced
+selection of the introductory activity; enabling both patch entries together
+has not been verified. Neither patch is bundled with the emulator.
 The avatar is a translucent stand-in, the tutorial movies run slowly, color
 frames are black, and microphone support is incomplete. In Debug builds, using
 File > Close and reopening a title in the same process can freeze
 rendering; exit and restart the emulator before another run. See [nui.md](nui.md)
 for the full evidence and open questions.
+
+## Optional title patches
+
+The external [game-patches pull request #521](https://github.com/xenia-canary/game-patches/pull/521)
+is open. Its exact patch payload is publicly readable at this pinned
+[Rev 2 patch file](https://github.com/ryantimjohn/game-patches/blob/5a675635196223bb48c0a3e0e7769d67eb36bc36/patches/4D5308ED%20-%20Kinect%20Adventures!.patch.toml).
+This is a version-matched external file, not a patch bundled with Xenia Canary
+Kinect or a claim that upstream has accepted or released it.
+
+Use it only with title ID `4D5308ED` and the Rev 2 image whose module hash is
+`FEF1C9FF272B3BD9`. Download the file from that pinned link, keep the filename
+`4D5308ED - Kinect Adventures!.patch.toml`, and place it in the `patches`
+folder inside the selected storage root. In the live and replay commands above,
+that is `$testRoot\patches` (the same directory passed as `--storage_root`), not
+necessarily the executable's folder. Patch loading is enabled by default
+(`apply_patches = true`); if the selected config overrides it, set it to `true`.
+The file contains two disabled entries:
+
+- Enable **Reflex Ridge loading figure** only if you need the obstacle activity;
+  it lets the activity start while avatar assets are unavailable. A tester
+  reached a score with this workaround, and a tester reported live completion
+  of all five activities.
+- **Skip forced River Rush introduction** is an optional startup workaround.
+  Leave it disabled unless you want to go to the normal menu instead of the
+  forced introduction.
+
+The two entries have not been verified enabled together across all activities.
+Both remain disabled in the supplied patch. Do not use it with another image
+hash; that version needs a separately matched patch. The loading workaround
+does not address the slow tutorial movies.

@@ -1,61 +1,61 @@
 # Xenia Canary Kinect
 
 Xenia Canary Kinect is an independent experimental fork of Xenia Canary for
-researching and developing Xbox 360 Kinect support. It is based on the
-[Xenia Canary project](https://github.com/xenia-canary/xenia-canary), and is
-not an official release or support channel for that project.
+researching and developing Xbox 360 Kinect support. It keeps the existing
+[ryantimjohn/xenia-canary repository](https://github.com/ryantimjohn/xenia-canary)
+and develops on the `kinect` branch. It is not an official release or support
+channel for [Xenia Canary](https://github.com/xenia-canary/xenia-canary).
 
-This fork is under active development. The work is intended to be contributed
-upstream as an 11-part series in response to
-[issue #1290](https://github.com/xenia-canary/xenia-canary/issues/1290), with
-[the first pull request #1291](https://github.com/xenia-canary/xenia-canary/pull/1291)
-open. The series is pending; standard Xenia Canary releases should not be
+The Kinect work is also being contributed upstream in an eleven-part series in
+response to [issue #1290](https://github.com/xenia-canary/xenia-canary/issues/1290).
+[The first pull request #1291](https://github.com/xenia-canary/xenia-canary/pull/1291)
+is open; the series is pending, so standard Xenia Canary releases should not be
 assumed to include this work.
 
 ## What works
 
-The live backend is Windows-only and targets Kinect sensors through the Kinect
-for Windows 1.8 runtime. The verified hardware setup is an Xbox 360 Kinect with
-its PC adapter and the SDK 1.8 installation. Other sensor models have not had
-the same end-to-end verification. Linux builds support recorded-frame replay
-and the no-sensor backend, but not live hardware.
-The implemented protocol, current settings, test evidence, and limitations are
-documented in [docs/nui.md](docs/nui.md).
+Live Kinect support is Windows-only and uses the Kinect for Windows 1.8
+runtime. The verified setup uses an Xbox 360 Kinect with its PC power/USB
+adapter and the SDK 1.8 installation. Linux supports recorded-depth replay and
+the no-sensor backend, not live hardware. See [the setup guide](docs/kinect-setup.md)
+for prerequisites and isolated test commands, and [the NUI notes](docs/nui.md)
+for protocol details, evidence and limitations.
 
-There is no fork-specific binary release yet. See [docs/kinect-setup.md](docs/kinect-setup.md)
-for safe setup and testing instructions, or [docs/building.md](docs/building.md)
-to build from source. The [fork plan](docs/kinect-fork-plan.md) describes the
-first rollout.
+Title ID `4D5308ED` boots, tracks a player and supports hand-cursor selection.
+A tester reported live completion of all five activities. The obstacle activity
+requires a matching external patch; an optional separate patch skips forced
+introductory activity selection. Both patches are disabled by default, and the
+two have not been verified enabled together. Follow the version-matched
+[patch instructions](docs/kinect-setup.md#optional-title-patches) for the Rev 2
+image (`FEF1C9FF272B3BD9`). The patches are maintained separately and are not
+bundled with this emulator.
+
+The translucent loading figure stands in for unavailable avatar assets.
+Tutorial movies can run slowly, color frames are black and microphone support
+is incomplete. See the setup guide and NUI notes before testing.
+
+Experimental Windows builds are distributed from the durable
+[releases index](https://github.com/ryantimjohn/xenia-canary/releases). Each
+candidate is prepared as a draft and published after its archive, checksum and
+startup have been checked. You can also [build from source](docs/building.md).
 
 The opt-in [Kinect launch preset](config-presets/kinect.config.toml) enables
 avatar initialization for body-controlled play. Copy it into a fresh test
 storage folder and select that copy with `--config`; the emulator saves
-settings to the selected file. The general default remains `false`. The setup
-guide gives live and replay commands with isolated storage.
-
-A tester reported live completion of all five activities for title ID
-`4D5308ED`. Body-controlled play requires avatar initialization, supplied by
-the opt-in preset or `--allow_avatar_initialization=true`. The obstacle activity
-needs a matching external title patch, which is not bundled.
-The emulator package alone does not provide that complete five-activity setup.
-The loading figure is a translucent stand-in.
-Other known gaps include slow tutorial movies, black color frames, incomplete
-microphone support, and a rendering freeze in Debug builds after using
-File > Close and reopening a title in the same emulator process. Restart the
-emulator after that close/reopen path.
+settings to the selected file. The general default remains `false`.
 
 ## Issues and contributions
 
-The issue tracker will be enabled with the first rollout. Use this repository's
-issue form for reproducible bugs in this fork once it is available. Include
+Use this repository's issue form for reproducible bugs in this fork. Include
 the fork commit, platform, sensor, backend, title ID (or `N/A` for a startup
-failure before a title loads), settings, and relevant logs.
+failure before a title loads), settings and relevant logs. The issue tracker is
+for bug reports and work items, not general support or discussion.
 
 For source contributions, read [CONTRIBUTING.md](.github/CONTRIBUTING.md) and
-the [style guide](docs/style_guide.md). The project follows Xenia's source and
-information-sourcing rules. Please use title IDs rather than game trademarks
-when describing compatibility, and do not submit copyrighted game data, Kinect
-drivers, or SDK files.
+the [style guide](docs/style_guide.md). Follow Xenia's source and
+information-sourcing rules. Use title IDs rather than game trademarks when
+describing compatibility, and do not submit copyrighted game data, Kinect
+drivers or SDK files.
 
 ## License and credits
 

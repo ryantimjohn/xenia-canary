@@ -87,7 +87,8 @@ in their own voice. The monitor never posts replies as the owner.
   the Kinect config template, protocol documentation, third-party notices and
   source/upstream identity;
   include SHA-256 checksums.
-- Create only a **draft prerelease**, never an automatic public release on push.
+- Create a **draft prerelease** for each future candidate; never publish
+  automatically on push.
 - Reject attempts to replace an existing tag or release's files. A revised
   candidate receives a new version.
 - A failed upload or conflicting tag can leave an unpublished draft. Inspect
@@ -95,9 +96,12 @@ in their own voice. The monitor never posts replies as the owner.
 - Keep hosted workflow execution separate from local checks: a local syntax or
   packaging check is not evidence that GitHub Actions completed successfully.
 
-The first candidate, `kinect-v0.1.0-preview.1`, is currently a draft. It is not
-a published download. After publication, use the durable releases index; do not
-use a `latest` alias or tag link until the release is publicly available.
+The first candidate, `kinect-v0.1.0-preview.1`, has been published as an
+experimental prerelease after its package and focused runtime evidence were
+reviewed. Future candidates remain drafts until their archives and runtime
+results have been checked and release notes reviewed. After publication, use
+the durable [releases index](https://github.com/ryantimjohn/xenia-canary/releases);
+do not use a `latest` alias.
 
 ### 3. Repository rollout and release verification
 
@@ -107,22 +111,31 @@ branch. Public documentation links have been checked. The issue setting and
 template file are separate repository features; confirm both when setting up
 another repository.
 
-The manual workflow created the first draft candidate. Its hosted Windows build,
-automated suites, archive contents, checksum, extraction, and startup checks are
-recorded below. A menu-depth replay check was interrupted by a Windows firewall
-prompt and remains pending. Do not publish until that check is resolved or its
-limitation is explicitly accepted and the final release notes are reviewed.
-Keep future releases as drafts until their actual archive and runtime results
-have been checked. Publish only after reviewing the candidate's results and
-limitations; keep the previous usable version available.
+The manual workflow created the first candidate. Its hosted Windows build,
+automated suites, archive contents, checksum, extraction, startup checks, and
+fresh downloaded-package replay are recorded below. The fresh D3D12 depth replay
+verified a visible Guide open, gesture close, resumed title rendering, and
+normal exit with isolated storage and patches disabled.
+The first prerelease is published, and future candidates must remain drafts
+until their own archives, runtime results, and release notes are reviewed. Keep
+the previous usable version available.
 
 ## Release evidence and compatibility
 
-The initial hardware evidence is an Xbox 360 Kinect with its PC power/USB
+The initial live-hardware evidence is an Xbox 360 Kinect with its PC power/USB
 adapter on Windows, using the Kinect for Windows SDK 1.8 installation for
 drivers and `Kinect10.dll`. Building does not require Kinect SDK headers or
 import libraries. A runtime-only installation and other sensor models have not
 received the same end-to-end verification. Depth replay needs no Kinect runtime.
+
+The published archive was also downloaded and verified in a fresh D3D12 depth
+replay with NOP audio, isolated storage, patches disabled, and avatar
+initialization enabled. The Guide visibly opened with replay ready, tracking ID
+57, and a blue circular cursor; a recorded gesture closed it and title
+rendering resumed. The process exited normally with code 0, no new error
+diagnostic category appeared, and baseline and candidate files remained
+unchanged. This does not add live-hardware, audio, save-persistence, external
+patch, or all-activity coverage.
 
 For title `4D5308ED`, existing evidence includes live completion of all five
 activities reported by a tester, depth-based player tracking, cursor input and
@@ -184,8 +197,8 @@ For each release, record:
 4. Preserve original saves, recordings, binaries and diagnostic work.
 5. Serialize builds, tests and game runs; use focused delegated work as needed.
 6. Confirm the current rollout step and external status in the work-session
-   checkpoint. Keep the current candidate unpublished while menu-depth replay
-   and final release review remain pending.
+   checkpoint. For a future candidate, retain draft status until its archive,
+   runtime evidence, and release notes have been reviewed.
 7. Update this plan's status and record the next concrete action before stopping.
 
 ## Status
@@ -194,18 +207,23 @@ For each release, record:
 - Repository URL: **`ryantimjohn/xenia-canary` retained; no rename planned**.
 - Issues: **enabled; `.github/ISSUE_TEMPLATE/bug_report.yaml` is present on the
   default branch**.
-- First release candidate: **`kinect-v0.1.0-preview.1` is a draft from source
-  commit `360ab79482c5f10b4827624fd2cfb64579c87ee2`; it is not published**.
+- First prerelease: **`kinect-v0.1.0-preview.1` is published** from source
+  commit `360ab79482c5f10b4827624fd2cfb64579c87ee2`
+  ([release](https://github.com/ryantimjohn/xenia-canary/releases/tag/kinect-v0.1.0-preview.1),
+  published October 13, 2026).
 - Hosted workflow: **passed** ([run 38331249988](https://github.com/ryantimjohn/xenia-canary/actions/runs/38331249988)).
-- Windows archive: **97 files; archive and contents verified**. Archive
-  SHA-256: `277db959bad04165de3685fc1a068f51b4cdf271b3fbb4c04316031cbf25a85c`;
-  executable SHA-256: `812bfb628ce150a7ffcd492853f99697e1e05eb94052ec43530a07e25dafacf6`.
 - Release application builds and APU, kernel, NUI and CPU suites: **passed on
   Windows and Linux** at the candidate source revision.
-- Downloaded artifact startup: **passed**; branding, Help menu, avatar-enabled
-  preset and clean exit were verified. Menu-depth replay: **pending**, blocked
-  by a Windows firewall prompt.
-- Publication: **pending final replay decision and release-note review**.
+- Downloaded archive: **97 files; archive and contents verified**. Archive
+  SHA-256: `277db959bad04165de3685fc1a068f51b4cdf271b3fbb4c04316031cbf25a85c`;
+  executable SHA-256: `812bfb628ce150a7ffcd492853f99697e1e05eb94052ec43530a07e25dafacf6`.
+- Downloaded artifact startup and fresh replay: **passed**. Branding, Help menu,
+  and avatar-enabled preset were verified. D3D12 depth replay showed the Guide
+  open and gesture-close with resumed title rendering; normal exit code 0,
+  unchanged baseline/candidate, and no new error diagnostic category. Scope and
+  limitations are recorded above.
+- Publication: **published as an experimental prerelease**; future candidates
+  stay drafts pending package, runtime, and release-note review.
 - Upstream PR series: **continues separately**.
 
 ## References

@@ -12,7 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: kinect-draft-${{ inputs.release_tag }}
+  # Serialize different version requests as well as reruns of one version.
+  group: kinect-draft-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
@@ -67,21 +68,30 @@ jobs:
 
   build-windows:
     name: Build and test Windows package
-    needs: preflight
+    needs: [preflight, lint]
     uses: ./.github/workflows/Windows_x86.yml
     permissions:
       contents: read
     with:
       kinect_release: true
 
+  lint:
+    name: Check source formatting
+    needs: preflight
+    uses: ./.github/workflows/Lint.yml
+    with:
+      runs-on: ubuntu-24.04
+      llvm_version: 20
+
   draft-release:
     name: Create draft prerelease
-    needs: [preflight, build-windows]
+    needs: [preflight, lint, build-windows]
     if: >-
       github.event_name == 'workflow_dispatch' &&
       github.repository == 'ryantimjohn/xenia-canary' &&
       github.ref == 'refs/heads/kinect' &&
       needs.preflight.result == 'success' &&
+      needs.lint.result == 'success' &&
       needs.build-windows.result == 'success'
     runs-on: ubuntu-latest
     permissions:

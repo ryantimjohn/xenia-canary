@@ -28,6 +28,11 @@ jobs:
 
   lint:
     name: Lint
+    # Kinect releases run their own checks after local validation. Avoid a
+    # second hosted build on the release branch push in this fork only.
+    if: >-
+      ${{ !(github.repository == 'ryantimjohn/xenia-canary' &&
+        github.event_name == 'push' && github.ref == 'refs/heads/kinect') }}
     uses: ./.github/workflows/Lint.yml
     with:
       runs-on: ubuntu-24.04
@@ -41,13 +46,19 @@ jobs:
   build-windows:
     name: Windows (x86-64)
     needs: [lint, commit-message]
-    if: ${{ !failure() && !cancelled() }}
+    if: >-
+      ${{ !failure() && !cancelled() &&
+      !(github.repository == 'ryantimjohn/xenia-canary' &&
+        github.event_name == 'push' && github.ref == 'refs/heads/kinect') }}
     uses: ./.github/workflows/Windows_x86.yml
 
   build-linux:
     name: Linux (x86-64)
     needs: [lint, commit-message]
-    if: ${{ !failure() && !cancelled() }}
+    if: >-
+      ${{ !failure() && !cancelled() &&
+      !(github.repository == 'ryantimjohn/xenia-canary' &&
+        github.event_name == 'push' && github.ref == 'refs/heads/kinect') }}
     uses: ./.github/workflows/Linux_x86.yml
     with:
       runs-on: ${{ needs.lint.outputs.runs-on }}

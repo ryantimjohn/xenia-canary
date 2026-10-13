@@ -148,6 +148,10 @@ jobs:
               throw "Missing or invalid $variable"
             }
           }
+          $head = git rev-parse HEAD
+          if ($LASTEXITCODE -ne 0 -or $head -ne $env:SOURCE_COMMIT) {
+            throw 'Packaged checkout does not match the dispatched commit.'
+          }
           $exe = 'build/bin/Windows/Release/xenia_canary.exe'
           if ((Get-Item $exe).Length -le 100000) {
             throw 'Executable is too small.'
@@ -240,13 +244,13 @@ jobs:
           if ((Get-Item $archivePath).Length -le 100000) {
             throw 'Archive is too small.'
           }
-          $listing = & 7z l -slt $archivePath
+          $listing = & 7z l -slt -ba $archivePath
           if ($LASTEXITCODE -ne 0) { throw "7z listing failed with exit code $LASTEXITCODE" }
           $entries = @($listing | Select-String '^Path = ' | ForEach-Object {
             $_.Line.Substring(7).Replace('\', '/')
           })
-          foreach ($required in $packageFiles) {
-            if ($required -notin $entries) { throw "Archive is missing $required" }
+          if (@(Compare-Object ($packageFiles | Sort-Object) ($entries | Sort-Object)).Count) {
+            throw 'Archive contents do not exactly match the approved package file list.'
           }
           $digest = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
           [System.IO.File]::WriteAllText(

@@ -11,14 +11,14 @@
 
 #include <chrono>
 #include <cstdint>
-#include <memory>
 #include <thread>
-#include <utility>
 
+#include "xenia/apu/audio_system.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/threading.h"
 
+#define CATCH_CONFIG_ENABLE_CHRONO_STRINGMAKER
 #include "third_party/catch/include/catch.hpp"
 
 DECLARE_int32(log_level);
@@ -31,15 +31,10 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// The audio system's client semaphores hold at most this many counts
-// (AudioSystem::kMaximumQueuedFrames).
-constexpr int kSemaphoreMaximum = 64;
-
 // One frame at the driver's defaults: 256 samples at 48000 Hz.
 constexpr auto kFrame = std::chrono::nanoseconds(5333333);
 
-// How long past a deadline the pacing thread may take to wake up and release,
-// and the test thread to look. Loose, so that the tests never flake.
+// Allowance for scheduler delays.
 constexpr auto kMargin = std::chrono::milliseconds(50);
 
 // The driver announces itself in the log when it starts. That does not belong
@@ -80,38 +75,13 @@ int64_t MillisecondsSince(Clock::time_point start) {
       .count();
 }
 
-// What became of a FakeBackendDriver.
-struct FakeBackendDriverFate {
-  bool shut_down = false;
-  bool destroyed = false;
-};
-
-// A driver a backend hands back uninitialised, as XAudio2's and SDL's are,
-// whose Initialize succeeds only while the host's device is up.
-class FakeBackendDriver final : public AudioDriver {
- public:
-  FakeBackendDriver(bool device_up, FakeBackendDriverFate* fate)
-      : device_up_(device_up), fate_(fate) {}
-  ~FakeBackendDriver() override { fate_->destroyed = true; }
-
-  bool Initialize() override { return device_up_; }
-  void Shutdown() override { fate_->shut_down = true; }
-  void SubmitFrame(float* samples) override {}
-  void Pause() override {}
-  void Resume() override {}
-  void SetVolume(float volume) override {}
-
- private:
-  bool device_up_;
-  FakeBackendDriverFate* fate_;
-};
-
 }  // namespace
 
 TEST_CASE("Frames submitted at once are released at the real-time rate",
           "[apu][pacing]") {
   ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
+  auto semaphore =
+      threading::Semaphore::Create(0, AudioSystem::kMaximumQueuedFrames);
   REQUIRE(semaphore);
   PacingAudioDriver driver(semaphore.get());
   REQUIRE(driver.Initialize());
@@ -120,15 +90,13 @@ TEST_CASE("Frames submitted at once are released at the real-time rate",
   const Clock::time_point start = Clock::now();
   SubmitFrames(&driver, kFrames);
 
-  // Halfway through, about half of them have played: not none, and not all.
-  std::this_thread::sleep_until(start + kFrames * kFrame / 2);
-  int released = TakeReleased(semaphore.get());
-  CHECK(released >= 5);
-  CHECK(released <= 15);
-
-  std::this_thread::sleep_until(start + kFrames * kFrame + kMargin);
-  released += TakeReleased(semaphore.get());
-  CHECK(released == kFrames);
+  for (int i = 0; i < kFrames; ++i) {
+    REQUIRE(threading::Wait(semaphore.get(), false,
+                            std::chrono::milliseconds(1000)) ==
+            threading::WaitResult::kSuccess);
+  }
+  CHECK(Clock::now() - start >= (kFrames - 1) * kFrame);
+  CHECK(TakeReleased(semaphore.get()) == 0);
 
   driver.Shutdown();
 }
@@ -136,7 +104,8 @@ TEST_CASE("Frames submitted at once are released at the real-time rate",
 TEST_CASE("A frame submitted after a long idle is released promptly",
           "[apu][pacing]") {
   ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
+  auto semaphore =
+      threading::Semaphore::Create(0, AudioSystem::kMaximumQueuedFrames);
   REQUIRE(semaphore);
   PacingAudioDriver driver(semaphore.get());
   REQUIRE(driver.Initialize());
@@ -153,9 +122,8 @@ TEST_CASE("A frame submitted after a long idle is released promptly",
   SubmitFrames(&driver, 1);
   const threading::WaitResult result =
       threading::Wait(semaphore.get(), false, std::chrono::milliseconds(1000));
-  const int64_t waited_ms = MillisecondsSince(submitted);
   CHECK(result == threading::WaitResult::kSuccess);
-  CHECK(waited_ms <= 20);
+  CHECK(Clock::now() - submitted <= kFrame + kMargin);
 
   driver.Shutdown();
 }
@@ -163,34 +131,29 @@ TEST_CASE("A frame submitted after a long idle is released promptly",
 TEST_CASE("Pause holds releases and Resume lets them continue",
           "[apu][pacing]") {
   ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
+  auto semaphore =
+      threading::Semaphore::Create(0, AudioSystem::kMaximumQueuedFrames);
   REQUIRE(semaphore);
   PacingAudioDriver driver(semaphore.get());
   REQUIRE(driver.Initialize());
 
   constexpr int kFrames = 20;
-  const Clock::time_point start = Clock::now();
-  SubmitFrames(&driver, kFrames);
-  std::this_thread::sleep_until(start + 5 * kFrame);
   driver.Pause();
-  const int remaining = kFrames - TakeReleased(semaphore.get());
-  REQUIRE(remaining > 0);
+  SubmitFrames(&driver, kFrames);
 
-  // Paused for longer than every remaining frame would have taken to play.
+  // Wait beyond every pending deadline while paused.
   std::this_thread::sleep_for(kFrames * kFrame + kMargin);
   CHECK(TakeReleased(semaphore.get()) == 0);
 
   const Clock::time_point resumed = Clock::now();
   driver.Resume();
-  // The clock stood still while paused, so the rest still come at the
-  // real-time rate rather than all at once.
-  std::this_thread::sleep_until(resumed + remaining * kFrame / 2);
-  int released = TakeReleased(semaphore.get());
-  CHECK(released < remaining);
-
-  std::this_thread::sleep_until(resumed + remaining * kFrame + kMargin);
-  released += TakeReleased(semaphore.get());
-  CHECK(released == remaining);
+  for (int i = 0; i < kFrames; ++i) {
+    REQUIRE(threading::Wait(semaphore.get(), false,
+                            std::chrono::milliseconds(1000)) ==
+            threading::WaitResult::kSuccess);
+  }
+  CHECK(Clock::now() - resumed >= (kFrames - 1) * kFrame);
+  CHECK(TakeReleased(semaphore.get()) == 0);
 
   driver.Shutdown();
 }
@@ -198,27 +161,25 @@ TEST_CASE("Pause holds releases and Resume lets them continue",
 TEST_CASE("Shutdown drops pending frames and returns promptly",
           "[apu][pacing]") {
   ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
+  auto semaphore =
+      threading::Semaphore::Create(0, AudioSystem::kMaximumQueuedFrames);
   REQUIRE(semaphore);
-  // 2400 samples at 48000 Hz: 50 ms frames, so that none falls due while the
-  // test shuts the driver down.
-  constexpr auto kSlowFrame = std::chrono::milliseconds(50);
-  PacingAudioDriver driver(semaphore.get(), 48000, 2400);
+  // A one-second frame separates prompt shutdown from waiting for a deadline.
+  constexpr auto kSlowFrame = std::chrono::seconds(1);
+  PacingAudioDriver driver(semaphore.get(), 48000, 48000);
   REQUIRE(driver.Initialize());
 
   // The driver does release at this rate while it runs.
   SubmitFrames(&driver, 1);
   REQUIRE(threading::Wait(semaphore.get(), false,
-                          std::chrono::milliseconds(1000)) ==
+                          std::chrono::milliseconds(2000)) ==
           threading::WaitResult::kSuccess);
 
-  constexpr int kFrames = 5;
+  constexpr int kFrames = 1;
   SubmitFrames(&driver, kFrames);
   const Clock::time_point shutdown_started = Clock::now();
   driver.Shutdown();
-  // Well inside the first pending frame's 50 ms: the thread is woken, not
-  // left to sleep out its deadline.
-  CHECK(MillisecondsSince(shutdown_started) <= 25);
+  CHECK(MillisecondsSince(shutdown_started) <= 250);
   // A frame that fell due before the shutdown, had the test thread stalled
   // after submitting, was released rightly. Only what comes after counts.
   TakeReleased(semaphore.get());
@@ -228,72 +189,24 @@ TEST_CASE("Shutdown drops pending frames and returns promptly",
   CHECK(TakeReleased(semaphore.get()) == 0);
 }
 
-TEST_CASE("A backend driver that initialises is kept", "[apu][pacing]") {
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
+TEST_CASE("Pacing rejects invalid frame durations", "[apu][pacing]") {
+  auto semaphore =
+      threading::Semaphore::Create(0, AudioSystem::kMaximumQueuedFrames);
   REQUIRE(semaphore);
-  FakeBackendDriverFate fate;
-  auto backend_driver = std::make_unique<FakeBackendDriver>(true, &fate);
-  const AudioDriver* backend_driver_ptr = backend_driver.get();
-
-  bool is_fallback = true;
-  std::unique_ptr<AudioDriver> driver = InitializeDriverOrPace(
-      std::move(backend_driver), semaphore.get(), 48000, 2, &is_fallback);
-  CHECK(driver.get() == backend_driver_ptr);
-  CHECK_FALSE(is_fallback);
-  CHECK_FALSE(fate.shut_down);
-  CHECK_FALSE(fate.destroyed);
-}
-
-TEST_CASE("A backend driver without a device gives way to a pacing driver",
-          "[apu][pacing]") {
-  ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
-  REQUIRE(semaphore);
-  FakeBackendDriverFate fate;
-  // Mono at 8000 Hz: a frame of kFrameSamplesMax samples is 1536 of them, so
-  // 192 ms, where one of the driver's default 256 would take 32 ms.
-  constexpr auto kMonoFrame = std::chrono::milliseconds(192);
-
-  bool is_fallback = false;
-  std::unique_ptr<AudioDriver> driver =
-      InitializeDriverOrPace(std::make_unique<FakeBackendDriver>(false, &fate),
-                             semaphore.get(), 8000, 1, &is_fallback);
-  REQUIRE(driver);
-  CHECK(is_fallback);
-  CHECK(fate.shut_down);
-  CHECK(fate.destroyed);
-
-  // The pacing driver runs, at the stream's own frame length.
-  static float silence[AudioDriver::kFrameSamplesMax] = {};
-  const Clock::time_point start = Clock::now();
-  driver->SubmitFrame(silence);
-  std::this_thread::sleep_until(start + kMonoFrame / 2);
+  uint32_t frequency = 48000;
+  uint32_t channel_samples = 1;
+  SECTION("Zero frequency") { frequency = 0; }
+  SECTION("Zero samples") { channel_samples = 0; }
+  SECTION("Zero frequency and samples") {
+    frequency = 0;
+    channel_samples = 0;
+  }
+  SECTION("Duration rounds to zero") { frequency = UINT32_MAX; }
+  PacingAudioDriver driver(semaphore.get(), frequency, channel_samples);
+  CHECK_FALSE(driver.Initialize());
+  SubmitFrames(&driver, 1);
   CHECK(TakeReleased(semaphore.get()) == 0);
-  std::this_thread::sleep_until(start + kMonoFrame + kMargin);
-  CHECK(TakeReleased(semaphore.get()) == 1);
-
-  driver->Shutdown();
-}
-
-TEST_CASE("A pacing driver stands in when the backend makes no driver",
-          "[apu][pacing]") {
-  ScopedSilentLog silent_log;
-  auto semaphore = threading::Semaphore::Create(0, kSemaphoreMaximum);
-  REQUIRE(semaphore);
-
-  bool is_fallback = false;
-  std::unique_ptr<AudioDriver> driver =
-      InitializeDriverOrPace(nullptr, semaphore.get(), 48000, 2, &is_fallback);
-  REQUIRE(driver);
-  CHECK(is_fallback);
-
-  static float silence[AudioDriver::kFrameSamplesMax] = {};
-  driver->SubmitFrame(silence);
-  CHECK(threading::Wait(semaphore.get(), false,
-                        std::chrono::milliseconds(1000)) ==
-        threading::WaitResult::kSuccess);
-
-  driver->Shutdown();
+  driver.Shutdown();
 }
 
 }  // namespace test

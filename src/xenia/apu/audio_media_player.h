@@ -19,6 +19,10 @@ namespace apu {
 
 using XmpApp = kernel::xam::apps::XmpApp;
 
+namespace test {
+class AudioMediaPlayerTestAccess;
+}  // namespace test
+
 enum ProcessAudioResult { Successful = 0, ForcedFinish = 1, Failure = 2 };
 
 class AudioMediaPlayer {
@@ -107,6 +111,8 @@ class AudioMediaPlayer {
   void ProcessAudioBuffer(std::vector<float>* buffer);
 
  private:
+  friend class test::AudioMediaPlayerTestAccess;
+
   void OnStateChanged();
 
   void Play();

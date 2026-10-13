@@ -531,6 +531,9 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
   DeleteDriver();
 
   std::unique_lock<xe_mutex> guard(driver_mutex_);
+  if (!sample_rate || !channels || channels > AudioDriver::kFrameSamplesMax) {
+    return false;
+  }
   driver_semaphore_ = xe::threading::Semaphore::Create(
       AudioSystem::kMaximumQueuedFrames, AudioSystem::kMaximumQueuedFrames);
 
@@ -538,23 +541,27 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
     return false;
   }
 
-  // A title playing its music while the host's audio device is down keeps
-  // running on a pacing driver, as the audio system's clients do.
-  bool driver_is_fallback = false;
-  driver_ = InitializeDriverOrPace(
-      std::unique_ptr<AudioDriver>(audio_system_->CreateDriver(
-          driver_semaphore_.get(), sample_rate, channels, false)),
-      driver_semaphore_.get(), sample_rate, channels, &driver_is_fallback);
-  if (!driver_) {
+  driver_.reset(audio_system_->CreateDriver(driver_semaphore_.get(),
+                                            sample_rate, channels, false));
+  if (driver_ && driver_->Initialize()) {
+    return true;
+  }
+  if (driver_) {
+    driver_->Shutdown();
+    driver_.reset();
+  }
+  driver_ = std::make_unique<PacingAudioDriver>(
+      driver_semaphore_.get(), sample_rate,
+      AudioDriver::kFrameSamplesMax / channels);
+  if (!driver_->Initialize()) {
+    driver_.reset();
     driver_semaphore_.reset();
     return false;
   }
-  if (driver_is_fallback) {
-    XELOGW(
-        "APU: {} could not create a driver for the media player (the host's "
-        "audio device is unavailable); pacing its music silently instead",
-        audio_system_->name());
-  }
+  XELOGW(
+      "APU: {} failed to create or initialize a media driver; "
+      "continuing silently",
+      audio_system_->name());
 
   return true;
 }
@@ -562,16 +569,11 @@ bool AudioMediaPlayer::SetupDriver(uint32_t sample_rate, uint32_t channels) {
 void AudioMediaPlayer::DeleteDriver() {
   std::unique_lock<xe_mutex> guard(driver_mutex_);
   if (driver_) {
-    // Shut the driver down while its semaphore still exists: until Shutdown
-    // returns, its voice or thread may release a count.
+    // Stop the driver before destroying the semaphore used by its callbacks.
     driver_->Shutdown();
-
-    if (driver_semaphore_) {
-      driver_semaphore_.reset();
-    }
-
     driver_.reset();
   }
+  driver_semaphore_.reset();
 }
 
 }  // namespace apu

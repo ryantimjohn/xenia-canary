@@ -19,14 +19,9 @@ namespace apu {
 
 namespace {
 
-// A frame of channel_samples samples per channel lasts channel_samples /
-// frequency seconds. This is the only place that rate is worked out.
 std::chrono::steady_clock::duration FrameDuration(uint32_t frequency,
                                                   uint32_t channel_samples) {
-  // There is no rate to keep without a frequency; rather than divide by zero,
-  // such frames take no time.
-  assert_not_zero(frequency);
-  if (!frequency) {
+  if (!frequency || !channel_samples) {
     return std::chrono::steady_clock::duration::zero();
   }
   return std::chrono::duration_cast<std::chrono::steady_clock::duration>(
@@ -54,7 +49,7 @@ bool PacingAudioDriver::Initialize() {
   if (thread_) {
     return true;
   }
-  if (!wake_event_) {
+  if (!wake_event_ || frame_duration_ <= Clock::duration::zero()) {
     return false;
   }
   running_ = true;
@@ -66,7 +61,7 @@ bool PacingAudioDriver::Initialize() {
   }
   thread_->set_name("APU Pacing Driver");
   XELOGI(
-      "APU: pacing client without a host device at {} Hz, {} samples per "
+      "APU: pacing silent media at {} Hz, {} samples per "
       "frame",
       frequency_, channel_samples_);
   return true;
@@ -91,19 +86,18 @@ void PacingAudioDriver::SubmitFrame(float* samples) {
   if (!running_) {
     return;
   }
-  next_deadline_ = std::max(ClockNowLocked(), next_deadline_) + frame_duration_;
+  // Start from now if the previous frame has already finished.
+  next_deadline_ =
+      std::max(paused_ ? paused_at_ : Clock::now(), next_deadline_) +
+      frame_duration_;
   deadlines_.push_back(next_deadline_);
-  // Deadlines only ever grow, so the thread's wake-up time changes only when
-  // this frame is the only one pending.
   if (deadlines_.size() == 1) {
     wake_event_->Set();
   }
 }
 
 void PacingAudioDriver::Pause() {
-  // The thread looks at paused_ before it releases anything, so it need not
-  // be woken: it finds the driver paused at its next deadline and then sleeps
-  // until Resume wakes it.
+  // The worker checks paused_ before releasing pending frames.
   std::lock_guard<std::mutex> lock(mutex_);
   if (paused_) {
     return;
@@ -128,10 +122,6 @@ void PacingAudioDriver::Resume() {
   }
 }
 
-PacingAudioDriver::Clock::time_point PacingAudioDriver::ClockNowLocked() const {
-  return paused_ ? paused_at_ : Clock::now();
-}
-
 void PacingAudioDriver::ThreadMain() {
   std::unique_lock<std::mutex> lock(mutex_);
   while (running_) {
@@ -140,8 +130,7 @@ void PacingAudioDriver::ThreadMain() {
       const Clock::time_point now = Clock::now();
       while (!deadlines_.empty() && deadlines_.front() <= now) {
         deadlines_.pop_front();
-        // Released with mutex_ held, so that once Pause or Shutdown returns
-        // no frame is released behind its back.
+        // Hold the mutex so Pause and Shutdown wait for pending releases.
         auto released = semaphore_->Release(1, nullptr);
         assert_true(released);
       }
@@ -154,33 +143,6 @@ void PacingAudioDriver::ThreadMain() {
     xe::threading::Wait(wake_event_.get(), false, timeout);
     lock.lock();
   }
-}
-
-std::unique_ptr<AudioDriver> InitializeDriverOrPace(
-    std::unique_ptr<AudioDriver> driver, xe::threading::Semaphore* semaphore,
-    uint32_t frequency, uint32_t channels, bool* out_is_fallback) {
-  *out_is_fallback = false;
-  if (driver) {
-    if (driver->Initialize()) {
-      return driver;
-    }
-    driver->Shutdown();
-    driver.reset();
-  }
-
-  // A frame holds kFrameSamplesMax samples whatever its channel count, as the
-  // XAudio2 and SDL drivers lay it out: 256 per channel for 5.1, 768 for
-  // stereo.
-  const uint32_t channel_samples =
-      channels ? AudioDriver::kFrameSamplesMax / channels
-               : AudioDriver::kChannelSamplesDefault;
-  auto pacing_driver = std::make_unique<PacingAudioDriver>(semaphore, frequency,
-                                                           channel_samples);
-  if (!pacing_driver->Initialize()) {
-    return nullptr;
-  }
-  *out_is_fallback = true;
-  return pacing_driver;
 }
 
 }  // namespace apu

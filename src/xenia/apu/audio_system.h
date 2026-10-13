@@ -71,7 +71,9 @@ class AudioSystem {
   virtual X_STATUS CreateDriver(size_t index,
                                 xe::threading::Semaphore* semaphore,
                                 AudioDriver** out_driver) = 0;
-  virtual void DestroyDriver(AudioDriver* driver) = 0;
+  X_STATUS CreateClientDriver(size_t index, xe::threading::Semaphore* semaphore,
+                              AudioDriver** out_driver);
+  void DestroyDriver(AudioDriver* driver);
 
   Memory* memory_ = nullptr;
   cpu::Processor* processor_ = nullptr;
@@ -84,9 +86,6 @@ class AudioSystem {
   static constexpr size_t kMaximumClientCount = 8;
   struct {
     AudioDriver* driver;
-    // The driver is a PacingAudioDriver this class created because the backend
-    // could not create one, so this class destroys it, not the backend.
-    bool driver_is_fallback;
     uint64_t next_pump_us;
     uint32_t callback;
     uint32_t callback_arg;
@@ -105,14 +104,6 @@ class AudioSystem {
   bool paused_ = false;
   threading::Fence pause_fence_;
   std::unique_ptr<threading::Event> resume_event_;
-
- private:
-  // Creates the backend's driver for a client or, when the backend cannot,
-  // a PacingAudioDriver that serves the client without a host device.
-  X_STATUS CreateClientDriver(size_t index, xe::threading::Semaphore* semaphore,
-                              AudioDriver** out_driver, bool* out_is_fallback);
-  // Destroys a client's driver through whoever created it.
-  void DestroyClientDriver(size_t index);
 };
 
 }  // namespace apu

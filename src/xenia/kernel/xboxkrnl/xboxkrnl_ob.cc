@@ -349,9 +349,6 @@ DECLARE_XBOXKRNL_EXPORT1(ObOpenObjectByName, kNone, kImplemented);
 dword_result_t ObOpenObjectByPointer_entry(lpvoid_t object_ptr,
                                            lpdword_t out_handle_ptr) {
   *out_handle_ptr = 0;
-  // Whether this open takes a reference of its own depends on whether an
-  // earlier open handed the handle out, so deciding and recording it are one
-  // step.
   auto global_lock = global_critical_region::AcquireDirect();
   auto object = XObject::GetNativeObject<XObject>(
       kernel_state(), object_ptr, X_OBJECT_TYPES::UndefinedObject, true);
@@ -359,14 +356,16 @@ dword_result_t ObOpenObjectByPointer_entry(lpvoid_t object_ptr,
     return X_STATUS_UNSUCCESSFUL;
   }
 
-  // Only this operation records the guest type, so an existing type also
-  // records an earlier open. It already travels with the object in save states.
-  const bool handle_handed_out = object->guest_object_type() != 0;
   object->SetNativeType();
 
-  // Retain the handle. Will be released in NtClose.
-  if (OpenByPointerRetainsHandle(handle_handed_out,
-                                 HasTitleObjectType(*object))) {
+  if (HasTitleObjectType(*object)) {
+    const X_STATUS result = kernel_state()->object_table()->OpenGuestHandle(
+        object->handle(), object.get());
+    if (XFAILED(result)) {
+      return result;
+    }
+  } else {
+    // Existing kernel types retain a handle for each open.
     object->RetainHandle();
   }
   *out_handle_ptr = object->handle();
@@ -403,6 +402,11 @@ dword_result_t ObReferenceObjectByHandle_entry(dword_t handle,
 
   auto object = kernel_state()->object_table()->LookupObject<XObject>(handle);
   if (!object) {
+    return X_STATUS_INVALID_HANDLE;
+  }
+  if (HasTitleObjectType(*object) &&
+      !kernel_state()->object_table()->IsGuestHandleOpen(handle,
+                                                         object.get())) {
     return X_STATUS_INVALID_HANDLE;
   }
 
@@ -575,8 +579,7 @@ dword_result_t NtDuplicateObject_entry(dword_t handle, lpdword_t new_handle_ptr,
   }
 
   if (options == 1 /* DUPLICATE_CLOSE_SOURCE */) {
-    // Always close the source object.
-    kernel_state()->object_table()->RemoveHandle(handle);
+    NtClose(handle);
   }
 
   return result;
@@ -585,22 +588,18 @@ DECLARE_XBOXKRNL_EXPORT1(NtDuplicateObject, kNone, kImplemented);
 
 namespace {
 
-// Closes a handle to an object of a type the title defined itself: the type's
-// close procedure runs first, on the calling guest thread, as the console's
-// kernel runs it. context is that thread's, or null on a host thread, which
-// has no guest thread to run the procedure on: there the procedure is skipped,
-// and the handle is released and the object's dispatch header seen to all the
-// same.
+// Run a title type's close procedure on the calling guest thread, when present.
 uint32_t CloseTitleObjectHandle(uint32_t handle, XObject* object,
                                 const TitleObjectType& title_type,
                                 PPCContext* context) {
   auto* object_table = kernel_state()->object_table();
-  // The count is read under the table's lock and the procedure runs outside
-  // it: a close procedure is guest code that takes the title's own locks and
-  // may signal events.
-  const int32_t handle_count = object_table->GetHandleRefCount(handle, object);
-  if (handle_count <= 0) {
-    return X_STATUS_INVALID_HANDLE;
+  // Claim before executing guest code so reentrant closes cannot claim it.
+  int32_t handle_count = 0;
+  uint64_t generation = 0;
+  const X_STATUS claim_result =
+      object_table->ClaimGuestClose(handle, object, &handle_count, &generation);
+  if (XFAILED(claim_result)) {
+    return claim_result;
   }
   switch (PlanCloseProcedure(title_type.close_proc,
                              IsGuestCodeAddress(title_type.close_proc),
@@ -633,19 +632,14 @@ uint32_t CloseTitleObjectHandle(uint32_t handle, XObject* object,
   // xenia counts a title's ObDereferenceObject against the handle the object
   // was found by, so the close procedure may have released it already.
   auto global_lock = global_critical_region::AcquireDirect();
-  object_table->ReleaseHandleOf(handle, object);
+  object_table->ReleaseHandleOf(handle, object, generation);
   ForgetClosedHandle(object, handle);
   return X_STATUS_SUCCESS;
 }
 
 }  // namespace
 
-// Objects of a type the title defined itself are closed through that type,
-// on the calling guest thread: the export's, or the title's own thread that
-// XAM's CloseHandle and XamTaskCloseHandle close its handles on. A host thread
-// has no guest thread to run the close procedure on, so its close skips the
-// procedure but still sees to the object's dispatch header. Every other object
-// is closed exactly as it always has been.
+// A host close releases the handle even when no guest thread can run its hook.
 uint32_t NtClose(uint32_t handle) {
   auto* object_table = kernel_state()->object_table();
   {

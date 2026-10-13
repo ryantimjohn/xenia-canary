@@ -19,13 +19,7 @@ namespace xe {
 namespace kernel {
 namespace util {
 
-// Whether the guest can really read `length` bytes at `address`, and whether it
-// can also write them. A request or a message arrives with pointers the title
-// chose, and an address inside a heap can still sit on pages that are not
-// committed or not readable, so a handler asks before it reads or writes
-// through one and refuses the request when the answer is no. A null address, an
-// empty range, an address outside every heap and a range that leaves its heap
-// or wraps are all refused.
+// Reject null, empty, uncommitted, and inaccessible guest ranges.
 inline bool IsGuestRangeReadable(Memory* memory, uint32_t address,
                                  uint32_t length) {
   if (!address || !length) {

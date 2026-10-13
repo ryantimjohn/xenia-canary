@@ -129,19 +129,6 @@ TEST_CASE("NtClose refuses a close procedure that is not guest code",
         CloseProcedureAction::kNone);
 }
 
-TEST_CASE("ObOpenObjectByPointer retains a handle only where it always has",
-          "[kernel][ob]") {
-  // The first open of a title-defined object hands the wrapper's own handle
-  // out, whether the open made the wrapper or a kernel call on the object
-  // did, so the title's NtClose can bring the count to zero.
-  CHECK_FALSE(OpenByPointerRetainsHandle(false, true));
-  // A later open of the same wrapper hands it out with one more reference.
-  CHECK(OpenByPointerRetainsHandle(true, true));
-  // Everything else is retained as it always was.
-  CHECK(OpenByPointerRetainsHandle(false, false));
-  CHECK(OpenByPointerRetainsHandle(true, false));
-}
-
 constexpr uint32_t kClosedHandle = 0xF8000288;
 constexpr uint32_t kOtherHandle = 0xF8000290;
 

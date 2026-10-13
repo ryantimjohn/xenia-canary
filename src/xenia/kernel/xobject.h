@@ -282,8 +282,7 @@ class XObject {
   // if we allocated it!
   uint32_t guest_object_ptr_ = 0;
   bool allocated_guest_object_ = false;
-  // Recorded only by ObOpenObjectByPointer. A nonzero type also means a typed
-  // open has already handed the wrapper's initial handle to the guest.
+  // Guest type recorded by ObOpenObjectByPointer.
   std::atomic<uint32_t> guest_object_type_ptr_{0};
 };
 

@@ -46,11 +46,6 @@ CloseProcedureAction PlanCloseProcedure(uint32_t close_proc,
                             : CloseProcedureAction::kRefuse;
 }
 
-bool OpenByPointerRetainsHandle(bool handle_handed_out,
-                                bool title_object_type) {
-  return handle_handed_out || !title_object_type;
-}
-
 StashedHandleDecision DecideStashedHandle(
     uint32_t closed_handle, std::span<const uint32_t> remaining_handles,
     bool header_has_stash, uint32_t stashed_handle,

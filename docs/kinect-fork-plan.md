@@ -12,17 +12,14 @@ work changes, and read it before starting a new session.
 
 Use **Xenia Canary Kinect** as the public identity and keep the existing
 [ryantimjohn/xenia-canary repository](https://github.com/ryantimjohn/xenia-canary).
-The owner approved `kinect` as the public development and default branch; do not
-rename the repository. Local identity preparation is on `codex/kinect-identity`;
-it contains the complete eleven-part implementation and an integration of
-upstream `canary_experimental`.
+The public development and default branch is `kinect`; the repository will not
+be renamed. The implementation includes the eleven-part contribution series
+and an integration of upstream `canary_experimental`.
 
-The owner approved the saved rollout plan. Pushes, repository settings and
-release work remain to be completed and verified during rollout. The first
-public build channel is experimental Windows x86-64 releases. Linux remains
-useful for building, tests and depth replay; live sensor support is currently
-Windows-only. Keep executable and existing configuration names compatible while
-changing display names and downloadable archive branding.
+The first public build channel is experimental Windows x86-64 releases. Linux
+remains useful for building, tests and depth replay; live sensor support is
+currently Windows-only. Keep executable and existing configuration names
+compatible while changing display names and downloadable archive branding.
 
 ## Principles
 
@@ -98,34 +95,26 @@ in their own voice. The monitor never posts replies as the owner.
 - Keep hosted workflow execution separate from local checks: a local syntax or
   packaging check is not evidence that GitHub Actions completed successfully.
 
-The first candidate is planned as `kinect-v0.1.0-preview.1`. The release index is
-the durable public link; do not use a `latest` alias or a tag link until it has
-been confirmed that the release exists.
+The first candidate, `kinect-v0.1.0-preview.1`, is currently a draft. It is not
+a published download. After publication, use the durable releases index; do not
+use a `latest` alias or tag link until the release is publicly available.
 
-### 3. Owner review and repository rollout
+### 3. Repository rollout and release verification
 
-The owner approved the rollout. Complete and verify these external steps before
-calling the rollout complete:
+The repository rollout is complete: `kinect` is pushed and is the default
+branch, Issues are enabled, and the bug-report template is present on that
+branch. Public documentation links have been checked. The issue setting and
+template file are separate repository features; confirm both when setting up
+another repository.
 
-1. Push the approved integration to the new `kinect` branch.
-2. Set `kinect` as the default branch so the fork's landing page and manual
-   workflow use the new identity.
-3. Enable this fork's issues and confirm its issue form works. Issues are
-   currently disabled; enabling them before publication is an approved step.
-   Review Actions settings without copying personal credentials into workflows.
-4. Check all rendered links and the visible relationship to upstream.
-5. Before tagging, confirm the issue tracker is enabled and the README's release
-   and patch links resolve. Run the manual build workflow for the planned
-   `kinect-v0.1.0-preview.1` draft prerelease.
-6. Inspect the actual downloaded archive and release notes, verify checksums,
-   and verify startup using separate settings and storage.
-7. Publish only after the release candidate's results and limitations are
-   reviewed. Keep the previous usable version available.
-
-Local issue templates do not change the repository's issue setting. Manual
-workflows must be present on the default branch to be dispatched. Changing the
-default branch, enabling issues, running hosted workflows and publishing a
-release are external rollout steps, not completed by a local commit.
+The manual workflow created the first draft candidate. Its hosted Windows build,
+automated suites, archive contents, checksum, extraction, and startup checks are
+recorded below. A menu-depth replay check was interrupted by a Windows firewall
+prompt and remains pending. Do not publish until that check is resolved or its
+limitation is explicitly accepted and the final release notes are reviewed.
+Keep future releases as drafts until their actual archive and runtime results
+have been checked. Publish only after reviewing the candidate's results and
+limitations; keep the previous usable version available.
 
 ## Release evidence and compatibility
 
@@ -195,20 +184,29 @@ For each release, record:
 4. Preserve original saves, recordings, binaries and diagnostic work.
 5. Serialize builds, tests and game runs; use focused delegated work as needed.
 6. Confirm the current rollout step and external status in the work-session
-   checkpoint. The saved identity and rollout plan is approved.
+   checkpoint. Keep the current candidate unpublished while menu-depth replay
+   and final release review remain pending.
 7. Update this plan's status and record the next concrete action before stopping.
 
 ## Status
 
-- Identity and documentation: **prepared locally; rollout approved**.
-- Repository URL: **retained**; `kinect` is the approved public/default branch.
-- Issues: **currently disabled; enable before publication**.
-- Planned first release: **`kinect-v0.1.0-preview.1`, draft then inspect and
-  publish after checks**; no fork-specific binary release exists yet.
-- Hosted workflow, downloaded release candidate and runtime checks on that
-  candidate: **not yet confirmed**.
+- Identity and documentation: **published on the public `kinect` default branch**.
+- Repository URL: **`ryantimjohn/xenia-canary` retained; no rename planned**.
+- Issues: **enabled; `.github/ISSUE_TEMPLATE/bug_report.yaml` is present on the
+  default branch**.
+- First release candidate: **`kinect-v0.1.0-preview.1` is a draft from source
+  commit `360ab79482c5f10b4827624fd2cfb64579c87ee2`; it is not published**.
+- Hosted workflow: **passed** ([run 38331249988](https://github.com/ryantimjohn/xenia-canary/actions/runs/38331249988)).
+- Windows archive: **97 files; archive and contents verified**. Archive
+  SHA-256: `277db959bad04165de3685fc1a068f51b4cdf271b3fbb4c04316031cbf25a85c`;
+  executable SHA-256: `812bfb628ce150a7ffcd492853f99697e1e05eb94052ec43530a07e25dafacf6`.
+- Release application builds and APU, kernel, NUI and CPU suites: **passed on
+  Windows and Linux** at the candidate source revision.
+- Downloaded artifact startup: **passed**; branding, Help menu, avatar-enabled
+  preset and clean exit were verified. Menu-depth replay: **pending**, blocked
+  by a Windows firewall prompt.
+- Publication: **pending final replay decision and release-note review**.
 - Upstream PR series: **continues separately**.
-- Repository rename: **not planned; current URL retained**.
 
 ## References
 

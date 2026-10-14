@@ -582,6 +582,317 @@ TEST_CASE("Actual x64 draft preserves an old GPR through spill and overwrite",
   // capture, checkpoint publication and production fault recovery are unproved.
 }
 
+constexpr uint32_t kScalarEAPC = 0x80003000;
+
+size_t ScalarGPRIndex(const cs_x86_op& operand) {
+  REQUIRE(operand.type == X86_OP_REG);
+  if (operand.size == sizeof(uint64_t)) {
+    return AllocatorGPRIndex(operand.reg);
+  }
+  REQUIRE(operand.size == sizeof(uint32_t));
+  constexpr std::array<unsigned int, X64Emitter::GPR_COUNT> aliases = {
+      X86_REG_EBX,  X86_REG_R10D, X86_REG_R11D, X86_REG_R12D,
+      X86_REG_R13D, X86_REG_R14D, X86_REG_R15D};
+  auto found = std::find(aliases.begin(), aliases.end(), operand.reg);
+  REQUIRE(found != aliases.end());
+  return static_cast<size_t>(found - aliases.begin());
+}
+
+void CheckScalarEA(const OpaqueDraft& draft,
+                   const std::array<size_t, 4>& assignments) {
+  REQUIRE(draft.source_map.size() == 4);
+  for (size_t i = 0; i < draft.source_map.size(); ++i) {
+    REQUIRE(draft.source_map[i].guest_address == kScalarEAPC + i * 4);
+    REQUIRE(draft.source_map[i].code_offset <= draft.bytes.size());
+    if (i) {
+      REQUIRE(draft.source_map[i - 1].code_offset <
+              draft.source_map[i].code_offset);
+    }
+  }
+  REQUIRE(draft.source_map.back().code_offset -
+              draft.source_map.front().code_offset <=
+          128);
+  // Symbolic expressions, not sample values: Sum is old_r3 - 4 modulo 2^64;
+  // Low32 and EA both have zero upper bits after a native 32-bit MOV write.
+  // Separate tokens require the actual truncation and zero-extension stages.
+  enum class Token { Unknown, OldR3, MinusFour, Sum, Low32, EA };
+  std::array<Token, X64Emitter::GPR_COUNT> tokens{};
+  size_t loads = 0, constants = 0, adds = 0, truncates = 0, extends = 0;
+  size_t overwrites = 0, stores = 0;
+  Decoder decoder;
+  REQUIRE(decoder.instruction);
+  for (size_t phase = 0; phase < 3; ++phase) {
+    const size_t begin = draft.source_map[phase].code_offset;
+    const size_t end = draft.source_map[phase + 1].code_offset;
+    const uint8_t* cursor = draft.bytes.data() + begin;
+    size_t remaining = end - begin;
+    uint64_t address = begin;  // Numeric offset; no native address is exposed.
+    while (remaining) {
+      REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                             decoder.instruction));
+      const bool add = decoder.instruction->id == X86_INS_ADD;
+      REQUIRE((add || decoder.instruction->id == X86_INS_MOV));
+      REQUIRE(decoder.instruction->detail);
+      const auto& x = decoder.instruction->detail->x86;
+      REQUIRE(x.op_count == 2);
+      REQUIRE(x.addr_size == sizeof(uint64_t));
+      for (auto prefix : x.prefix) {
+        REQUIRE(prefix == 0);
+      }
+      constexpr uint64_t kAddFlags =
+          X86_EFLAGS_MODIFY_AF | X86_EFLAGS_MODIFY_CF | X86_EFLAGS_MODIFY_OF |
+          X86_EFLAGS_MODIFY_PF | X86_EFLAGS_MODIFY_SF | X86_EFLAGS_MODIFY_ZF;
+      REQUIRE(x.eflags == (add ? kAddFlags : 0));
+      const auto& destination = x.operands[0];
+      const auto& source = x.operands[1];
+      REQUIRE(destination.access ==
+              (add ? (CS_AC_READ | CS_AC_WRITE) : CS_AC_WRITE));
+      REQUIRE((source.type == X86_OP_IMM || source.access == CS_AC_READ));
+      // Derive every allowed native register effect from these operands.
+      // Exact raw aliases distinguish 32-bit reads/writes from 64-bit ones.
+      std::vector<unsigned int> expected_reads, expected_writes;
+      auto read = [&](unsigned int reg) {
+        if (std::find(expected_reads.begin(), expected_reads.end(), reg) ==
+            expected_reads.end()) {
+          expected_reads.push_back(reg);
+        }
+      };
+      if (destination.type == X86_OP_MEM || source.type == X86_OP_MEM) {
+        REQUIRE_FALSE(add);
+        const auto& memory =
+            destination.type == X86_OP_MEM ? destination : source;
+        REQUIRE(memory.size == sizeof(uint64_t));
+        REQUIRE(memory.mem.base == X86_REG_RSI);
+        REQUIRE(memory.mem.index == X86_REG_INVALID);
+        REQUIRE(memory.mem.segment == X86_REG_INVALID);
+        read(X86_REG_RSI);
+      }
+      if (source.type == X86_OP_REG) {
+        read(source.reg);
+      }
+      if (destination.type == X86_OP_REG) {
+        if (add) {
+          read(destination.reg);
+        }
+        expected_writes.push_back(destination.reg);
+      }
+      if (add) {
+        expected_writes.push_back(X86_REG_EFLAGS);
+      }
+      cs_regs reads{}, writes{};
+      uint8_t read_count = 0, write_count = 0;
+      REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, reads,
+                             &read_count, writes, &write_count) == CS_ERR_OK);
+      std::sort(reads, reads + read_count);
+      std::sort(writes, writes + write_count);
+      std::sort(expected_reads.begin(), expected_reads.end());
+      std::sort(expected_writes.begin(), expected_writes.end());
+      REQUIRE(read_count == expected_reads.size());
+      REQUIRE(write_count == expected_writes.size());
+      REQUIRE(std::equal(expected_reads.begin(), expected_reads.end(), reads));
+      REQUIRE(
+          std::equal(expected_writes.begin(), expected_writes.end(), writes));
+      if (add) {
+        REQUIRE(phase == 0);
+        REQUIRE(destination.size == sizeof(uint64_t));
+        const auto dest = ScalarGPRIndex(destination);
+        REQUIRE(dest == assignments[1]);
+        const auto left = tokens[dest];
+        Token right = Token::Unknown;
+        if (source.type == X86_OP_IMM) {
+          REQUIRE(source.imm == -4);
+          REQUIRE(constants == 0);
+          right = Token::MinusFour;
+        } else {
+          REQUIRE(source.size == sizeof(uint64_t));
+          right = tokens[ScalarGPRIndex(source)];
+          REQUIRE(constants == 1);
+        }
+        REQUIRE(((left == Token::OldR3 && right == Token::MinusFour) ||
+                 (left == Token::MinusFour && right == Token::OldR3)));
+        REQUIRE(adds++ == 0);
+        tokens[dest] = Token::Sum;
+      } else if (destination.type == X86_OP_MEM) {
+        REQUIRE(destination.mem.disp ==
+                static_cast<int64_t>(GPROffset(phase == 1 ? 3 : 8)));
+        REQUIRE(destination.size == sizeof(uint64_t));
+        if (phase == 1) {
+          REQUIRE(source.type == X86_OP_IMM);
+          REQUIRE(static_cast<uint64_t>(source.imm) == kValue);
+          REQUIRE(overwrites++ == 0);
+        } else {
+          REQUIRE(phase == 2);
+          REQUIRE(source.size == sizeof(uint64_t));
+          REQUIRE(tokens[ScalarGPRIndex(source)] == Token::EA);
+          REQUIRE(extends == 1);
+          REQUIRE(stores++ == 0);
+        }
+      } else {
+        const auto dest = ScalarGPRIndex(destination);
+        if (source.type == X86_OP_MEM) {
+          REQUIRE(phase == 0);
+          REQUIRE(destination.size == sizeof(uint64_t));
+          REQUIRE(source.mem.disp == GPROffset(3));
+          REQUIRE(dest == assignments[0]);
+          REQUIRE(loads++ == 0);
+          tokens[dest] = Token::OldR3;
+        } else if (source.type == X86_OP_IMM) {
+          // EmitCommutativeBinaryOp may materialize -4 when ADD's allocated
+          // destination differs from its old-r3 source. No other constant fits.
+          REQUIRE(phase == 0);
+          REQUIRE(destination.size == sizeof(uint64_t));
+          REQUIRE(source.imm == -4);
+          REQUIRE(dest == assignments[1]);
+          REQUIRE(constants++ == 0);
+          REQUIRE(adds == 0);
+          tokens[dest] = Token::MinusFour;
+        } else {
+          REQUIRE(destination.size == sizeof(uint32_t));
+          REQUIRE(source.size == sizeof(uint32_t));
+          const auto token = tokens[ScalarGPRIndex(source)];
+          // Read the source token before updating an aliased destination.
+          // A 32-bit write clears all upper 32 bits, including self-MOV.
+          if (phase == 0) {
+            REQUIRE(token == Token::Sum);
+            REQUIRE(dest == assignments[2]);
+            REQUIRE(truncates++ == 0);
+            tokens[dest] = Token::Low32;
+          } else {
+            REQUIRE(phase == 2);
+            REQUIRE(overwrites == 1);
+            REQUIRE(token == Token::Low32);
+            REQUIRE(dest == assignments[3]);
+            REQUIRE(extends++ == 0);
+            tokens[dest] = Token::EA;
+          }
+        }
+      }
+    }
+    REQUIRE(address == end);
+    if (phase == 0) {
+      REQUIRE(loads == 1);
+      REQUIRE(adds == 1);
+      REQUIRE(truncates == 1);
+    } else if (phase == 1) {
+      REQUIRE(overwrites == 1);
+    }
+  }
+  REQUIRE(extends == 1);
+  REQUIRE(stores == 1);
+}
+
+TEST_CASE("Actual x64 draft preserves scalar EA across an input overwrite",
+          "[cpu][x64-draft-store]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  Memory memory;
+  REQUIRE(memory.Initialize());
+  Processor processor(&memory, nullptr);
+  REQUIRE(processor.Setup(std::make_unique<X64Backend>()));
+  REQUIRE(processor.compilation_options().profile ==
+          CompilationProfile::kOrdinary);
+  FixtureHIR builder;
+  builder.SourceOffset(kScalarEAPC);
+  auto old_r3 = builder.LoadContext(GPROffset(3), INT64_TYPE);
+  auto displacement = builder.LoadConstantInt64(-4);
+  auto sum = builder.Add(old_r3, displacement);
+  auto ea = builder.Truncate(sum, INT32_TYPE);
+  builder.SourceOffset(kScalarEAPC + 4);
+  builder.StoreContext(GPROffset(3), builder.LoadConstantUint64(kValue));
+  builder.SourceOffset(kScalarEAPC + 8);
+  auto canonical_ea = builder.ZeroExtend(ea, INT64_TYPE);
+  builder.StoreContext(GPROffset(8), canonical_ea);
+  builder.SourceOffset(kScalarEAPC + 12);
+  builder.Return();
+  REQUIRE(builder.Finalize());
+  REQUIRE_FALSE(ContainsCheckpointHIR(builder));
+  namespace passes = compiler::passes;
+  compiler::Compiler compiler(&processor);
+  // The explicit compile-only recipe retains ordered context effects, using
+  // the ordinary backend's real allocator, not the full translator recipe.
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+      processor.backend()->machine_info()));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  REQUIRE(compiler.Compile(&builder));
+  REQUIRE_FALSE(ContainsCheckpointHIR(builder));
+  REQUIRE(builder.locals().empty());
+  auto body = builder.first_block();
+  REQUIRE(body);
+  REQUIRE(body == builder.last_block());
+  REQUIRE(body->next == nullptr);
+  std::array<Value*, 4> chain = {old_r3, sum, ea, canonical_ea};
+  constexpr std::array<TypeName, 4> types = {INT64_TYPE, INT64_TYPE, INT32_TYPE,
+                                             INT64_TYPE};
+  constexpr std::array<uint32_t, 4> opcodes = {
+      OPCODE_LOAD_CONTEXT, OPCODE_ADD, OPCODE_TRUNCATE, OPCODE_ZERO_EXTEND};
+  std::array<size_t, 4> assignments{};
+  for (size_t i = 0; i < chain.size(); ++i) {
+    auto value = chain[i];
+    REQUIRE(value->type == types[i]);
+    REQUIRE_FALSE(value->IsConstant());
+    REQUIRE(value->def);
+    REQUIRE(value->def->block == body);
+    REQUIRE(value->def->dest == value);
+    REQUIRE(value->def->opcode->num == opcodes[i]);
+    REQUIRE(value->def->flags == 0);
+    REQUIRE(value->reg.set ==
+            &processor.backend()->machine_info()->register_sets[0]);
+    REQUIRE(value->reg.index >= 0);
+    REQUIRE(static_cast<uint32_t>(value->reg.index) < value->reg.set->count);
+    assignments[i] = static_cast<size_t>(value->reg.index);
+  }
+  REQUIRE(old_r3->def->src1.offset == GPROffset(3));
+  REQUIRE(sum->def->src1.value == old_r3);
+  REQUIRE(sum->def->src2.value == displacement);
+  REQUIRE(displacement->type == INT64_TYPE);
+  REQUIRE(displacement->IsConstant());
+  REQUIRE(displacement->constant.i64 == -4);
+  REQUIRE(ea->def->src1.value == sum);
+  REQUIRE(canonical_ea->def->src1.value == ea);
+  constexpr std::array<uint32_t, 11> body_opcodes = {
+      OPCODE_SOURCE_OFFSET, OPCODE_LOAD_CONTEXT,  OPCODE_ADD,
+      OPCODE_TRUNCATE,      OPCODE_SOURCE_OFFSET, OPCODE_STORE_CONTEXT,
+      OPCODE_SOURCE_OFFSET, OPCODE_ZERO_EXTEND,   OPCODE_STORE_CONTEXT,
+      OPCODE_SOURCE_OFFSET, OPCODE_RETURN};
+  size_t position = 0, markers = 0;
+  for (auto instr = body->instr_head; instr; instr = instr->next, ++position) {
+    REQUIRE(position < body_opcodes.size());
+    REQUIRE(instr->opcode->num == body_opcodes[position]);
+    if (instr->opcode->num == OPCODE_SOURCE_OFFSET) {
+      REQUIRE(instr->src1.offset == kScalarEAPC + markers++ * 4);
+    } else if (position == 5) {
+      REQUIRE(instr->src1.offset == GPROffset(3));
+      REQUIRE(instr->src2.value->type == INT64_TYPE);
+      REQUIRE(instr->src2.value->IsConstant());
+      REQUIRE(instr->src2.value->constant.u64 == kValue);
+    } else if (position == 8) {
+      REQUIRE(instr->src1.offset == GPROffset(8));
+      REQUIRE(instr->src2.value == canonical_ea);
+    }
+  }
+  REQUIRE(position == body_opcodes.size());
+  REQUIRE(markers == 4);
+  XbyakAllocator allocator;
+  DraftEmitter emitter(static_cast<X64Backend*>(processor.backend()),
+                       &allocator);
+  OpaqueDraft draft;
+  REQUIRE(emitter.EmitOpaque(builder, draft));
+  emitter.CheckDiscarded();
+  CheckScalarEA(draft, assignments);
+  // Only uint64(uint32(old_r3 - 4)) across an r3 overwrite is established by
+  // the bounded native dataflow oracle. No register-pressure, guest-memory,
+  // fault or production checkpoint claim follows. Whole-function AutoGrow
+  // relocations remain unresolved; bytes are never published or invoked.
+}
+
 }  // namespace
 }  // namespace xe::cpu::ppc::test
 

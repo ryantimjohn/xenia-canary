@@ -231,6 +231,98 @@ TEST_CASE("Unknown handlers and sentinel scope roles stay uninterpreted",
   }
 }
 
+TEST_CASE("Exact kernel import names preserve scope identity and raw names",
+          "[cpu][exception-metadata]") {
+  SECTION("Canonical basename and full name, including case variants") {
+    for (const auto* name : {"xboxkrnl", "XBOXKRNL", "XboxKrnl", "xboxkrnl.exe",
+                             "XBOXKRNL.EXE", "XboxKrnl.Exe"}) {
+      CAPTURE(name);
+      Fixture fixture;
+      fixture.imports[0].library = name;
+      const auto snapshot = ParseExceptionMetadata(fixture.Input());
+      REQUIRE(snapshot.status == Status::kValid);
+      REQUIRE(snapshot.imports.size() == 1);
+      CHECK(snapshot.imports[0].library == name);
+      const auto frame = snapshot.LookupFrame(fixture.base + 0x460);
+      REQUIRE(frame.function);
+      REQUIRE(frame.function->handler);
+      CHECK(frame.function->handler->imported_c_specific);
+      CHECK(frame.function->handler->status == Status::kValid);
+      REQUIRE(frame.matching_scopes.size() == 1);
+      CHECK(frame.matching_scopes[0].filter_or_handler == fixture.base + 0x740);
+      CHECK(frame.matching_scopes[0].jump_target == fixture.base + 0x484);
+    }
+  }
+  SECTION("Other modules, suffixes, paths and whitespace stay opaque") {
+    for (const auto* name :
+         {"", "xam", "xam.xex", "xboxkrnl.xex", "XBOXKRNL.DLL",
+          "xboxkrnl.exe.extra", "prefixxboxkrnl.exe", "xboxkrnl.", "xboxkrnl ",
+          " xboxkrnl.exe", "dir\\xboxkrnl.exe", "dir/xboxkrnl"}) {
+      CAPTURE(name);
+      Fixture fixture;
+      fixture.imports[0].library = name;
+      const auto snapshot = ParseExceptionMetadata(fixture.Input());
+      REQUIRE(snapshot.status == Status::kValid);
+      REQUIRE(snapshot.imports.size() == 1);
+      CHECK(snapshot.imports[0].library == name);
+      REQUIRE(snapshot.functions[1].handler);
+      CHECK_FALSE(snapshot.functions[1].handler->imported_c_specific);
+      CHECK(snapshot.functions[1].handler->status == Status::kOpaque);
+      CHECK(snapshot.functions[1].handler->scopes.empty());
+      CHECK(snapshot.LookupFrame(fixture.base + 0x460).matching_scopes.empty());
+      CHECK(fixture.reads.size() == 2);  // No scope header or rows were read.
+    }
+  }
+}
+
+TEST_CASE("Kernel basename aliases cannot hide conflicting thunk identities",
+          "[cpu][exception-metadata]") {
+  Fixture fixture;
+  fixture.imports[0].library = "xboxkrnl";
+  bool recognized = false;
+  SECTION("Equivalent full-name alias retains both raw identities") {
+    fixture.imports.push_back({"XBOXKRNL.EXE", 0x1A5, fixture.base + 0x700});
+    recognized = true;
+  }
+  SECTION("Different ordinal at the same thunk") {
+    fixture.imports.push_back({"xboxkrnl.exe", 0x1A4, fixture.base + 0x700});
+  }
+  SECTION("Different library at the same thunk") {
+    fixture.imports.push_back({"xam", 0x1A5, fixture.base + 0x700});
+  }
+  SECTION("Conflict before the recognized basename") {
+    fixture.imports.insert(fixture.imports.begin(),
+                           {"xam.xex", 0x1A5, fixture.base + 0x700});
+  }
+  SECTION("An unrelated thunk does not create ambiguity") {
+    fixture.imports.push_back({"xam", 0x1A5, fixture.base + 0x704});
+    recognized = true;
+  }
+  const auto snapshot = ParseExceptionMetadata(fixture.Input());
+  REQUIRE(snapshot.status == Status::kValid);
+  REQUIRE(snapshot.imports.size() == fixture.imports.size());
+  for (size_t i = 0; i < fixture.imports.size(); ++i) {
+    CHECK(snapshot.imports[i].library == fixture.imports[i].library);
+    CHECK(snapshot.imports[i].ordinal == fixture.imports[i].ordinal);
+    CHECK(snapshot.imports[i].thunk_address ==
+          fixture.imports[i].thunk_address);
+  }
+  REQUIRE(snapshot.functions[1].handler);
+  CHECK(snapshot.functions[1].handler->imported_c_specific == recognized);
+  const auto frame = snapshot.LookupFrame(fixture.base + 0x460);
+  if (recognized) {
+    CHECK(snapshot.functions[1].handler->status == Status::kValid);
+    REQUIRE(frame.matching_scopes.size() == 1);
+    CHECK(frame.matching_scopes[0].filter_or_handler == fixture.base + 0x740);
+    CHECK(frame.matching_scopes[0].jump_target == fixture.base + 0x484);
+  } else {
+    CHECK(snapshot.functions[1].handler->status == Status::kOpaque);
+    CHECK(frame.matching_scopes.empty());
+    CHECK(fixture.reads.size() ==
+          2);  // Conflicts do not authorize scope reads.
+  }
+}
+
 TEST_CASE("Metadata rejects malformed ranges without unbounded reads",
           "[cpu][exception-metadata]") {
   Fixture fixture;

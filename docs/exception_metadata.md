@@ -43,8 +43,17 @@ is read for those forms. Lookup never extends an encoded range into padding and
 does not invent a range for an opaque helper.
 
 An unknown executable guest handler and its data address stay opaque. A validated
-`xboxkrnl.exe` ordinal `0x1A5` import identifies the evidenced C-specific scope
-shape: a big-endian count followed by sixteen-byte rows. Count, byte budget,
+ordinal `0x1A5` import from exactly `xboxkrnl` or `xboxkrnl.exe`, compared without
+ASCII case sensitivity, identifies the evidenced C-specific scope shape.
+`XexModule::SetupLibraryImports` stores the basename returned by
+`utf8::find_base_name_from_guest_path`, so the loaded adapter supplies `xboxkrnl`.
+The parser retains the supplied raw library name. This recognition describes the
+loader-stored identity; the original path and extension discarded by that
+producer are not reconstructed. Other supplied suffixes, paths and whitespace
+are not accepted. Multiple identities for the same thunk must all
+agree on this kernel identity and ordinal; a conflicting entry keeps the handler
+opaque, while equivalent basename/full-name aliases are retained. The scope
+shape is a big-endian count followed by sixteen-byte rows. Count, byte budget,
 readability, range containment and ordinary executable pointer forms are checked.
 Zero and small/sentinel role values remain raw and uninterpreted. Matching scope
 ranges use an exclusive end. A matching row is a metadata observation, not a

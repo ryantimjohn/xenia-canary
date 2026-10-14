@@ -28,7 +28,11 @@ uint32_t ReadBe32(const uint8_t* bytes) {
 }
 
 bool IsXboxKernel(std::string_view name) {
-  constexpr std::string_view expected = "xboxkrnl.exe";
+  // SetupLibraryImports supplies the basename; raw inputs may use the full
+  // name.
+  constexpr std::string_view basename = "xboxkrnl";
+  constexpr std::string_view fullname = "xboxkrnl.exe";
+  const auto expected = name.size() == basename.size() ? basename : fullname;
   if (name.size() != expected.size()) {
     return false;
   }

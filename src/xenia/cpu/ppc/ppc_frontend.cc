@@ -43,8 +43,12 @@ void InitializeIfNeeded() {
 
 void CleanupOnShutdown() {}
 
-PPCFrontend::PPCFrontend(Processor* processor) : processor_(processor) {
-  InitializeIfNeeded();
+PPCFrontend::PPCFrontend(Processor* processor)
+    : processor_(processor),
+      compilation_options_(processor->compilation_options()) {
+  if (compilation_options_.profile == CompilationProfile::kOrdinary) {
+    InitializeIfNeeded();
+  }
 }
 
 PPCFrontend::~PPCFrontend() {
@@ -92,6 +96,10 @@ void SyscallHandler(PPCContext* ppc_context, void* arg0, void* arg1) {
 }
 
 bool PPCFrontend::Initialize() {
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return false;
+  }
+
   void* arg0 = reinterpret_cast<void*>(&xe::global_critical_region::mutex());
   void* arg1 = reinterpret_cast<void*>(&builtins_.global_lock_count);
   builtins_.check_global_lock =
@@ -106,6 +114,10 @@ bool PPCFrontend::Initialize() {
 }
 
 bool PPCFrontend::DeclareFunction(GuestFunction* function) {
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return false;
+  }
+
   // chrispy: make sure we aren't declaring a function that is actually padding
   // data, this will mess up PPCScanner and is hard to debug wow, this halo
   // reach actually has branches into 0 opcodes, look into further
@@ -122,6 +134,10 @@ bool PPCFrontend::DeclareFunction(GuestFunction* function) {
 
 bool PPCFrontend::DefineFunction(GuestFunction* function,
                                  uint32_t debug_info_flags) {
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return false;
+  }
+
   auto translator = translator_pool_.Allocate(this);
   bool result = translator->Translate(function, debug_info_flags);
   translator->Reset();

@@ -44,6 +44,9 @@ class PPCFrontend {
   bool Initialize();
 
   Processor* processor() const { return processor_; }
+  CompilationOptions compilation_options() const {
+    return compilation_options_;
+  }
   Memory* memory() const;
   PPCBuiltins* builtins() { return &builtins_; }
 
@@ -52,6 +55,7 @@ class PPCFrontend {
 
  private:
   Processor* processor_;
+  const CompilationOptions compilation_options_;
   PPCBuiltins builtins_ = {0};
   TypePool<PPCTranslator, PPCFrontend*> translator_pool_;
 };

@@ -86,8 +86,11 @@ class BuiltinModule : public Module {
   std::string name_;
 };
 
-Processor::Processor(xe::Memory* memory, ExportResolver* export_resolver)
-    : memory_(memory), export_resolver_(export_resolver) {}
+Processor::Processor(xe::Memory* memory, ExportResolver* export_resolver,
+                     CompilationOptions compilation_options)
+    : memory_(memory),
+      compilation_options_(compilation_options),
+      export_resolver_(export_resolver) {}
 
 Processor::~Processor() {
   {
@@ -105,6 +108,11 @@ Processor::~Processor() {
 }
 
 bool Processor::Setup(std::unique_ptr<backend::Backend> backend) {
+  // No checkpoint compiler or native access path has been installed yet.
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return false;
+  }
+
   // TODO(benvanik): query mode from debugger?
   debug_info_flags_ = 0;
 

@@ -38,6 +38,7 @@ class PPCTranslator {
   void DumpSource(GuestFunction* function, StringBuffer* string_buffer);
 
   PPCFrontend* frontend_;
+  const CompilationOptions compilation_options_;
   std::unique_ptr<PPCScanner> scanner_;
   std::unique_ptr<PPCHIRBuilder> builder_;
   std::unique_ptr<compiler::Compiler> compiler_;

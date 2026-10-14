@@ -41,7 +41,13 @@ using xe::cpu::backend::Backend;
 using xe::cpu::compiler::Compiler;
 namespace passes = xe::cpu::compiler::passes;
 
-PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
+PPCTranslator::PPCTranslator(PPCFrontend* frontend)
+    : frontend_(frontend),
+      compilation_options_(frontend->compilation_options()) {
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return;
+  }
+
   Backend* backend = frontend->processor()->backend();
 
   scanner_.reset(new PPCScanner(frontend));
@@ -179,6 +185,13 @@ void PPCTranslator::DumpHIR(GuestFunction* function, PPCHIRBuilder* builder) {
 }
 bool PPCTranslator::Translate(GuestFunction* function,
                               uint32_t debug_info_flags) {
+  // Direct translator calls must not bypass the unsupported profile gate.
+  if (compilation_options_.profile != CompilationProfile::kOrdinary ||
+      (function->compiled_profile() != CompilationProfile::kUncompiled &&
+       function->compiled_profile() != compilation_options_.profile)) {
+    return false;
+  }
+
   SCOPE_profile_cpu_f("cpu");
   HirBuilderScope hir_build_scope{builder_.get()};
   // Reset() all caching when we leave.
@@ -277,9 +290,21 @@ bool PPCTranslator::Translate(GuestFunction* function,
     return false;
   }
 
+  CompilationProfile expected = CompilationProfile::kUncompiled;
+  if (!function->compiled_profile_.compare_exchange_strong(
+          expected, compilation_options_.profile, std::memory_order_release,
+          std::memory_order_relaxed) &&
+      expected != compilation_options_.profile) {
+    return false;
+  }
+
   return true;
 }
-void PPCTranslator::Reset() { builder_->ResetPools(); }
+void PPCTranslator::Reset() {
+  if (builder_) {
+    builder_->ResetPools();
+  }
+}
 void PPCTranslator::DumpSource(GuestFunction* function,
                                StringBuffer* string_buffer) {
   Memory* memory = frontend_->memory();

@@ -63,7 +63,8 @@ enum class ExecutionState {
 
 class Processor {
  public:
-  Processor(Memory* memory, ExportResolver* export_resolver);
+  Processor(Memory* memory, ExportResolver* export_resolver,
+            CompilationOptions compilation_options = {});
   ~Processor();
 
   Memory* memory() const { return memory_; }
@@ -71,6 +72,9 @@ class Processor {
   ppc::PPCFrontend* frontend() const { return frontend_.get(); }
   backend::Backend* backend() const { return backend_.get(); }
   ExportResolver* export_resolver() const { return export_resolver_; }
+  CompilationOptions compilation_options() const {
+    return compilation_options_;
+  }
 
   bool Setup(std::unique_ptr<backend::Backend> backend);
 
@@ -250,6 +254,7 @@ class Processor {
   bool DemandFunction(Function* function);
 
   Memory* memory_ = nullptr;
+  const CompilationOptions compilation_options_;
   std::unique_ptr<StackWalker> stack_walker_;
 
   std::function<DebugListener*(Processor*)> debug_listener_handler_;

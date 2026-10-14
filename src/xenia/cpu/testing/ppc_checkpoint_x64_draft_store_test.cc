@@ -94,7 +94,7 @@ class DraftEmitter final : public X64Emitter {
     REQUIRE(debug_info_ == nullptr);
     REQUIRE(debug_info_flags_ == 0);
     REQUIRE(trace_data_ == nullptr);
-    EmitFunctionInfo info{};
+    backend::EmitFunctionInfo info{};
     if (!X64Emitter::Emit(&builder, info) || !getSize() ||
         getSize() > kMaxDraftBytes) {
       Discard();

@@ -67,6 +67,58 @@ real Memory allocation with protected/decommitted pages. It contains no game
 binary or proprietary SDK code. Compiled verification and actual module adapter
 integration remain separate validation steps.
 
-Virtual unwind, optimized register reconstruction, console exception/context
-layouts, language-handler arguments and search/unwind/return semantics require
-later independent work. This inventory is the bounded foundation for that work.
+`cpu/ppc/ppc_virtual_unwind` is a separate pure, offline partial-frame operation.
+It accepts a valid packed metadata function and the complete, same-generation,
+caller-owned code copy, then admits only two exact nonleaf prologue/epilogue
+shapes. Both save LR at entry-SP minus 8 and allocate a constant aligned frame
+with `stwu`. The second also saves full-width r31 at entry-SP minus 16 and uses
+r31 as a frame base. The packed prologue count must equal the decoded shape.
+Every instruction in the complete function is checked. The currently admitted
+body subset is non-updating `addi`, `addis`, `lwz`, `stw`, the exact `mr` alias and
+relative direct linked calls to outside the function. Stores need a statically
+derived constant address, and a frame use declines if one overlaps its frame.
+Unknown instructions, internal branches, indirect calls, helper-based
+prologues or epilogues, dynamic stack changes and other frame shapes decline.
+Admitted external direct callees are assumed to return normally and preserve
+SP, nonvolatile r31 and this frame's save slots according to the normal calling
+convention. Local code inspection does not prove arbitrary callees or exclude
+an external alternate entrance to the function. The caller must establish that
+control entered through the recognized prologue.
+
+For an exact, aligned body PC before that instruction's effects, frame use needs
+explicit valid SP low 32 bits, and the r31-base shape also needs valid r31 low
+32 bits equal to SP. Full-width validity includes usable low 32 bits. It checks
+the 32-bit big-endian backchain at SP against a wide checked SP plus allocation,
+then reads the saved 32-bit LR at caller-SP minus 8. The r31-base shape reads a
+full 64-bit big-endian saved r31 at caller-SP minus 16. Read count and bytes
+have hard ceilings of four reads and 32 bytes; the supplied owned stack extent
+can cover the larger 96/112-byte frames. Every slot must fit within that frame
+and the supplied extent. The output contains only caller SP as a 32-bit address,
+the exact saved return address, and, for the r31-base shape, full-width r31.
+It does not carry any other register validity into another frame. All prologue
+and epilogue PCs, including the first SP restore, decline. Failure publishes no
+partially recovered values.
+
+The caller must independently guarantee that metadata and code came from the
+same retained module instance and code generation, and that registers and stack
+are one coherent, precise capture of the same stable thread and memory epoch.
+Unknown provenance declines. Bookkeeping tags alone cannot establish these
+guarantees; there is currently no production adapter satisfying them. An owned
+`HostFaultRecord` is insufficient. A missing `.pdata` entry does not imply a
+leaf frame. The saved LR is returned exactly: no universal PC subtraction,
+scope selection, handler or dispatch decision follows from it. Later phase-aware
+work must use effects strictly before the exact PC, not a source-map or native
+predecessor. The synthetic tests reconstruct bounded instruction words and
+big-endian stacks; they provide no live game unwind evidence.
+
+The admitted shapes were derived from bounded observed words: a three-word
+prologue, 96-byte frame and four-word epilogue at `82311A68..82311AAC`, and a
+five-word prologue, 112-byte frame and five-word epilogue at
+`82313028..82313074`. Those addresses are examples for the fixtures, not
+title-specific production rules. The source was a bounded in-memory decode of
+`default.xex` from the supplied ISO for title ID `373307D9`, version `0.0.0.5`;
+the complete function extents and words were checked against their packed
+lengths. No XDK material was used. Helper-save forms and wider PPC virtual
+unwind, optimized register reconstruction, console exception/context layouts,
+language-handler arguments and search/unwind/return semantics remain separate
+work.

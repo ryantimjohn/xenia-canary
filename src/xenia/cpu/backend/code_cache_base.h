@@ -253,7 +253,8 @@ class CodeCacheBase : public CodeCache {
                   element_ptr);
           if (key < (element->first >> 32)) {
             return -1;
-          } else if (key > uint32_t(element->first)) {
+          } else if (key >= uint32_t(element->first)) {
+            // The stored allocation end is exclusive.
             return 1;
           } else {
             return 0;

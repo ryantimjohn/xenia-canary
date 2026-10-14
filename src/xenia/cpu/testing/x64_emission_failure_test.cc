@@ -227,8 +227,14 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
   REQUIRE(output_map.size() == 1);
   CHECK(output_map[0].guest_address == kFailedAddress);
   CHECK(slots[1] == reinterpret_cast<uintptr_t>(output));
+  // Failed emission placed nothing, so this allocation immediately follows
+  // the old function's code and unwind storage.
+  CHECK(cache->LookupFunction(reinterpret_cast<uint64_t>(output) - 1) ==
+        &old_function);
   CHECK(cache->LookupFunction(reinterpret_cast<uint64_t>(output)) ==
         &failed_function);
+  CHECK(cache->LookupFunction(reinterpret_cast<uint64_t>(output) + output_size -
+                              1) == &failed_function);
 
   // Exercise the actual assembler's failure propagation with an existing valid
   // function: Setup/debug/source-map/indirection must retain their old values.
@@ -261,6 +267,9 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
         kReusedAddress);
   CHECK(slots[2] ==
         reinterpret_cast<uintptr_t>(assembler_reused_function.machine_code()));
+  CHECK(cache->LookupFunction(reinterpret_cast<uint64_t>(
+            assembler_reused_function.machine_code())) ==
+        &assembler_reused_function);
   CHECK(slots[0] == old_slot);
   CHECK(std::memcmp(old_code, old_bytes.data(), old_bytes.size()) == 0);
 }

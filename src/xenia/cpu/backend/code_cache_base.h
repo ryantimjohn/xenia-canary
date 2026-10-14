@@ -165,8 +165,9 @@ class CodeCacheBase : public CodeCache {
   // True means the callback completed and the reservation was aborted, never
   // committed. C++ callback exceptions propagate after automatic abort; this
   // does not promise cleanup for an unhandled hardware fault or process exit.
-  // The source must provide total readable bytes during copying. Reservation
-  // checks do not validate raw source pointers or enforce callback write
+  // Rejected size/capacity requests never read source bytes or call the writer.
+  // Accepted requests require total readable source bytes during copying.
+  // Reservation checks do not validate pointers or enforce callback write
   // bounds.
   template <typename Callback>
   bool WithPreparedGuestCode(const void* machine_code,

@@ -76,6 +76,19 @@ struct Fixture {
     REQUIRE(cache->Initialize());
     REQUIRE(cache->has_indirection_table());
     cache->CommitExecutableRange(kOldAddress, kOldAddress + 0x1000);
+    // The legacy void API initializes defaults internally and cannot report
+    // native commit failure. Observe storage before fixture placement/reads.
+    MEMORY_BASIC_INFORMATION slot_region{};
+    REQUIRE(VirtualQuery(slots(), &slot_region, sizeof(slot_region)) ==
+            sizeof(slot_region));
+    REQUIRE(slot_region.State == MEM_COMMIT);
+    REQUIRE(slot_region.Protect == PAGE_READWRITE);
+    const auto region_base =
+        reinterpret_cast<uintptr_t>(slot_region.BaseAddress);
+    REQUIRE(uintptr_t{kOldAddress} >= region_base);
+    const size_t slot_offset = uintptr_t{kOldAddress} - region_base;
+    REQUIRE(slot_offset <= slot_region.RegionSize);
+    REQUIRE(2 * sizeof(uint32_t) <= slot_region.RegionSize - slot_offset);
   }
 
   const uint32_t* slots() const {
@@ -219,14 +232,27 @@ TEST_CASE("Unpublished cache preparation rejects overflow and capacity",
     CHECK_FALSE(fixture.cache->WithPreparedGuestCode(kDraftBytes.data(),
                                                      CodeInfo(size), writer));
   }
+  const size_t unwind_span =
+      xe::round_up(fixture.cache->QueryUnwindStorageSize(), size_t{16}, false);
+  const size_t old_span =
+      xe::round_up(kOrdinaryBytes.size(), size_t{16}) + unwind_span;
+  const size_t max_aligned_allocation = fixture.cache->total_size() / 16 * 16;
+  REQUIRE(unwind_span > 0);
+  REQUIRE(max_aligned_allocation > unwind_span);
+  REQUIRE(old_span > fixture.cache->total_size() - max_aligned_allocation);
+  // This rounded request fits an empty cache. The existing ordinary allocation
+  // leaves insufficient remaining space, so rejection must precede source copy.
+  const size_t remaining_capacity_size = max_aligned_allocation - unwind_span;
+  REQUIRE(xe::round_up(remaining_capacity_size, size_t{16}, false) +
+              unwind_span ==
+          max_aligned_allocation);
+  CHECK_FALSE(fixture.cache->WithPreparedGuestCode(
+      kDraftBytes.data(), CodeInfo(remaining_capacity_size), writer));
   CHECK(callbacks == 0);
   CHECK(fixture.slots()[1] == next_slot);
   CheckOldPlacement(fixture, old_function, old_pc, old_slot, old_unwind);
   X64Function next_function(&fixture.module, kNextAddress);
   const auto next_pc = PlaceOrdinary(fixture, next_function);
-  const size_t old_span =
-      xe::round_up(kOrdinaryBytes.size(), size_t{16}) +
-      xe::round_up(fixture.cache->QueryUnwindStorageSize(), size_t{16});
   CHECK(next_pc == old_pc + old_span);
   CheckOldPlacement(fixture, old_function, old_pc, old_slot, old_unwind);
 }

@@ -36,6 +36,7 @@ class X64CodeCache : public CodeCacheBase<X64CodeCache> {
                     void* code_execute_address, size_t code_size);
 
   // Virtual for platform-specific overrides (_win.cc / _posix.cc).
+  virtual size_t QueryUnwindStorageSize() const { return 0; }
   virtual UnwindReservation RequestUnwindReservation(uint8_t* entry_address) {
     return UnwindReservation();
   }

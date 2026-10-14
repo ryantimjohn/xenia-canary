@@ -34,6 +34,7 @@ class A64CodeCache : public CodeCacheBase<A64CodeCache> {
   void FlushCodeRange(void* address, size_t size);
 
   // Virtual for platform-specific overrides (_win.cc / _posix.cc).
+  virtual size_t QueryUnwindStorageSize() const { return 0; }
   virtual UnwindReservation RequestUnwindReservation(uint8_t* entry_address) {
     return UnwindReservation();
   }

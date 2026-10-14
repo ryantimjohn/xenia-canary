@@ -67,6 +67,10 @@ struct EmitFunctionInfo {
 //   void FlushCodeRange(void* address, size_t size)
 //     Flush I-cache after writing code (no-op on x86, required on ARM64).
 //
+//   size_t QueryUnwindStorageSize() const
+//     Side-effect-free storage requirement, without reserving a table slot or
+//     publishing unwind information.
+//
 //   UnwindReservation RequestUnwindReservation(uint8_t* entry_address)
 //     Reserve space for platform-specific unwind info.
 //
@@ -108,6 +112,109 @@ class CodeCacheBase : public CodeCache {
     return kGeneratedCodeExecuteBase;
   }
   size_t total_size() const override { return kGeneratedCodeSize; }
+
+  // A trusted compile-only callback may inspect and modify the copied code.
+  // This view supplies no callable entry or publication operation. C++ cannot
+  // prevent saving/casting a raw pointer: the caller must not invoke these
+  // bytes, publish their address, or retain/use the view or write pointer after
+  // the callback. Keep this cache and its owning backend alive throughout the
+  // synchronous operation, and exclude concurrent teardown.
+  class PreparedGuestCode {
+   public:
+    enum class State { kPrepared, kAborted };
+
+    PreparedGuestCode(const PreparedGuestCode&) = delete;
+    PreparedGuestCode& operator=(const PreparedGuestCode&) = delete;
+    PreparedGuestCode(PreparedGuestCode&&) = delete;
+    PreparedGuestCode& operator=(PreparedGuestCode&&) = delete;
+
+    State state() const { return state_; }
+    uint8_t* write_data() const { return write_address_; }
+    size_t code_size() const { return code_size_; }
+    size_t allocation_size() const { return allocation_size_; }
+    // Numeric offset only; the write view may alias executable storage.
+    uint32_t execute_offset() const { return execute_offset_; }
+
+   private:
+    friend class CodeCacheBase<Derived>;
+
+    PreparedGuestCode(CodeCacheBase& cache, uint8_t* write_address,
+                      uint32_t execute_offset, size_t code_size,
+                      size_t allocation_size)
+        : cache_(cache),
+          write_address_(write_address),
+          execute_offset_(execute_offset),
+          code_size_(code_size),
+          allocation_size_(allocation_size) {}
+    ~PreparedGuestCode() { cache_.AbortPreparedCode(*this); }
+
+    CodeCacheBase& cache_;
+    uint8_t* write_address_;
+    uint32_t execute_offset_;
+    size_t code_size_;
+    size_t allocation_size_;
+    State state_ = State::kPrepared;
+  };
+
+  // Dormant preparation seam, deliberately not used by ordinary placement.
+  // Reserve code plus aligned private unwind storage, then release the global
+  // region before copying or calling trusted writer code. The callback may
+  // write only [write_data(), write_data() + code_size()). It receives no guest
+  // address or GuestFunction association. Unwind registration, function maps,
+  // indirection and profiling hooks are never touched by this operation.
+  // True means the callback completed and the reservation was aborted, never
+  // committed. C++ callback exceptions propagate after automatic abort; this
+  // does not promise cleanup for an unhandled hardware fault or process exit.
+  // The source must provide total readable bytes during copying. Reservation
+  // checks do not validate raw source pointers or enforce callback write
+  // bounds.
+  template <typename Callback>
+  bool WithPreparedGuestCode(const void* machine_code,
+                             const EmitFunctionInfo& func_info,
+                             Callback&& callback) {
+    uint8_t* write_address;
+    uint32_t execute_offset;
+    size_t allocation_size;
+    {
+      auto global_lock = global_critical_region_.Acquire();
+      const size_t code_size = func_info.code_size.total;
+      if (!machine_code || !code_size || code_size > kGeneratedCodeSize ||
+          !generated_code_write_base_ || !generated_code_execute_base_) {
+        return false;
+      }
+      const size_t unwind_size = self().QueryUnwindStorageSize();
+      if (unwind_size > kGeneratedCodeSize) {
+        return false;
+      }
+      // Both operands are bounded before rounding/addition, including hostile
+      // size_t maxima. Zero unwind bytes require no private unwind span.
+      const size_t code_span = xe::round_up(code_size, size_t{16}, false);
+      const size_t unwind_span = xe::round_up(unwind_size, size_t{16}, false);
+      if (unwind_span > kGeneratedCodeSize ||
+          code_span > kGeneratedCodeSize - unwind_span) {
+        return false;
+      }
+      allocation_size = code_span + unwind_span;
+      if (generated_code_offset_ > kGeneratedCodeSize ||
+          allocation_size > kGeneratedCodeSize - generated_code_offset_) {
+        return false;
+      }
+      execute_offset = static_cast<uint32_t>(generated_code_offset_);
+      write_address = generated_code_write_base_ + generated_code_offset_;
+      generated_code_offset_ += allocation_size;
+      // Keep the existing native memory-commit contract. Consumed allocation
+      // offsets never rewind, including after callback exceptions.
+      EnsureCommitted(generated_code_offset_);
+    }
+    PreparedGuestCode prepared(*this, write_address, execute_offset,
+                               func_info.code_size.total, allocation_size);
+    // Fill the whole aligned span first, including on architectures whose
+    // trap instructions require aligned stores. The copied draft stays opaque.
+    self().FillCode(write_address, allocation_size);
+    std::memcpy(write_address, machine_code, prepared.code_size());
+    std::forward<Callback>(callback)(prepared);
+    return true;
+  }
 
   bool has_indirection_table() { return indirection_table_base_ != nullptr; }
 
@@ -370,6 +477,13 @@ class CodeCacheBase : public CodeCache {
 
  private:
   Derived& self() { return static_cast<Derived&>(*this); }
+
+  void AbortPreparedCode(PreparedGuestCode& prepared) noexcept {
+    self().FillCode(prepared.write_address_, prepared.allocation_size_);
+    self().FlushCodeRange(prepared.write_address_, prepared.allocation_size_);
+    prepared.write_address_ = nullptr;
+    prepared.state_ = PreparedGuestCode::State::kAborted;
+  }
 
   void EnsureCommitted(size_t high_mark) {
     using namespace xe::literals;

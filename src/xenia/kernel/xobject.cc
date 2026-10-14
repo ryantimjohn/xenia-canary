@@ -244,8 +244,12 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
       return X_STATUS_TIMEOUT;
-    default:
     case xe::threading::WaitResult::kAbandoned:
+      if (type() == Type::Mutant) {
+        static_cast<XMutant*>(this)->AbandonedWaitCallback();
+      }
+      return X_STATUS_ABANDONED_WAIT_0;
+    default:
     case xe::threading::WaitResult::kFailed:
       return X_STATUS_ABANDONED_WAIT_0;
   }
@@ -254,6 +258,25 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                                 uint32_t wait_reason, uint32_t processor_mode,
                                 uint32_t alertable, uint64_t* opt_timeout) {
+  if (signal_object->type() == Type::Mutant) {
+    if (!wait_object->GetWaitHandle()) {
+      // Wait alone treats non-waitable objects as satisfied. A signal/wait
+      // call must reject such a waiter before changing the signal object.
+      return X_STATUS_INVALID_HANDLE;
+    }
+    // The public Win32 SignalObjectAndWait contract does not guarantee an
+    // atomic signal/wait pair. Use the normal mutant release and wait paths
+    // to keep recursive ownership and guest fields in step with the host.
+    // This is an NT analogy, not a verified console atomicity guarantee.
+    const X_STATUS release_status =
+        static_cast<XMutant*>(signal_object)->ReleaseMutant(0, false, false);
+    if (release_status != X_STATUS_SUCCESS) {
+      return release_status;
+    }
+    return wait_object->Wait(wait_reason, processor_mode, alertable,
+                             opt_timeout);
+  }
+
   auto timeout_ms =
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
@@ -279,8 +302,12 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
       return X_STATUS_TIMEOUT;
-    default:
     case xe::threading::WaitResult::kAbandoned:
+      if (wait_object->type() == Type::Mutant) {
+        static_cast<XMutant*>(wait_object)->AbandonedWaitCallback();
+      }
+      return X_STATUS_ABANDONED_WAIT_0;
+    default:
     case xe::threading::WaitResult::kFailed:
       return X_STATUS_ABANDONED_WAIT_0;
   }
@@ -321,6 +348,10 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         status = X_STATUS_TIMEOUT;
         break;
       case xe::threading::WaitResult::kAbandoned:
+        if (objects[result.second]->type() == Type::Mutant) {
+          static_cast<XMutant*>(objects[result.second])
+              ->AbandonedWaitCallback();
+        }
         status = X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
         break;
       default:
@@ -349,8 +380,17 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         xe::threading::MaybeYield();
         status = X_STATUS_TIMEOUT;
         break;
-      default:
       case xe::threading::WaitResult::kAbandoned:
+        // An abandoned wait-all still acquires every mutex in the set.
+        // Ordinary callbacks retain recursion for current-owned mutants.
+        for (uint32_t i = 0; i < count; ++i) {
+          if (objects[i]->type() == Type::Mutant) {
+            objects[i]->WaitCallback();
+          }
+        }
+        status = X_STATUS_ABANDONED_WAIT_0;
+        break;
+      default:
       case xe::threading::WaitResult::kFailed:
         status = X_STATUS_ABANDONED_WAIT_0;
         break;

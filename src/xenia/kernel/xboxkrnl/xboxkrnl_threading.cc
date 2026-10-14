@@ -12,6 +12,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/platform.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/util/guest_range.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
@@ -832,6 +833,59 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
 DECLARE_XBOXKRNL_EXPORT2(NtReleaseSemaphore, kThreading, kImplemented,
                          kHighFrequency);
 
+void KeInitializeMutant_entry(pointer_t<X_KMUTANT> mutant_ptr,
+                              dword_t initial_owner) {
+  // Observed in title 373307D9: 0x8281B2F8 initializes this 0x20-byte object
+  // unowned; 0x82816C3C waits indefinitely on it, and 0x82816CA8 releases it.
+  // Recursive state follows the public NT mutex model (KeReleaseMutex).
+  if (!util::IsGuestRangeWritable(kernel_memory(), mutant_ptr.guest_address(),
+                                  sizeof(X_KMUTANT))) {
+    xe::FatalError("KeInitializeMutant: storage is not writable");
+  }
+  auto* current = XThread::GetCurrentThread();
+  auto* native =
+      kernel_memory()->TranslateVirtual<X_KMUTANT*>(mutant_ptr.guest_address());
+  if (!InitializeNativeMutant(native, !!initial_owner,
+                              current->guest_object())) {
+    xe::FatalError("KeInitializeMutant: native storage is already wrapped");
+  }
+  // Eager wrapping keeps initially owned host mutexes on their owner thread.
+  auto mutant =
+      XObject::GetNativeObject<XMutant>(kernel_state(), native, MutantObject);
+  assert_not_null(mutant);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeInitializeMutant, kThreading, kImplemented);
+
+dword_result_t KeReleaseMutant_entry(pointer_t<X_KMUTANT> mutant_ptr,
+                                     dword_t increment, dword_t abandon,
+                                     dword_t wait) {
+  if (!util::IsGuestRangeWritable(kernel_memory(), mutant_ptr.guest_address(),
+                                  sizeof(X_KMUTANT))) {
+    xe::FatalError("KeReleaseMutant: storage is not writable");
+  }
+  auto* native =
+      kernel_memory()->TranslateVirtual<X_KMUTANT*>(mutant_ptr.guest_address());
+  auto object =
+      XObject::GetNativeObject<XObject>(kernel_state(), native, MutantObject);
+  // An existing registry marker can name another type or a copied object.
+  // GetNativeObject<T> does not validate its cast, so check before using it.
+  if (!object || object->type() != XMutant::kObjectType ||
+      object->guest_object() != mutant_ptr.guest_address()) {
+    xe::FatalError("KeReleaseMutant: invalid native mutant mapping");
+  }
+  auto* mutant = static_cast<XMutant*>(object.get());
+  int32_t previous_state = 0;
+  const X_STATUS status =
+      mutant->ReleaseMutant(increment, !!abandon, !!wait, &previous_state);
+  if (status != X_STATUS_SUCCESS) {
+    // The Ke interface raises on invalid releases; guest exception delivery
+    // is not implemented here, so fail visibly rather than return success.
+    xe::FatalError(fmt::format("KeReleaseMutant failed: {:08X}", status));
+  }
+  return static_cast<uint32_t>(previous_state);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeReleaseMutant, kThreading, kImplemented);
+
 dword_result_t NtCreateMutant_entry(
     lpdword_t handle_out, pointer_t<X_OBJECT_ATTRIBUTES> obj_attributes,
     dword_t initial_owner) {
@@ -868,22 +922,23 @@ DECLARE_XBOXKRNL_EXPORT1(NtCreateMutant, kThreading, kImplemented);
 
 dword_result_t NtReleaseMutant_entry(dword_t mutant_handle,
                                      lpdword_t previous_count) {
-  // This doesn't seem to be supported.
-  // int32_t previous_count_ptr = SHIM_GET_ARG_32(2);
-
-  // Whatever arg 1 is all games seem to set it to 0, so whether it's
-  // abandon or wait we just say false. Which is good, cause they are
-  // both ignored.
-  uint32_t priority_increment = 0;
-  bool abandon = false;
-  bool wait = false;
-
+  if (previous_count &&
+      !util::IsGuestRangeWritable(
+          kernel_memory(), previous_count.guest_address(), sizeof(uint32_t))) {
+    return X_STATUS_ACCESS_VIOLATION;
+  }
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto mutant =
       kernel_state()->object_table()->LookupObject<XMutant>(mutant_handle);
   if (mutant) {
-    mutant->ReleaseMutant(priority_increment, abandon, wait);
+    int32_t previous_state = 0;
+    result = mutant->ReleaseMutant(0, false, false, &previous_state);
+    if (result == X_STATUS_SUCCESS && previous_count) {
+      xe::store_and_swap<uint32_t>(
+          kernel_memory()->TranslateVirtual(previous_count.guest_address()),
+          static_cast<uint32_t>(previous_state));
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }

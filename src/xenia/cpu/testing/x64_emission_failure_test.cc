@@ -47,6 +47,24 @@ constexpr uint32_t kOldAddress = GUEST_TRAMPOLINE_BASE + 0x1000;
 constexpr uint32_t kFailedAddress = kOldAddress + 4;
 constexpr uint32_t kReusedAddress = kOldAddress + 8;
 
+// Value-use allocation requires the owning builder to be current. These
+// builders have overlapping lifetimes and unwind in reverse declaration order.
+class FixtureHIR final : public HIRBuilder {
+ public:
+  FixtureHIR() : previous_(GetCurrent()) { MakeCurrent(); }
+  ~FixtureHIR() override {
+    if (GetCurrent() == this) {
+      RemoveCurrent();
+      if (previous_) {
+        previous_->MakeCurrent();
+      }
+    }
+  }
+
+ private:
+  HIRBuilder* const previous_;
+};
+
 // Read-only inspection of existing protected state. No selector override,
 // injected failure, test hook or checkpoint/profile bypass is involved.
 class InspectedEmitter final : public X64Emitter {
@@ -100,6 +118,7 @@ void MissingSequence(HIRBuilder& builder, uint32_t address) {
 }
 
 void Compile(Processor& processor, HIRBuilder& builder) {
+  REQUIRE(builder.Finalize());
   namespace passes = compiler::passes;
   compiler::Compiler compiler(&processor);
   compiler.AddPass(std::make_unique<passes::ValidationPass>());
@@ -154,7 +173,7 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
   X64Assembler assembler(native);
   REQUIRE(assembler.Initialize());
   X64Function old_function(&module, kOldAddress);
-  HIRBuilder old_builder;
+  FixtureHIR old_builder;
   Prefix(old_builder, kOldAddress);
   old_builder.Return();
   Compile(processor, old_builder);
@@ -174,7 +193,7 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
   XbyakAllocator allocator;
   InspectedEmitter emitter(native, &allocator);
   X64Function failed_function(&module, kFailedAddress);
-  HIRBuilder failed_builder;
+  FixtureHIR failed_builder;
   MissingSequence(failed_builder, kFailedAddress);
   Compile(processor, failed_builder);
   void* output = old_code;  // Stale usable output must be cleared on failure.
@@ -196,7 +215,7 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
 
   // Reuse the same public emitter after discarded unresolved labels/tail work.
   // Successful placement is allowed now, but the resulting code is never run.
-  HIRBuilder reused_builder;
+  FixtureHIR reused_builder;
   reused_builder.SourceOffset(kFailedAddress);
   reused_builder.Nop();
   reused_builder.Return();
@@ -213,7 +232,7 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
 
   // Exercise the actual assembler's failure propagation with an existing valid
   // function: Setup/debug/source-map/indirection must retain their old values.
-  HIRBuilder assembler_failed_builder;
+  FixtureHIR assembler_failed_builder;
   MissingSequence(assembler_failed_builder, kOldAddress);
   Compile(processor, assembler_failed_builder);
   REQUIRE_FALSE(assembler.Assemble(&old_function, &assembler_failed_builder, 0,
@@ -228,7 +247,7 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
         &old_function);
 
   X64Function assembler_reused_function(&module, kReusedAddress);
-  HIRBuilder assembler_reused_builder;
+  FixtureHIR assembler_reused_builder;
   assembler_reused_builder.SourceOffset(kReusedAddress);
   assembler_reused_builder.Nop();
   assembler_reused_builder.Return();

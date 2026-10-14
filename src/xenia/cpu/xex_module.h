@@ -13,6 +13,7 @@
 #include <string>
 #include <vector>
 #include "xenia/base/mapped_memory.h"
+#include "xenia/cpu/exception_metadata.h"
 #include "xenia/cpu/module.h"
 #include "xenia/kernel/util/xex2_info.h"
 
@@ -96,9 +97,9 @@ class XexModule : public xe::cpu::Module {
  public:
   struct ImportLibraryFn {
    public:
-    uint32_t ordinal;
-    uint32_t value_address;
-    uint32_t thunk_address;
+    uint32_t ordinal = 0;
+    uint32_t value_address = 0;
+    uint32_t thunk_address = 0;
   };
   struct ImportLibrary {
    public:
@@ -203,6 +204,19 @@ class XexModule : public xe::cpu::Module {
   static const void* GetSecurityInfo(const xex2_header* header);
 
   const PESection* GetPESection(const char* name);
+
+  // Read-only, owned values. Caller must retain the module and exclude
+  // concurrent Load/Unload/setup at a stable boundary. The reader is consumed
+  // under the global region and is not retained; this region does not itself
+  // retain module lifetime or make running guest self-modification atomic.
+  ExceptionMetadataSnapshot GetExceptionMetadataSnapshot() const;
+
+  // Bounded memory adapter, also usable with synthetic loaded-section fixtures.
+  // All declared sections are retained; unavailable ranges grant no reads.
+  static ExceptionMetadataSnapshot ReadExceptionMetadataSnapshot(
+      Memory* memory, uint32_t image_base, uint64_t image_end,
+      std::span<const ExceptionMetadataSection> sections,
+      std::span<const ExceptionMetadataImport> imports);
 
   uint32_t GetProcAddress(uint16_t ordinal) const;
   uint32_t GetProcAddress(const std::string_view name) const;

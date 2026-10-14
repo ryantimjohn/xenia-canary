@@ -19,6 +19,7 @@
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/base/cvar.h"
+#include "xenia/base/platform_win.h"
 #include "xenia/cpu/backend/x64/x64_assembler.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
@@ -40,7 +41,9 @@ namespace {
 using namespace backend::x64;
 using namespace hir;
 using ppc::PPCContext;
-constexpr uint32_t kOldAddress = 0x82000000;
+// This fresh backend has no guest trampolines. Reuse an already committed HV
+// page, without requiring a new native indirection-page allocation.
+constexpr uint32_t kOldAddress = GUEST_TRAMPOLINE_BASE + 0x1000;
 constexpr uint32_t kFailedAddress = kOldAddress + 4;
 constexpr uint32_t kReusedAddress = kOldAddress + 8;
 
@@ -131,13 +134,20 @@ TEST_CASE("x64 missing sequence discards partial emission before publication",
   auto* native = static_cast<X64Backend*>(processor.backend());
   auto* cache = static_cast<X64CodeCache*>(native->code_cache());
   REQUIRE(cache->has_indirection_table());
-  native->CommitExecutableRange(kOldAddress, kOldAddress + 0x1000);
   // Windows x64's committed indirection slots are at their guest addresses.
   auto* slots = reinterpret_cast<const uint32_t*>(uintptr_t{kOldAddress});
-  const uint32_t failed_slot_before = slots[1];
+  MEMORY_BASIC_INFORMATION slot_region{};
+  REQUIRE(VirtualQuery(slots, &slot_region, sizeof(slot_region)) ==
+          sizeof(slot_region));
+  REQUIRE(slot_region.State == MEM_COMMIT);
+  REQUIRE(slot_region.Protect == PAGE_READWRITE);
+  REQUIRE(slot_region.RegionSize >=
+          reinterpret_cast<uintptr_t>(slots) -
+              reinterpret_cast<uintptr_t>(slot_region.BaseAddress) + 0x1000);
   RawModule module(&processor);
   module.set_name("X64EmissionFailureTest");
   module.SetAddressRange(kOldAddress, 0x1000);
+  const uint32_t failed_slot_before = slots[1];
 
   // Establish a real old function/placement with exactly the supported prefix
   // used before failure. This also confirms that prefix emits ordinary bytes.

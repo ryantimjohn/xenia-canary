@@ -21,12 +21,25 @@
 
 #include "third_party/capstone/include/capstone/capstone.h"
 #include "third_party/catch/include/catch.hpp"
+#include "xenia/base/cvar.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
+#include "xenia/cpu/backend/x64/x64_stack_layout.h"
+#include "xenia/cpu/backend/x64/x64_tracers.h"
+#include "xenia/cpu/compiler/compiler.h"
+#include "xenia/cpu/compiler/compiler_passes.h"
+#include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/hir/hir_builder.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
+#include "xenia/cpu/ppc/ppc_context.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/memory.h"
+
+DECLARE_bool(emit_source_annotations);
+DECLARE_bool(instrument_call_times);
+DECLARE_uint32(align_all_basic_blocks);
 
 namespace xe::cpu::testing {
 namespace {
@@ -377,6 +390,486 @@ TEST_CASE("Unpublished x64 finalization failure restores and reuses encoder",
   fixture.CheckAborted(failed_pc, failed_span);
   fixture.CheckAborted(pc, span);
 }
+
+namespace real_hir {
+
+using namespace hir;
+constexpr uint32_t kPC = 0x80005000;
+constexpr uint64_t kValue = 0x12345678;
+constexpr size_t kMaxBytes = 4096;
+
+size_t GPROffset(size_t reg) {
+  return offsetof(ppc::PPCContext, r) + reg * sizeof(uint64_t);
+}
+
+class CurrentHIR final : public HIRBuilder {
+ public:
+  CurrentHIR() : previous_(GetCurrent()) { MakeCurrent(); }
+  ~CurrentHIR() override {
+    if (GetCurrent() == this) {
+      RemoveCurrent();
+      if (previous_) {
+        previous_->MakeCurrent();
+      }
+    }
+  }
+
+ private:
+  HIRBuilder* const previous_;
+};
+
+struct Draft {
+  backend::EmitFunctionInfo info{};
+  std::vector<uint8_t> bytes;
+  std::vector<SourceMapEntry> source_map;
+};
+
+class HIREmitter final : public X64Emitter {
+ public:
+  using X64Emitter::X64Emitter;
+  ~HIREmitter() override { Clear(); }
+
+  Draft Build(HIRBuilder& builder) {
+    CheckDiscarded();
+    REQUIRE(processor()->compilation_options().profile ==
+            CompilationProfile::kOrdinary);
+    REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+    REQUIRE(HIRBuilder::GetCurrent() == &builder);
+    REQUIRE_FALSE(allocator_->useProtect());
+    ready_attempts_ = 0;
+    Draft draft;
+    REQUIRE(X64Emitter::Emit(&builder, draft.info));
+    REQUIRE(getSize() > 0);
+    REQUIRE(getSize() <= kMaxBytes);
+    REQUIRE(draft.info.code_size.total == getSize());
+    REQUIRE(epilog_label_ == nullptr);
+    REQUIRE_FALSE(hasUndefinedLabel());
+    REQUIRE_FALSE(isCalledCalcJmpAddress());
+    scratch_ = top_;
+    draft.bytes.assign(top_, top_ + getSize());
+    source_map_arena_.CloneContents(&draft.source_map);
+    // Retain the actual generator, cached/tail labels and all relocation
+    // records until the prepared callback, rather than discarding a snapshot.
+    return draft;
+  }
+
+  void Finalize(PreparedGuestCode& prepared, uint64_t pc, const Draft& draft) {
+    REQUIRE(top_ == scratch_);
+    REQUIRE(prepared.state() == PreparedGuestCode::State::kPrepared);
+    REQUIRE(prepared.code_size() == draft.info.code_size.total);
+    REQUIRE(prepared.code_size() == getSize());
+    REQUIRE_FALSE(isCalledCalcJmpAddress());
+    REQUIRE(ready_attempts_ == 0);
+    REQUIRE_FALSE(allocator_->useProtect());
+    REQUIRE(reinterpret_cast<uint64_t>(prepared.write_data()) == pc);
+    CheckCommitted(pc, prepared.allocation_size(), PAGE_EXECUTE_READWRITE);
+    REQUIRE(std::memcmp(prepared.write_data(), draft.bytes.data(),
+                        draft.bytes.size()) == 0);
+    ++ready_attempts_;
+    {
+      struct RestoreTop {
+        uint8_t*& top;
+        uint8_t* original;
+        ~RestoreTop() { top = original; }
+      } restore{top_, top_};
+      top_ = prepared.write_data();
+      ready();  // No placement, unwind reservation, registration or slot write.
+      REQUIRE(isCalledCalcJmpAddress());
+    }
+    CheckRestored(draft);
+  }
+
+  void CheckRestored(const Draft& draft) {
+    REQUIRE(top_ == scratch_);
+    REQUIRE(getSize() == draft.bytes.size());
+    REQUIRE(std::memcmp(top_, draft.bytes.data(), getSize()) == 0);
+    REQUIRE(ready_attempts_ == 1);
+    REQUIRE(isCalledCalcJmpAddress());
+    REQUIRE(stack_size_ == draft.info.stack_size);
+    std::vector<SourceMapEntry> retained;
+    source_map_arena_.CloneContents(&retained);
+    REQUIRE(retained.size() == draft.source_map.size());
+    for (size_t i = 0; i < retained.size(); ++i) {
+      REQUIRE(retained[i].guest_address == draft.source_map[i].guest_address);
+      REQUIRE(retained[i].hir_offset == draft.source_map[i].hir_offset);
+      REQUIRE(retained[i].code_offset == draft.source_map[i].code_offset);
+    }
+  }
+
+  void Discard() {
+    REQUIRE(top_ == scratch_);
+    Clear();
+    CheckDiscarded();
+  }
+
+  void CheckDiscarded() {
+    REQUIRE(getSize() == 0);
+    REQUIRE_FALSE(hasUndefinedLabel());
+    REQUIRE_FALSE(isCalledCalcJmpAddress());
+    REQUIRE(epilog_label_ == nullptr);
+    REQUIRE(tail_code_.empty());
+    REQUIRE(label_cache_.empty());
+    REQUIRE(guest_module_ == nullptr);
+    REQUIRE(current_guest_function_ == 0);
+    REQUIRE(current_instr_ == nullptr);
+    REQUIRE(debug_info_ == nullptr);
+    REQUIRE(debug_info_flags_ == 0);
+    REQUIRE(trace_data_ == nullptr);
+    REQUIRE(stack_size_ == 0);
+    REQUIRE_FALSE(synchronize_stack_on_next_instruction_);
+    REQUIRE(mxcsr_mode_ == MXCSRMode::Unknown);
+    std::vector<SourceMapEntry> retained;
+    source_map_arena_.CloneContents(&retained);
+    REQUIRE(retained.empty());
+  }
+
+ private:
+  void Clear() {
+    // Always reset while top_ refers to scratch, before deleting label owners.
+    reset();
+    tail_code_.clear();
+    for (auto* label : label_cache_) {
+      delete label;
+    }
+    label_cache_.clear();
+    epilog_label_ = nullptr;
+    source_map_arena_.Reset();
+    guest_module_ = nullptr;
+    current_guest_function_ = 0;
+    current_instr_ = nullptr;
+    debug_info_ = nullptr;
+    debug_info_flags_ = 0;
+    trace_data_ = nullptr;
+    stack_size_ = 0;
+    synchronize_stack_on_next_instruction_ = false;
+    ForgetMxcsrMode();
+    scratch_ = nullptr;
+  }
+  uint8_t* scratch_ = nullptr;
+  size_t ready_attempts_ = 0;
+};
+
+struct Decoder {
+  csh handle = 0;
+  cs_insn* instruction = nullptr;
+  Decoder() {
+    if (cs_open(CS_ARCH_X86, CS_MODE_64, &handle) == CS_ERR_OK &&
+        cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON) == CS_ERR_OK) {
+      instruction = cs_malloc(handle);
+    }
+  }
+  ~Decoder() {
+    if (instruction) {
+      cs_free(instruction, 1);
+    }
+    if (handle) {
+      cs_close(&handle);
+    }
+  }
+  Decoder(const Decoder&) = delete;
+  Decoder& operator=(const Decoder&) = delete;
+};
+
+void CheckEffects(Decoder& decoder, unsigned int read, unsigned int write) {
+  cs_regs reads{}, writes{};
+  uint8_t read_count = 0, write_count = 0;
+  REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, reads,
+                         &read_count, writes, &write_count) == CS_ERR_OK);
+  REQUIRE(read_count == (read == X86_REG_INVALID ? 0 : 1));
+  REQUIRE(write_count == (write == X86_REG_INVALID ? 0 : 1));
+  if (read_count) {
+    REQUIRE(reads[0] == read);
+  }
+  if (write_count) {
+    REQUIRE(writes[0] == write);
+  }
+}
+
+void CheckMetadata(const Draft& draft,
+                   const std::array<uint32_t, 4>& marker_offsets) {
+  const auto& info = draft.info;
+  REQUIRE(info.code_size.total == draft.bytes.size());
+  REQUIRE(info.code_size.total <= kMaxBytes);
+  REQUIRE(info.code_size.prolog > 0);
+  REQUIRE(info.code_size.prolog < 256);
+  REQUIRE(info.code_size.prolog <= info.code_size.total);
+  const auto after_prolog = info.code_size.total - info.code_size.prolog;
+  REQUIRE(info.code_size.body <= after_prolog);
+  const auto after_body = after_prolog - info.code_size.body;
+  REQUIRE(info.code_size.epilog > 0);
+  REQUIRE(info.code_size.epilog <= after_body);
+  REQUIRE(info.code_size.tail == after_body - info.code_size.epilog);
+  REQUIRE(info.prolog_stack_alloc_offset > 0);
+  REQUIRE(info.prolog_stack_alloc_offset <= info.code_size.prolog);
+  REQUIRE(info.prolog_stack_alloc_offset < 256);
+  REQUIRE(info.stack_size == StackLayout::GUEST_STACK_SIZE);
+  REQUIRE((info.stack_size + 8) % 16 == 0);
+  REQUIRE(info.stack_size % 8 == 0);
+  REQUIRE(info.stack_size / 8 < 65536);
+  // These are complete emitter unwind inputs, not serialized UNWIND_INFO or
+  // installed runtime-table metadata. The native encoder currently couples
+  // encoding to registration and is deliberately not called here.
+  REQUIRE(draft.source_map.size() == marker_offsets.size());
+  const auto epilog = info.code_size.prolog + info.code_size.body;
+  for (size_t i = 0; i < draft.source_map.size(); ++i) {
+    const auto& entry = draft.source_map[i];
+    REQUIRE(entry.guest_address == kPC + i * 4);
+    REQUIRE(entry.hir_offset == marker_offsets[i]);
+    REQUIRE(entry.code_offset >= info.code_size.prolog);
+    REQUIRE(entry.code_offset <= epilog);
+    if (i) {
+      REQUIRE(draft.source_map[i - 1].code_offset < entry.code_offset);
+    }
+  }
+  REQUIRE(draft.source_map.back().code_offset == epilog);
+}
+
+void CheckIntervals(const Draft& draft, const PreparedGuestCode& prepared,
+                    uint64_t pc, size_t assignment) {
+  constexpr std::array<unsigned int, X64Emitter::GPR_COUNT> registers = {
+      X86_REG_RBX, X86_REG_R10, X86_REG_R11, X86_REG_R12,
+      X86_REG_R13, X86_REG_R14, X86_REG_R15};
+  REQUIRE(assignment < registers.size());
+  const auto condition = registers[assignment];
+  Decoder decoder;
+  REQUIRE(decoder.instruction);
+  for (size_t phase = 0; phase < 3; ++phase) {
+    const size_t begin = draft.source_map[phase].code_offset;
+    const size_t end = draft.source_map[phase + 1].code_offset;
+    REQUIRE(begin < end);
+    REQUIRE(end - begin <= 32);
+    const uint8_t* cursor = prepared.write_data() + begin;
+    size_t remaining = end - begin;
+    uint64_t address = pc + begin;
+    size_t decoded = 0;
+    while (remaining) {
+      const auto instruction_offset = address - pc;
+      REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                             decoder.instruction));
+      REQUIRE(decoder.instruction->detail);
+      const auto& x = decoder.instruction->detail->x86;
+      REQUIRE(x.addr_size == sizeof(uint64_t));
+      for (auto prefix : x.prefix) {
+        REQUIRE(prefix == 0);
+      }
+      if (phase != 1) {
+        REQUIRE(decoded == 0);
+        REQUIRE(decoder.instruction->id == X86_INS_MOV);
+        REQUIRE(x.eflags == 0);
+        REQUIRE(x.op_count == 2);
+        const auto& destination = x.operands[0];
+        const auto& source = x.operands[1];
+        REQUIRE(destination.size == sizeof(uint64_t));
+        REQUIRE(destination.access == CS_AC_WRITE);
+        const auto& memory = phase == 2 ? destination : source;
+        REQUIRE(memory.type == X86_OP_MEM);
+        REQUIRE(memory.size == sizeof(uint64_t));
+        REQUIRE(memory.mem.base == X86_REG_RSI);
+        REQUIRE(memory.mem.index == X86_REG_INVALID);
+        REQUIRE(memory.mem.segment == X86_REG_INVALID);
+        REQUIRE(memory.mem.disp ==
+                static_cast<int64_t>(GPROffset(phase == 2 ? 3 : 4)));
+        if (phase == 2) {
+          REQUIRE(source.type == X86_OP_IMM);
+          REQUIRE(static_cast<uint64_t>(source.imm) == kValue);
+          CheckEffects(decoder, X86_REG_RSI, X86_REG_INVALID);
+        } else {
+          REQUIRE(destination.type == X86_OP_REG);
+          REQUIRE(destination.reg == condition);
+          REQUIRE(source.access == CS_AC_READ);
+          CheckEffects(decoder, X86_REG_RSI, condition);
+        }
+      } else if (decoded == 0) {
+        REQUIRE(decoder.instruction->id == X86_INS_TEST);
+        REQUIRE(x.op_count == 2);
+        constexpr uint64_t kTestFlags =
+            X86_EFLAGS_RESET_OF | X86_EFLAGS_MODIFY_SF | X86_EFLAGS_MODIFY_ZF |
+            X86_EFLAGS_UNDEFINED_AF | X86_EFLAGS_MODIFY_PF |
+            X86_EFLAGS_RESET_CF;
+        REQUIRE(x.eflags == kTestFlags);
+        for (size_t i = 0; i < 2; ++i) {
+          REQUIRE(x.operands[i].type == X86_OP_REG);
+          REQUIRE(x.operands[i].reg == condition);
+          REQUIRE(x.operands[i].size == sizeof(uint64_t));
+          REQUIRE(x.operands[i].access == CS_AC_READ);
+        }
+        CheckEffects(decoder, condition, X86_REG_EFLAGS);
+      } else {
+        REQUIRE(decoded == 1);
+        REQUIRE(decoder.instruction->id == X86_INS_JNE);
+        REQUIRE(decoder.instruction->size == 6);
+        REQUIRE(x.eflags == X86_EFLAGS_TEST_ZF);
+        REQUIRE(x.op_count == 1);
+        REQUIRE(x.operands[0].type == X86_OP_IMM);
+        const auto epilog =
+            draft.info.code_size.prolog + draft.info.code_size.body;
+        REQUIRE(static_cast<uint64_t>(x.operands[0].imm) == pc + epilog);
+        REQUIRE(pc + epilog > decoder.instruction->address);
+        REQUIRE(x.encoding.imm_size == sizeof(int32_t));
+        REQUIRE(x.encoding.imm_offset + x.encoding.imm_size ==
+                decoder.instruction->size);
+        const size_t displacement_offset =
+            instruction_offset + x.encoding.imm_offset;
+        REQUIRE(displacement_offset + sizeof(int32_t) <= end);
+        int32_t pending = 0, resolved = 0;
+        std::memcpy(&pending, draft.bytes.data() + displacement_offset,
+                    sizeof(pending));
+        std::memcpy(&resolved, prepared.write_data() + displacement_offset,
+                    sizeof(resolved));
+        REQUIRE(pending ==
+                0);  // Actual AutoGrow forward-label record was pending.
+        REQUIRE(resolved > 0);  // The real branch skips the fallthrough store.
+        REQUIRE(static_cast<int64_t>(address) + resolved ==
+                static_cast<int64_t>(pc + epilog));
+        CheckEffects(decoder, X86_REG_EFLAGS, X86_REG_INVALID);
+      }
+      ++decoded;
+    }
+    REQUIRE(address == pc + end);
+    REQUIRE(decoded == (phase == 1 ? 2 : 1));
+  }
+  REQUIRE(std::all_of(prepared.write_data() + prepared.code_size(),
+                      prepared.write_data() + prepared.allocation_size(),
+                      [](uint8_t byte) { return byte == 0xCC; }));
+}
+
+TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  REQUIRE(cvars::align_all_basic_blocks == 0);
+  Fixture fixture;
+  XbyakAllocator allocator;
+  REQUIRE_FALSE(allocator.useProtect());
+  HIREmitter emitter(fixture.backend, &allocator);
+  const size_t unwind_inputs_size = fixture.cache->QueryUnwindStorageSize();
+  REQUIRE(unwind_inputs_size > 0);
+  REQUIRE(unwind_inputs_size <= kMaxBytes);
+  uint64_t previous_pc = 0;
+  size_t previous_span = 0;
+  // Two fresh HIR builders exercise the same real emitter after full discard.
+  for (size_t attempt = 0; attempt < 2; ++attempt) {
+    CurrentHIR builder;
+    builder.SourceOffset(kPC);
+    auto condition = builder.LoadContext(GPROffset(4), INT64_TYPE);
+    builder.SourceOffset(kPC + 4);
+    builder.ReturnTrue(condition);
+    builder.SourceOffset(kPC + 8);
+    builder.StoreContext(GPROffset(3), builder.LoadConstantUint64(kValue));
+    builder.SourceOffset(kPC + 12);
+    builder.Return();
+    REQUIRE(builder.Finalize());
+    REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+    namespace passes = compiler::passes;
+    compiler::Compiler compiler(&fixture.processor);
+    // Same explicit validation/CFG/real-RA/finalization recipe as draft cases;
+    // this does not claim the ordinary translator's complete pass pipeline.
+    compiler.AddPass(std::make_unique<passes::ValidationPass>());
+    compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+    compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+        fixture.backend->machine_info()));
+    compiler.AddPass(std::make_unique<passes::ValidationPass>());
+    compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+    REQUIRE(compiler.Compile(&builder));
+    REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+    REQUIRE(builder.locals().empty());
+    REQUIRE_FALSE(condition->IsConstant());
+    REQUIRE(condition->type == INT64_TYPE);
+    REQUIRE(condition->def);
+    REQUIRE(condition->def->dest == condition);
+    REQUIRE(condition->def->opcode->num == OPCODE_LOAD_CONTEXT);
+    REQUIRE(condition->def->src1.offset == GPROffset(4));
+    REQUIRE(condition->reg.set ==
+            &fixture.backend->machine_info()->register_sets[0]);
+    REQUIRE(condition->reg.index >= 0);
+    REQUIRE(static_cast<uint32_t>(condition->reg.index) <
+            condition->reg.set->count);
+    auto body = builder.first_block();
+    REQUIRE(body);
+    REQUIRE(condition->def->block == body);
+    REQUIRE(body->next);
+    REQUIRE(body->next == builder.last_block());
+    REQUIRE(body->next->next == nullptr);
+    constexpr std::array<uint32_t, 8> opcodes = {
+        OPCODE_SOURCE_OFFSET, OPCODE_LOAD_CONTEXT,  OPCODE_SOURCE_OFFSET,
+        OPCODE_RETURN_TRUE,   OPCODE_SOURCE_OFFSET, OPCODE_STORE_CONTEXT,
+        OPCODE_SOURCE_OFFSET, OPCODE_RETURN};
+    std::array<uint32_t, 4> marker_offsets{};
+    size_t position = 0, markers = 0;
+    for (auto block = body; block; block = block->next) {
+      for (auto instr = block->instr_head; instr;
+           instr = instr->next, ++position) {
+        REQUIRE(position < opcodes.size());
+        REQUIRE(instr->opcode->num == opcodes[position]);
+        if (instr->opcode->num == OPCODE_SOURCE_OFFSET) {
+          REQUIRE(markers < marker_offsets.size());
+          REQUIRE(instr->src1.offset == kPC + markers * 4);
+          marker_offsets[markers++] =
+              uint32_t(block->ordinal << 16) | instr->ordinal;
+        } else if (position == 5) {
+          REQUIRE(instr->src1.offset == GPROffset(3));
+          REQUIRE(instr->src2.value->IsConstant());
+          REQUIRE(instr->src2.value->type == INT64_TYPE);
+          REQUIRE(instr->src2.value->constant.u64 == kValue);
+        } else if (position == 3) {
+          REQUIRE(instr->src1.value == condition);
+          REQUIRE(block == body);
+        }
+      }
+    }
+    REQUIRE(position == opcodes.size());
+    REQUIRE(markers == marker_offsets.size());
+    const auto draft = emitter.Build(builder);
+    CheckMetadata(draft, marker_offsets);
+    uint64_t pc = 0;
+    size_t span = 0, callbacks = 0;
+    REQUIRE(fixture.cache->WithPreparedGuestCode(
+        draft.bytes.data(), draft.info, [&](PreparedGuestCode& prepared) {
+          ++callbacks;
+          pc =
+              fixture.cache->execute_base_address() + prepared.execute_offset();
+          span = prepared.allocation_size();
+          REQUIRE(span ==
+                  xe::round_up(draft.info.code_size.total, size_t{16}, false) +
+                      xe::round_up(unwind_inputs_size, size_t{16}, false));
+          if (attempt) {
+            REQUIRE(pc == previous_pc + previous_span);
+          }
+          fixture.CheckUnpublished(pc, span);
+          REQUIRE(fixture.cache->QueryUnwindStorageSize() ==
+                  unwind_inputs_size);
+          emitter.Finalize(prepared, pc, draft);
+          CheckIntervals(draft, prepared, pc,
+                         static_cast<size_t>(condition->reg.index));
+          CheckMetadata(draft, marker_offsets);
+          fixture.CheckUnpublished(pc, span);
+          REQUIRE(fixture.cache->QueryUnwindStorageSize() ==
+                  unwind_inputs_size);
+        }));
+    REQUIRE(callbacks == 1);
+    emitter.CheckRestored(draft);
+    emitter.Discard();
+    CheckMetadata(draft, marker_offsets);  // Owned metadata survives cleanup.
+    fixture.CheckAborted(pc, span);
+    REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
+    if (attempt) {
+      fixture.CheckAborted(previous_pc, previous_span);
+    }
+    previous_pc = pc;
+    previous_span = span;
+  }
+  // The private global Win32 unwind-table counter is unobserved. Existing
+  // function/native-unwind lookups and slot checks establish only the tested
+  // unpublished ranges. No native unwind encoder, registration, callable
+  // entry, guest invocation, complete bank capture or ABI claim is provided.
+}
+
+}  // namespace real_hir
 
 }  // namespace
 }  // namespace xe::cpu::testing

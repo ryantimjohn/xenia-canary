@@ -283,7 +283,26 @@ Value* CheckOldR3Spill(HIRBuilder& builder, Value* old_r3) {
   REQUIRE(builder.locals()[0] == slot);
   auto block = builder.first_block();
   REQUIRE(block);
-  REQUIRE(block->next == nullptr);
+  REQUIRE(block->instr_tail);
+  REQUIRE(block->instr_tail->opcode->num == OPCODE_RETURN);
+  REQUIRE(block->instr_tail->prev);
+  REQUIRE(block->instr_tail->prev->opcode->num == OPCODE_SOURCE_OFFSET);
+  REQUIRE(block->instr_tail->prev->src1.offset == kSpillPC + 12);
+  // Return ends the body before RA. SpillOneRegister appends then relocates its
+  // local instructions, leaving one empty terminal block; finalization keeps
+  // it.
+  auto scaffold = block->next;
+  REQUIRE(scaffold);
+  REQUIRE(scaffold == builder.last_block());
+  REQUIRE(scaffold->prev == block);
+  REQUIRE(scaffold->next == nullptr);
+  REQUIRE(scaffold->instr_head == nullptr);
+  REQUIRE(scaffold->instr_tail == nullptr);
+  REQUIRE(scaffold->label_head == nullptr);
+  REQUIRE(scaffold->label_tail == nullptr);
+  REQUIRE(scaffold->incoming_edge_head == nullptr);
+  REQUIRE(scaffold->outgoing_edge_head == nullptr);
+  REQUIRE(scaffold->incoming_values == nullptr);
   REQUIRE(old_r3->def->block == block);
   Instr* spill = nullptr;
   Instr* reload = nullptr;

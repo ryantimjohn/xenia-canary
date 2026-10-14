@@ -113,6 +113,9 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
                       void** out_code_address, size_t* out_code_size,
                       std::vector<SourceMapEntry>* out_source_map) {
   SCOPE_profile_cpu_f("cpu");
+  // A failed emission must not leave a stale usable placement result.
+  *out_code_address = nullptr;
+  *out_code_size = 0;
   guest_module_ = dynamic_cast<XexModule*>(function->module());
   current_guest_function_ = function->address();
   // Reset.
@@ -124,6 +127,25 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // Fill the generator with code.
   EmitFunctionInfo func_info = {};
   if (!Emit(builder, func_info)) {
+    // Discard the partial body and all deferred work before this emitter is
+    // reused. In particular, epilog_label_ refers to the failed Emit's stack.
+    reset();
+    tail_code_.clear();
+    for (auto* cached_label : label_cache_) {
+      delete cached_label;
+    }
+    label_cache_.clear();
+    epilog_label_ = nullptr;
+    source_map_arena_.Reset();
+    guest_module_ = nullptr;
+    current_guest_function_ = 0;
+    current_instr_ = nullptr;
+    debug_info_ = nullptr;
+    debug_info_flags_ = 0;
+    trace_data_ = nullptr;
+    stack_size_ = 0;
+    synchronize_stack_on_next_instruction_ = false;
+    ForgetMxcsrMode();
     return false;
   }
 
@@ -302,7 +324,7 @@ bool X64Emitter::Emit(HIRBuilder* builder, EmitFunctionInfo& func_info) {
         // rebuild!
         assert_always();
         XELOGE("Unable to process HIR opcode {}", GetOpcodeName(instr->opcode));
-        break;
+        return false;
       }
       instr = new_tail;
     }

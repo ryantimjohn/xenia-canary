@@ -18,6 +18,7 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/compiler/compiler_passes.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
@@ -40,6 +41,37 @@ namespace ppc {
 using xe::cpu::backend::Backend;
 using xe::cpu::compiler::Compiler;
 namespace passes = xe::cpu::compiler::passes;
+
+namespace {
+class CheckpointPairValidationPass final : public compiler::CompilerPass {
+ public:
+  bool Run(hir::HIRBuilder* builder) override {
+    const auto result = VerifyCheckpointHIR(*builder);
+    return result == CheckpointHIRResult::kNoPairs ||
+           result ==
+               CheckpointHIRResult::kStructuralPairRequiresFullProducerProof;
+  }
+};
+}  // namespace
+
+bool AddDormantCheckpointPasses(compiler::Compiler& compiler,
+                                const backend::MachineInfo* machine_info) {
+  if (!machine_info) {
+    return false;
+  }
+  // This recipe is never selected by Translate. It establishes HIR structure,
+  // not modeled-state materialization, native descriptors or executable code.
+  compiler.AddPass(std::make_unique<CheckpointPairValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(
+      std::make_unique<passes::RegisterAllocationPass>(machine_info));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  compiler.AddPass(std::make_unique<CheckpointPairValidationPass>());
+  return true;
+}
 
 PPCTranslator::PPCTranslator(PPCFrontend* frontend)
     : frontend_(frontend),

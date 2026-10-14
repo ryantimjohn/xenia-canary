@@ -23,6 +23,7 @@
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/label.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/processor.h"
 
 namespace xe {
@@ -67,6 +68,11 @@ bool A64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
                             uint32_t debug_info_flags,
                             std::unique_ptr<FunctionDebugInfo> debug_info) {
   SCOPE_profile_cpu_f("cpu");
+
+  // No backend may silently treat a structural request as a checkpoint.
+  if (ppc::ContainsCheckpointHIR(*builder)) {
+    return false;
+  }
 
   // Reset when we leave.
   xe::make_reset_scope(this);

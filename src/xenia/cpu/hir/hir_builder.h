@@ -186,6 +186,13 @@ class HIRBuilder {
   void StoreContext(size_t offset, Value* value);
   void ContextBarrier();
 
+  // Dormant structural pairing only. Numeric site data is owned by the HIR;
+  // this does not materialize registers or provide invocation storage.
+  Instr* PPCCheckpointRequest(uint64_t pair_id, uint32_t guest_pc,
+                              uint32_t raw_instruction, Value* old_base);
+  Value* PPCCheckpointLwz(uint64_t pair_id, Value* ea);
+  void PPCCheckpointStw(uint64_t pair_id, Value* ea, Value* old_source);
+
   Value* LoadMmio(cpu::MMIORange* mmio_range, uint32_t address, TypeName type);
   void StoreMmio(cpu::MMIORange* mmio_range, uint32_t address, Value* value);
 

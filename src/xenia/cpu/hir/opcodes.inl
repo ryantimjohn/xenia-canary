@@ -717,3 +717,22 @@ DEFINE_OPCODE(
     "reserved_store",
     OPCODE_SIG_V_V_V,
     OPCODE_FLAG_MEMORY)
+
+// Retained structural requests, not a materialized or fault-eligible checkpoint.
+DEFINE_OPCODE(
+    OPCODE_PPC_CHECKPOINT_REQUEST,
+    "ppc_checkpoint_request",
+    OPCODE_SIG_X_O_O_V,
+    OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE)
+
+DEFINE_OPCODE(
+    OPCODE_PPC_CHECKPOINT_LWZ,
+    "ppc_checkpoint_lwz",
+    OPCODE_SIG_V_V_O,
+    OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE | OPCODE_FLAG_PAIRED_PREV)
+
+DEFINE_OPCODE(
+    OPCODE_PPC_CHECKPOINT_STW,
+    "ppc_checkpoint_stw",
+    OPCODE_SIG_X_O_V_V,
+    OPCODE_FLAG_MEMORY | OPCODE_FLAG_VOLATILE | OPCODE_FLAG_PAIRED_PREV)

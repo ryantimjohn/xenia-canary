@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_PPC_PPC_CHECKPOINT_HIR_H_
 #define XENIA_CPU_PPC_PPC_CHECKPOINT_HIR_H_
 
+#include <array>
 #include <cstdint>
 
 #include "xenia/cpu/hir/hir_builder.h"
@@ -24,6 +25,31 @@ enum class CheckpointHIRResult {
   kInvalidOrdering,
   kStructuralPairRequiresFullProducerProof,
 };
+
+// Compile-lifetime handles owned by this HIRBuilder. Emit changes local Values
+// into numeric stack offsets; neither form may outlive/reset the builder. These
+// slots are not an invocation record, a FaultModeledState or a precision claim.
+struct DormantCheckpointGprCapture {
+  std::array<hir::Value*, 32> gpr_slots{};
+  hir::Value* ea_slot = nullptr;
+};
+
+// Standalone, dormant capture-only HIR; never composed with checkpoint pairs.
+// Appends 32 INT64 loads, ordered stores to distinct locals, then an INT32
+// uint32(pre-access RA + signed displacement) local (literal zero for RA=0).
+// Promotion may replace loads with the current SSA values. The caller must
+// retain stores through its optimizer and prove emitted effects separately.
+// Requires a current builder, empty output/locals, one unlabelled entry block,
+// and a final SOURCE_OFFSET matching guest_pc. The prefix accepts only aligned
+// increasing source markers and typed GPR load/store/plain INT64 ADD
+// operations. Rejects calls, joins, effects and unsupported D-form words before
+// mutation; rejected input leaves builder and output unchanged. No guest-memory
+// access is emitted (only context reads and function-local writes). This does
+// not relax pair verification or any profile/backend/validity gate.
+bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
+                                      uint32_t guest_pc,
+                                      uint32_t raw_instruction,
+                                      DormantCheckpointGprCapture* output);
 
 // Constructs retained, non-executable requests for D-form lwz/stw. The pair ID
 // is unique within this HIR function, not a runtime epoch or lifetime proof.

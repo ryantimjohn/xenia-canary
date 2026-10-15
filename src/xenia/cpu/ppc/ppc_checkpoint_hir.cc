@@ -121,6 +121,103 @@ bool LoadWriteback(const Instr* access, uint32_t reg) {
 
 }  // namespace
 
+bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
+                                      uint32_t guest_pc,
+                                      uint32_t raw_instruction,
+                                      DormantCheckpointGprCapture* output) {
+  if (!output || output->ea_slot || HIRBuilder::GetCurrent() != &builder ||
+      !SupportedWord(guest_pc, raw_instruction) || !builder.locals().empty()) {
+    return false;
+  }
+  for (auto slot : output->gpr_slots) {
+    if (slot) {
+      return false;
+    }
+  }
+  auto block = builder.current_block();
+  if (!block || block != builder.first_block() ||
+      block != builder.last_block() || block->prev || block->next ||
+      block->label_head || block->label_tail || block->incoming_edge_head ||
+      block->outgoing_edge_head || block->incoming_values ||
+      !block->instr_tail ||
+      block->instr_tail->opcode->num != OPCODE_SOURCE_OFFSET ||
+      block->instr_tail->src1.offset != guest_pc) {
+    return false;
+  }
+  const auto gpr_offset = [](uint64_t offset) {
+    return offset >= offsetof(PPCContext, r) &&
+           offset < offsetof(PPCContext, r) + sizeof(PPCContext::r) &&
+           (offset - offsetof(PPCContext, r)) % sizeof(uint64_t) == 0;
+  };
+  std::unordered_set<const Value*> defined;
+  const auto input = [&](const Value* value) {
+    return value && value->type == INT64_TYPE &&
+           (value->IsConstant() || defined.count(value));
+  };
+  uint64_t previous_pc = 0;
+  bool has_marker = false;
+  for (auto i = block->instr_head; i; i = i->next) {
+    if (i->block != block || i->flags) {
+      return false;
+    }
+    switch (i->opcode->num) {
+      case OPCODE_SOURCE_OFFSET:
+        if ((i->src1.offset & 3) || i->src1.offset > guest_pc ||
+            (has_marker && i->src1.offset <= previous_pc)) {
+          return false;
+        }
+        previous_pc = i->src1.offset;
+        has_marker = true;
+        continue;
+      case OPCODE_LOAD_CONTEXT:
+        if (!has_marker || !gpr_offset(i->src1.offset) || !i->dest ||
+            i->dest->type != INT64_TYPE) {
+          return false;
+        }
+        break;
+      case OPCODE_STORE_CONTEXT:
+        if (!has_marker || !gpr_offset(i->src1.offset) ||
+            !input(i->src2.value) || i->dest) {
+          return false;
+        }
+        continue;
+      case OPCODE_ADD:
+        if (!has_marker || !input(i->src1.value) || !input(i->src2.value) ||
+            !i->dest || i->dest->type != INT64_TYPE) {
+          return false;
+        }
+        break;
+      default:
+        return false;
+    }
+    if (i->dest->IsConstant() || i->dest->def != i ||
+        !defined.insert(i->dest).second) {
+      return false;
+    }
+  }
+  // All rejection checks precede HIR/local allocation and output mutation.
+  std::array<Value*, 32> values{};
+  DormantCheckpointGprCapture result;
+  for (size_t reg = 0; reg < values.size(); ++reg) {
+    values[reg] =
+        builder.LoadContext(offsetof(PPCContext, r) + reg * 8, INT64_TYPE);
+    result.gpr_slots[reg] = builder.AllocLocal(INT64_TYPE);
+  }
+  result.ea_slot = builder.AllocLocal(INT32_TYPE);
+  for (size_t reg = 0; reg < values.size(); ++reg) {
+    builder.StoreLocal(result.gpr_slots[reg], values[reg]);
+  }
+  const auto ra = (raw_instruction >> 16) & 31;
+  auto base = ra ? values[ra] : builder.LoadConstantInt64(0);
+  auto ea = builder.Truncate(
+      builder.Add(base,
+                  builder.LoadConstantInt64(Displacement(raw_instruction))),
+      INT32_TYPE);
+  builder.StoreLocal(result.ea_slot, ea);
+  *output = result;
+  return true;
+}
+
 bool BuildCheckpointScalarPair(hir::HIRBuilder& builder, uint64_t pair_id,
                                uint32_t guest_pc, uint32_t raw_instruction) {
   if (HIRBuilder::GetCurrent() != &builder || !pair_id ||

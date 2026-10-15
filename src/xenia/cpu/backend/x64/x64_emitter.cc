@@ -224,9 +224,13 @@ bool X64Emitter::WithPreparedDraft(
         }
         // Restore scratch before inspection, and therefore before every reset,
         // label-owner destruction or callback exception cleanup.
+        if (!code_cache_->SerializeUnwindInfo(info, storage.unwind_storage())) {
+          return;
+        }
         const PreparedDraft view(
             storage.write_data(), storage.allocation_size(),
-            storage.execute_offset(), info, std::move(source_map));
+            storage.execute_offset(), storage.unwind_offset(), info,
+            std::move(source_map));
         inspect(view);
         inspected = true;
       });

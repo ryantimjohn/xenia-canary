@@ -487,6 +487,9 @@ static_assert(
 static_assert(
     std::is_same_v<decltype(std::declval<const PreparedDraft&>().source_map()),
                    std::span<const SourceMapEntry>>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const PreparedDraft&>().unwind_info()),
+                   std::span<const uint8_t>>);
 
 struct Decoder {
   csh handle = 0;
@@ -545,9 +548,8 @@ void CheckMetadata(const Draft& draft,
   REQUIRE((info.stack_size + 8) % 16 == 0);
   REQUIRE(info.stack_size % 8 == 0);
   REQUIRE(info.stack_size / 8 < 65536);
-  // These are complete emitter unwind inputs, not serialized UNWIND_INFO or
-  // installed runtime-table metadata. The native encoder currently couples
-  // encoding to registration and is deliberately not called here.
+  // These are complete emitter unwind inputs. Private encoded bytes are
+  // inspected separately; neither snapshot installs runtime-table metadata.
   REQUIRE(draft.source_map.size() == marker_offsets.size());
   const auto epilog = info.code_size.prolog + info.code_size.body;
   for (size_t i = 0; i < draft.source_map.size(); ++i) {
@@ -667,8 +669,29 @@ void CheckIntervals(const Draft& draft, const PreparedDraft& prepared,
     REQUIRE(address == pc + end);
     REQUIRE(decoded == (phase == 1 ? 2 : 1));
   }
+  REQUIRE(prepared.unwind_offset() >= prepared.code().size());
+  REQUIRE(prepared.unwind_offset() <= prepared.storage().size());
   REQUIRE(std::all_of(prepared.storage().begin() + prepared.code().size(),
-                      prepared.storage().end(),
+                      prepared.storage().begin() + prepared.unwind_offset(),
+                      [](uint8_t byte) { return byte == 0xCC; }));
+  // Actual emitted small-frame inputs are privately serialized before this
+  // read-only view. Decode the native format without installing a table entry.
+  const auto unwind = prepared.unwind_info();
+  REQUIRE(unwind.size() >= 10);
+  REQUIRE(unwind[0] == 1);  // Version 1, flags 0.
+  REQUIRE(unwind[1] == draft.info.code_size.prolog);
+  REQUIRE(unwind[2] == 1);  // One UWOP_ALLOC_SMALL slot.
+  REQUIRE(unwind[3] == 0);  // No frame register.
+  REQUIRE(unwind[4] == draft.info.prolog_stack_alloc_offset);
+  REQUIRE((unwind[5] & 15) == 2);
+  REQUIRE((unwind[5] >> 4) == draft.info.stack_size / 8 - 1);
+  // Preserve the legacy odd-padding location rather than silently correcting
+  // it: alignment bytes remain traps, while the following slot is zeroed.
+  REQUIRE(unwind[6] == 0xCC);
+  REQUIRE(unwind[7] == 0xCC);
+  REQUIRE(unwind[8] == 0);
+  REQUIRE(unwind[9] == 0);
+  REQUIRE(std::all_of(unwind.begin() + 10, unwind.end(),
                       [](uint8_t byte) { return byte == 0xCC; }));
 }
 
@@ -870,8 +893,9 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
   }
   // The private global Win32 unwind-table counter is unobserved. Existing
   // function/native-unwind lookups and slot checks establish only the tested
-  // unpublished ranges. No native unwind encoder, registration, callable
-  // entry, guest invocation, complete bank capture or ABI claim is provided.
+  // unpublished ranges. Private byte serialization does not prove OS unwind
+  // execution, registration, callable entry, guest invocation, complete bank
+  // capture or guest ABI correctness.
 }
 
 }  // namespace real_hir

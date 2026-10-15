@@ -109,6 +109,8 @@ class Win32X64CodeCache : public X64CodeCache {
     return xe::round_up(kUnwindInfoSize, 16);
   }
   UnwindReservation RequestUnwindReservation(uint8_t* entry_address) override;
+  bool SerializeUnwindInfo(const EmitFunctionInfo& info,
+                           std::span<uint8_t> output) const override;
   void PlaceCode(uint32_t guest_address, void* machine_code,
                  const EmitFunctionInfo& func_info, void* code_execute_address,
                  UnwindReservation unwind_reservation) override;
@@ -252,10 +254,16 @@ void Win32X64CodeCache::PlaceCode(uint32_t guest_address, void* machine_code,
                         func_info.code_size.total);
 }
 
-void Win32X64CodeCache::InitializeUnwindEntry(
-    uint8_t* unwind_entry_address, size_t unwind_table_slot,
-    void* code_execute_address, const EmitFunctionInfo& func_info) {
-  auto unwind_info = reinterpret_cast<UNWIND_INFO*>(unwind_entry_address);
+// A bounded factor of the existing writer, preserving every legacy byte
+// choice. Odd padding uses CountOfCodes + 1; large sizes cast to USHORT before
+// division. Those observations are not repaired by private serialization.
+static bool WriteLegacyUnwindInfo(std::span<uint8_t> output,
+                                  EmitFunctionInfo func_info) {
+  if (output.size() < kUnwindInfoSize || !output.data() ||
+      reinterpret_cast<uintptr_t>(output.data()) % alignof(UNWIND_INFO)) {
+    return false;
+  }
+  auto unwind_info = reinterpret_cast<UNWIND_INFO*>(output.data());
   UNWIND_CODE* unwind_code = nullptr;
 
   assert_true(func_info.code_size.prolog < 256);  // needs to fit into a uint8_t
@@ -315,6 +323,46 @@ void Win32X64CodeCache::InitializeUnwindEntry(
                 sizeof(UNWIND_CODE));
   }
 
+  return true;
+}
+
+bool Win32X64CodeCache::SerializeUnwindInfo(const EmitFunctionInfo& info,
+                                            std::span<uint8_t> output) const {
+  // Check everything before writing. The private subset must be faithfully
+  // representable by the preserved writer: its USHORT cast precedes division.
+  // Ordinary placement keeps its legacy bytes and validation behavior.
+  if (!info.code_size.total || info.code_size.prolog >= 256 ||
+      info.prolog_stack_alloc_offset >= 256 ||
+      info.prolog_stack_alloc_offset > info.code_size.prolog ||
+      (info.stack_size && (!info.prolog_stack_alloc_offset ||
+                           info.stack_size % 8 || info.stack_size >= 65536)) ||
+      (!info.stack_size && info.prolog_stack_alloc_offset)) {
+    return false;
+  }
+  size_t remaining = info.code_size.total;
+  for (const auto section : {info.code_size.prolog, info.code_size.body,
+                             info.code_size.epilog, info.code_size.tail}) {
+    if (section > remaining) {
+      return false;
+    }
+    remaining -= section;
+  }
+  if (remaining) {
+    return false;
+  }
+  return WriteLegacyUnwindInfo(output, info);
+}
+
+void Win32X64CodeCache::InitializeUnwindEntry(
+    uint8_t* unwind_entry_address, size_t unwind_table_slot,
+    void* code_execute_address, const EmitFunctionInfo& func_info) {
+  // Preserve ordinary count/table/registration ordering. Only its byte writer
+  // is factored; private-subset validation is deliberately not imposed here.
+  if (!WriteLegacyUnwindInfo({unwind_entry_address, kUnwindInfoSize},
+                             func_info)) {
+    assert_always();
+    return;
+  }
   // Add entry.
   auto& fn_entry = unwind_table_[unwind_table_slot];
   fn_entry.BeginAddress =

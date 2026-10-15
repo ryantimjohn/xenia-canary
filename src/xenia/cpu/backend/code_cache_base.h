@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -132,6 +133,12 @@ class CodeCacheBase : public CodeCache {
     uint8_t* write_data() const { return write_address_; }
     size_t code_size() const { return code_size_; }
     size_t allocation_size() const { return allocation_size_; }
+    size_t unwind_offset() const { return unwind_offset_; }
+    // Only this separately bounded private region may hold unwind bytes.
+    std::span<uint8_t> unwind_storage() const {
+      return {write_address_ + unwind_offset_,
+              allocation_size_ - unwind_offset_};
+    }
     // Numeric offset only; the write view may alias executable storage.
     uint32_t execute_offset() const { return execute_offset_; }
 
@@ -140,12 +147,13 @@ class CodeCacheBase : public CodeCache {
 
     PreparedGuestCode(CodeCacheBase& cache, uint8_t* write_address,
                       uint32_t execute_offset, size_t code_size,
-                      size_t allocation_size)
+                      size_t allocation_size, size_t unwind_offset)
         : cache_(cache),
           write_address_(write_address),
           execute_offset_(execute_offset),
           code_size_(code_size),
-          allocation_size_(allocation_size) {}
+          allocation_size_(allocation_size),
+          unwind_offset_(unwind_offset) {}
     ~PreparedGuestCode() { cache_.AbortPreparedCode(*this); }
 
     CodeCacheBase& cache_;
@@ -153,15 +161,17 @@ class CodeCacheBase : public CodeCache {
     uint32_t execute_offset_;
     size_t code_size_;
     size_t allocation_size_;
+    size_t unwind_offset_;
     State state_ = State::kPrepared;
   };
 
   // Dormant preparation seam, deliberately not used by ordinary placement.
   // Reserve code plus aligned private unwind storage, then release the global
   // region before copying or calling trusted writer code. The callback may
-  // write only [write_data(), write_data() + code_size()). It receives no guest
-  // address or GuestFunction association. Unwind registration, function maps,
-  // indirection and profiling hooks are never touched by this operation.
+  // write only [write_data(), write_data() + code_size()) and unwind_storage().
+  // Alignment padding between these ranges is not writable. It receives no
+  // guest address or GuestFunction association. Unwind registration, function
+  // maps, indirection and profiling hooks are never touched by this operation.
   // True means the callback completed and the reservation was aborted, never
   // committed. C++ callback exceptions propagate after automatic abort; this
   // does not promise cleanup for an unhandled hardware fault or process exit.
@@ -176,6 +186,7 @@ class CodeCacheBase : public CodeCache {
     uint8_t* write_address;
     uint32_t execute_offset;
     size_t allocation_size;
+    size_t unwind_offset;
     {
       auto global_lock = global_critical_region_.Acquire();
       const size_t code_size = func_info.code_size.total;
@@ -196,6 +207,7 @@ class CodeCacheBase : public CodeCache {
         return false;
       }
       allocation_size = code_span + unwind_span;
+      unwind_offset = code_span;
       if (generated_code_offset_ > kGeneratedCodeSize ||
           allocation_size > kGeneratedCodeSize - generated_code_offset_) {
         return false;
@@ -208,7 +220,8 @@ class CodeCacheBase : public CodeCache {
       EnsureCommitted(generated_code_offset_);
     }
     PreparedGuestCode prepared(*this, write_address, execute_offset,
-                               func_info.code_size.total, allocation_size);
+                               func_info.code_size.total, allocation_size,
+                               unwind_offset);
     // Fill the whole aligned span first, including on architectures whose
     // trap instructions require aligned stores. The copied draft stays opaque.
     self().FillCode(write_address, allocation_size);

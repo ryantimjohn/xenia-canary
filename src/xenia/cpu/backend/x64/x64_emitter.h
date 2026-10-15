@@ -244,17 +244,23 @@ class X64Emitter : public Xbyak::CodeGenerator {
     std::span<const uint8_t> code() const {
       return storage_.first(info_.code_size.total);
     }
-    // Includes trap padding/private unwind space, without an encoding claim.
+    // Includes code padding and private native unwind storage, with no runtime
+    // function-table installation or OS-unwinding claim.
     std::span<const uint8_t> storage() const { return storage_; }
+    std::span<const uint8_t> unwind_info() const {
+      return storage_.subspan(unwind_offset_);
+    }
     const DraftInfo& info() const { return info_; }
     std::span<const SourceMapEntry> source_map() const { return source_map_; }
     size_t allocation_size() const { return storage_.size(); }
+    size_t unwind_offset() const { return unwind_offset_; }
     uint32_t execute_offset() const { return execute_offset_; }
 
    private:
     friend class X64Emitter;
     PreparedDraft(const uint8_t* code, size_t allocation_size,
-                  uint32_t execute_offset, const EmitFunctionInfo& info,
+                  uint32_t execute_offset, size_t unwind_offset,
+                  const EmitFunctionInfo& info,
                   std::vector<SourceMapEntry>&& source_map)
         : storage_(code, allocation_size),
           info_{{info.code_size.prolog, info.code_size.body,
@@ -263,19 +269,24 @@ class X64Emitter : public Xbyak::CodeGenerator {
                 info.prolog_stack_alloc_offset,
                 info.stack_size},
           source_map_(std::move(source_map)),
-          execute_offset_(execute_offset) {}
+          execute_offset_(execute_offset),
+          unwind_offset_(unwind_offset) {}
     ~PreparedDraft() = default;
 
     const std::span<const uint8_t> storage_;
     const DraftInfo info_;
     const std::vector<SourceMapEntry> source_map_;
     const uint32_t execute_offset_;
+    const size_t unwind_offset_;
   };
 
   // Dormant, synchronous compile-only transaction. Requires a pristine emitter,
   // current, validated/finalized/register-allocated ordinary-profile HIR with
   // no checkpoint opcodes, a nonprotecting allocator and coincident cache
   // write/execution mappings and disabled call-time profiling when available.
+  // Private unwind serialization must be supported and accept the emitted
+  // scalars; the current Windows legacy-compatible subset excludes stack
+  // sizes >=65536 bytes. This does not change ordinary placement behavior.
   // Ordinary callers
   // do not use this hook. True means inspection completed and storage was
   // aborted, never committed, registered, published or made into an entry.

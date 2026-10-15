@@ -11,6 +11,7 @@
 #define XENIA_CPU_BACKEND_X64_X64_CODE_CACHE_H_
 
 #include <memory>
+#include <span>
 
 #include "xenia/cpu/backend/code_cache_base.h"
 
@@ -37,6 +38,14 @@ class X64CodeCache : public CodeCacheBase<X64CodeCache> {
 
   // Virtual for platform-specific overrides (_win.cc / _posix.cc).
   virtual size_t QueryUnwindStorageSize() const { return 0; }
+  // Pure bounded private encoding, without a runtime-table slot or native
+  // registration. Caller owns/initializes the writable range for this call.
+  // Legacy padding not written by the encoder retains its input bytes.
+  // Rejection leaves it unchanged. Unsupported platforms fail closed.
+  virtual bool SerializeUnwindInfo(const EmitFunctionInfo& info,
+                                   std::span<uint8_t> output) const {
+    return false;
+  }
   virtual UnwindReservation RequestUnwindReservation(uint8_t* entry_address) {
     return UnwindReservation();
   }

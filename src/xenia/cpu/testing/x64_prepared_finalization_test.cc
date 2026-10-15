@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 #include "third_party/capstone/include/capstone/capstone.h"
@@ -419,7 +420,7 @@ class CurrentHIR final : public HIRBuilder {
 };
 
 struct Draft {
-  backend::EmitFunctionInfo info{};
+  X64Emitter::DraftInfo info{};
   std::vector<uint8_t> bytes;
   std::vector<SourceMapEntry> source_map;
 };
@@ -427,79 +428,32 @@ struct Draft {
 class HIREmitter final : public X64Emitter {
  public:
   using X64Emitter::X64Emitter;
-  ~HIREmitter() override { Clear(); }
-
-  Draft Build(HIRBuilder& builder) {
-    CheckDiscarded();
-    REQUIRE(processor()->compilation_options().profile ==
-            CompilationProfile::kOrdinary);
-    REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
-    REQUIRE(HIRBuilder::GetCurrent() == &builder);
+  Draft Snapshot(const PreparedDraft& view, const uint8_t* original_scratch) {
     REQUIRE_FALSE(allocator_->useProtect());
-    ready_attempts_ = 0;
-    Draft draft;
-    REQUIRE(X64Emitter::Emit(&builder, draft.info));
+    REQUIRE(getCode() == original_scratch);
+    REQUIRE(getCode() != view.code().data());
     REQUIRE(getSize() > 0);
     REQUIRE(getSize() <= kMaxBytes);
-    REQUIRE(draft.info.code_size.total == getSize());
+    REQUIRE(view.info().code_size.total == getSize());
+    REQUIRE(view.code().size() == getSize());
     REQUIRE(epilog_label_ == nullptr);
     REQUIRE_FALSE(hasUndefinedLabel());
-    REQUIRE_FALSE(isCalledCalcJmpAddress());
-    scratch_ = top_;
+    REQUIRE(isCalledCalcJmpAddress());
+    REQUIRE(stack_size_ == view.info().stack_size);
+    Draft draft;
+    draft.info = view.info();
     draft.bytes.assign(top_, top_ + getSize());
     source_map_arena_.CloneContents(&draft.source_map);
-    // Retain the actual generator, cached/tail labels and all relocation
-    // records until the prepared callback, rather than discarding a snapshot.
-    return draft;
-  }
-
-  void Finalize(PreparedGuestCode& prepared, uint64_t pc, const Draft& draft) {
-    REQUIRE(top_ == scratch_);
-    REQUIRE(prepared.state() == PreparedGuestCode::State::kPrepared);
-    REQUIRE(prepared.code_size() == draft.info.code_size.total);
-    REQUIRE(prepared.code_size() == getSize());
-    REQUIRE_FALSE(isCalledCalcJmpAddress());
-    REQUIRE(ready_attempts_ == 0);
-    REQUIRE_FALSE(allocator_->useProtect());
-    REQUIRE(reinterpret_cast<uint64_t>(prepared.write_data()) == pc);
-    CheckCommitted(pc, prepared.allocation_size(), PAGE_EXECUTE_READWRITE);
-    REQUIRE(std::memcmp(prepared.write_data(), draft.bytes.data(),
-                        draft.bytes.size()) == 0);
-    ++ready_attempts_;
-    {
-      struct RestoreTop {
-        uint8_t*& top;
-        uint8_t* original;
-        ~RestoreTop() { top = original; }
-      } restore{top_, top_};
-      top_ = prepared.write_data();
-      ready();  // No placement, unwind reservation, registration or slot write.
-      REQUIRE(isCalledCalcJmpAddress());
+    REQUIRE(draft.source_map.size() == view.source_map().size());
+    for (size_t i = 0; i < draft.source_map.size(); ++i) {
+      REQUIRE(draft.source_map[i].guest_address ==
+              view.source_map()[i].guest_address);
+      REQUIRE(draft.source_map[i].hir_offset ==
+              view.source_map()[i].hir_offset);
+      REQUIRE(draft.source_map[i].code_offset ==
+              view.source_map()[i].code_offset);
     }
-    CheckRestored(draft);
-  }
-
-  void CheckRestored(const Draft& draft) {
-    REQUIRE(top_ == scratch_);
-    REQUIRE(getSize() == draft.bytes.size());
-    REQUIRE(std::memcmp(top_, draft.bytes.data(), getSize()) == 0);
-    REQUIRE(ready_attempts_ == 1);
-    REQUIRE(isCalledCalcJmpAddress());
-    REQUIRE(stack_size_ == draft.info.stack_size);
-    std::vector<SourceMapEntry> retained;
-    source_map_arena_.CloneContents(&retained);
-    REQUIRE(retained.size() == draft.source_map.size());
-    for (size_t i = 0; i < retained.size(); ++i) {
-      REQUIRE(retained[i].guest_address == draft.source_map[i].guest_address);
-      REQUIRE(retained[i].hir_offset == draft.source_map[i].hir_offset);
-      REQUIRE(retained[i].code_offset == draft.source_map[i].code_offset);
-    }
-  }
-
-  void Discard() {
-    REQUIRE(top_ == scratch_);
-    Clear();
-    CheckDiscarded();
+    return draft;  // Owned unresolved scratch bytes and scalar/map copies only.
   }
 
   void CheckDiscarded() {
@@ -522,32 +476,17 @@ class HIREmitter final : public X64Emitter {
     source_map_arena_.CloneContents(&retained);
     REQUIRE(retained.empty());
   }
-
- private:
-  void Clear() {
-    // Always reset while top_ refers to scratch, before deleting label owners.
-    reset();
-    tail_code_.clear();
-    for (auto* label : label_cache_) {
-      delete label;
-    }
-    label_cache_.clear();
-    epilog_label_ = nullptr;
-    source_map_arena_.Reset();
-    guest_module_ = nullptr;
-    current_guest_function_ = 0;
-    current_instr_ = nullptr;
-    debug_info_ = nullptr;
-    debug_info_flags_ = 0;
-    trace_data_ = nullptr;
-    stack_size_ = 0;
-    synchronize_stack_on_next_instruction_ = false;
-    ForgetMxcsrMode();
-    scratch_ = nullptr;
-  }
-  uint8_t* scratch_ = nullptr;
-  size_t ready_attempts_ = 0;
 };
+
+using PreparedDraft = X64Emitter::PreparedDraft;
+static_assert(!std::is_copy_constructible_v<PreparedDraft>);
+static_assert(!std::is_move_constructible_v<PreparedDraft>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const PreparedDraft&>().code()),
+                   std::span<const uint8_t>>);
+static_assert(
+    std::is_same_v<decltype(std::declval<const PreparedDraft&>().source_map()),
+                   std::span<const SourceMapEntry>>);
 
 struct Decoder {
   csh handle = 0;
@@ -624,7 +563,7 @@ void CheckMetadata(const Draft& draft,
   REQUIRE(draft.source_map.back().code_offset == epilog);
 }
 
-void CheckIntervals(const Draft& draft, const PreparedGuestCode& prepared,
+void CheckIntervals(const Draft& draft, const PreparedDraft& prepared,
                     uint64_t pc, size_t assignment) {
   constexpr std::array<unsigned int, X64Emitter::GPR_COUNT> registers = {
       X86_REG_RBX, X86_REG_R10, X86_REG_R11, X86_REG_R12,
@@ -638,7 +577,7 @@ void CheckIntervals(const Draft& draft, const PreparedGuestCode& prepared,
     const size_t end = draft.source_map[phase + 1].code_offset;
     REQUIRE(begin < end);
     REQUIRE(end - begin <= 32);
-    const uint8_t* cursor = prepared.write_data() + begin;
+    const uint8_t* cursor = prepared.code().data() + begin;
     size_t remaining = end - begin;
     uint64_t address = pc + begin;
     size_t decoded = 0;
@@ -714,7 +653,7 @@ void CheckIntervals(const Draft& draft, const PreparedGuestCode& prepared,
         int32_t pending = 0, resolved = 0;
         std::memcpy(&pending, draft.bytes.data() + displacement_offset,
                     sizeof(pending));
-        std::memcpy(&resolved, prepared.write_data() + displacement_offset,
+        std::memcpy(&resolved, prepared.code().data() + displacement_offset,
                     sizeof(resolved));
         REQUIRE(pending ==
                 0);  // Actual AutoGrow forward-label record was pending.
@@ -728,8 +667,8 @@ void CheckIntervals(const Draft& draft, const PreparedGuestCode& prepared,
     REQUIRE(address == pc + end);
     REQUIRE(decoded == (phase == 1 ? 2 : 1));
   }
-  REQUIRE(std::all_of(prepared.write_data() + prepared.code_size(),
-                      prepared.write_data() + prepared.allocation_size(),
+  REQUIRE(std::all_of(prepared.storage().begin() + prepared.code().size(),
+                      prepared.storage().end(),
                       [](uint8_t byte) { return byte == 0xCC; }));
 }
 
@@ -752,8 +691,10 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
   REQUIRE(unwind_inputs_size <= kMaxBytes);
   uint64_t previous_pc = 0;
   size_t previous_span = 0;
-  // Two fresh HIR builders exercise the same real emitter after full discard.
-  for (size_t attempt = 0; attempt < 2; ++attempt) {
+  // Normal inspection, a throwing inspection and normal reuse use the same
+  // production hook/emitter with three fresh, current HIR builders.
+  struct InspectionFailure {};
+  for (size_t attempt = 0; attempt < 3; ++attempt) {
     CurrentHIR builder;
     builder.SourceOffset(kPC);
     auto condition = builder.LoadContext(GPROffset(4), INT64_TYPE);
@@ -824,36 +765,64 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
     }
     REQUIRE(position == opcodes.size());
     REQUIRE(markers == marker_offsets.size());
-    const auto draft = emitter.Build(builder);
-    CheckMetadata(draft, marker_offsets);
+    emitter.CheckDiscarded();
+    const auto original_scratch = emitter.getCode();
+    Draft draft;
     uint64_t pc = 0;
     size_t span = 0, callbacks = 0;
-    REQUIRE(fixture.cache->WithPreparedGuestCode(
-        draft.bytes.data(), draft.info, [&](PreparedGuestCode& prepared) {
-          ++callbacks;
-          pc =
-              fixture.cache->execute_base_address() + prepared.execute_offset();
-          span = prepared.allocation_size();
-          REQUIRE(span ==
-                  xe::round_up(draft.info.code_size.total, size_t{16}, false) +
-                      xe::round_up(unwind_inputs_size, size_t{16}, false));
-          if (attempt) {
-            REQUIRE(pc == previous_pc + previous_span);
-          }
-          fixture.CheckUnpublished(pc, span);
-          REQUIRE(fixture.cache->QueryUnwindStorageSize() ==
-                  unwind_inputs_size);
-          emitter.Finalize(prepared, pc, draft);
-          CheckIntervals(draft, prepared, pc,
-                         static_cast<size_t>(condition->reg.index));
-          CheckMetadata(draft, marker_offsets);
-          fixture.CheckUnpublished(pc, span);
-          REQUIRE(fixture.cache->QueryUnwindStorageSize() ==
-                  unwind_inputs_size);
-        }));
+    bool completed = false, caught = false;
+    try {
+      completed = emitter.WithPreparedDraft(builder, [&](const PreparedDraft&
+                                                             prepared) {
+        ++callbacks;
+        pc = fixture.cache->execute_base_address() + prepared.execute_offset();
+        span = prepared.allocation_size();
+        REQUIRE(reinterpret_cast<uint64_t>(prepared.code().data()) == pc);
+        CheckCommitted(pc, span, PAGE_EXECUTE_READWRITE);
+        draft = emitter.Snapshot(prepared, original_scratch);
+        CheckMetadata(draft, marker_offsets);
+        REQUIRE(span ==
+                xe::round_up(draft.info.code_size.total, size_t{16}, false) +
+                    xe::round_up(unwind_inputs_size, size_t{16}, false));
+        if (attempt) {
+          REQUIRE(pc == previous_pc + previous_span);
+        }
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
+        CheckIntervals(draft, prepared, pc,
+                       static_cast<size_t>(condition->reg.index));
+        CheckMetadata(draft, marker_offsets);
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
+        size_t recursive_callbacks = 0;
+        REQUIRE_FALSE(emitter.WithPreparedDraft(
+            builder, [&](const PreparedDraft&) { ++recursive_callbacks; }));
+        REQUIRE(recursive_callbacks == 0);
+        void* rejected_entry = reinterpret_cast<void*>(uintptr_t{1});
+        size_t rejected_size = 1;
+        std::vector<SourceMapEntry> rejected_map;
+        // Active-transaction rejection precedes GuestFunction access.
+        REQUIRE_FALSE(emitter.Emit(nullptr, &builder, 0, nullptr,
+                                   &rejected_entry, &rejected_size,
+                                   &rejected_map));
+        REQUIRE(rejected_entry == nullptr);
+        REQUIRE(rejected_size == 0);
+        REQUIRE(rejected_map.empty());
+        REQUIRE(emitter.getCode() == original_scratch);
+        REQUIRE(emitter.isCalledCalcJmpAddress());
+        fixture.CheckUnpublished(pc, span);
+        if (attempt == 1) {
+          throw InspectionFailure{};
+        }
+      });
+    } catch (const InspectionFailure&) {
+      caught = true;
+    }
+    REQUIRE(caught == (attempt == 1));
+    REQUIRE(completed == (attempt != 1));
     REQUIRE(callbacks == 1);
-    emitter.CheckRestored(draft);
-    emitter.Discard();
+    REQUIRE(emitter.getCode() == original_scratch);
+    emitter.CheckDiscarded();
     CheckMetadata(draft, marker_offsets);  // Owned metadata survives cleanup.
     fixture.CheckAborted(pc, span);
     REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
@@ -862,6 +831,21 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
     }
     previous_pc = pc;
     previous_span = span;
+    if (attempt == 0) {
+      // Orphan/malformed checkpoint HIR is rejected before any emission or
+      // reservation. The next transaction's exact offset checks nonallocation.
+      CurrentHIR checkpoint;
+      checkpoint.PPCCheckpointRequest(1, kPC, 0,
+                                      checkpoint.LoadConstantInt64(0));
+      size_t rejected_callbacks = 0;
+      REQUIRE_FALSE(emitter.WithPreparedDraft(
+          checkpoint, [&](const PreparedDraft&) { ++rejected_callbacks; }));
+      REQUIRE(rejected_callbacks == 0);
+      REQUIRE_FALSE(emitter.WithPreparedDraft(checkpoint, {}));
+      emitter.CheckDiscarded();
+      fixture.CheckAborted(pc, span);
+      REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
+    }
   }
   // The private global Win32 unwind-table counter is unobserved. Existing
   // function/native-unwind lookups and slot checks establish only the tested

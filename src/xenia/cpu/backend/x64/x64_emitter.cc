@@ -35,6 +35,7 @@
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/hir/opcodes.h"
 #include "xenia/cpu/hir/value.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
@@ -116,6 +117,9 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
   // A failed emission must not leave a stale usable placement result.
   *out_code_address = nullptr;
   *out_code_size = 0;
+  if (prepared_draft_active_) {
+    return false;
+  }
   guest_module_ = dynamic_cast<XexModule*>(function->module());
   current_guest_function_ = function->address();
   // Reset.
@@ -158,6 +162,90 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
 
   return true;
 }
+bool X64Emitter::WithPreparedDraft(
+    HIRBuilder& builder,
+    const std::function<void(const PreparedDraft&)>& inspect) {
+  if (prepared_draft_active_ || !inspect || !processor_ || !code_cache_ ||
+      !allocator_ || allocator_->useProtect() ||
+      processor_->compilation_options().profile !=
+          CompilationProfile::kOrdinary ||
+      HIRBuilder::GetCurrent() != &builder ||
+      ppc::ContainsCheckpointHIR(builder) || getSize() ||
+      isCalledCalcJmpAddress() || hasUndefinedLabel() || epilog_label_ ||
+      !tail_code_.empty() || !label_cache_.empty() || guest_module_ ||
+      current_guest_function_ || current_instr_ || debug_info_ ||
+      debug_info_flags_ || trace_data_ || stack_size_ ||
+      synchronize_stack_on_next_instruction_ ||
+      mxcsr_mode_ != MXCSRMode::Unknown) {
+    return false;
+  }
+  prepared_draft_active_ = true;
+  struct Discard {
+    X64Emitter& emitter;
+    ~Discard() {
+      emitter.DiscardPreparedDraft();
+      emitter.prepared_draft_active_ = false;
+    }
+  } discard{*this};
+  source_map_arena_.Reset();
+  EmitFunctionInfo info{};
+  if (!Emit(&builder, info) || !getSize() || getSize() > kMaxCodeSize ||
+      info.code_size.total != getSize() || epilog_label_ ||
+      hasUndefinedLabel() || isCalledCalcJmpAddress()) {
+    return false;
+  }
+  std::vector<SourceMapEntry> source_map;
+  source_map_arena_.CloneContents(&source_map);
+  bool inspected = false;
+  const bool prepared = code_cache_->WithPreparedGuestCode(
+      top_, info, [&](X64CodeCache::PreparedGuestCode& storage) {
+        const uintptr_t execute =
+            code_cache_->execute_base_address() + storage.execute_offset();
+        if (reinterpret_cast<uintptr_t>(storage.write_data()) != execute) {
+          return;  // Abort without inspection; split-base relocation is
+                   // unsupported.
+        }
+        {
+          struct RestoreTop {
+            uint8_t*& top;
+            uint8_t* const original;
+            ~RestoreTop() { top = original; }
+          } restore{top_, top_};
+          top_ = storage.write_data();
+          ready();  // One destination finalization; allocator useProtect is
+                    // false.
+        }
+        // Restore scratch before inspection, and therefore before every reset,
+        // label-owner destruction or callback exception cleanup.
+        const PreparedDraft view(
+            storage.write_data(), storage.allocation_size(),
+            storage.execute_offset(), info, std::move(source_map));
+        inspect(view);
+        inspected = true;
+      });
+  return prepared && inspected;
+}
+
+void X64Emitter::DiscardPreparedDraft() noexcept {
+  reset();
+  tail_code_.clear();
+  for (auto* label : label_cache_) {
+    delete label;
+  }
+  label_cache_.clear();
+  epilog_label_ = nullptr;
+  source_map_arena_.Reset();
+  guest_module_ = nullptr;
+  current_guest_function_ = 0;
+  current_instr_ = nullptr;
+  debug_info_ = nullptr;
+  debug_info_flags_ = 0;
+  trace_data_ = nullptr;
+  stack_size_ = 0;
+  synchronize_stack_on_next_instruction_ = false;
+  ForgetMxcsrMode();
+}
+
 void* X64Emitter::Emplace(const EmitFunctionInfo& func_info,
                           GuestFunction* function) {
   // To avoid changing xbyak, we do a switcharoo here.

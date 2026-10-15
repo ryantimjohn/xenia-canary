@@ -10,6 +10,9 @@
 #ifndef XENIA_CPU_BACKEND_X64_X64_EMITTER_H_
 #define XENIA_CPU_BACKEND_X64_X64_EMITTER_H_
 
+#include <functional>
+#include <span>
+#include <utility>
 #include <vector>
 
 #include "xenia/base/arena.h"
@@ -221,6 +224,75 @@ class X64Emitter : public Xbyak::CodeGenerator {
             void** out_code_address, size_t* out_code_size,
             std::vector<SourceMapEntry>* out_source_map);
 
+  // Scalar-only x64 emission inputs; no mutable pointer-bearing backend
+  // metadata is exposed through the prepared inspection interface.
+  struct DraftInfo {
+    struct CodeSize {
+      size_t prolog, body, epilog, tail, total;
+    } code_size;
+    size_t prolog_stack_alloc_offset;
+    size_t stack_size;
+  };
+
+  class PreparedDraft {
+   public:
+    PreparedDraft(const PreparedDraft&) = delete;
+    PreparedDraft& operator=(const PreparedDraft&) = delete;
+    PreparedDraft(PreparedDraft&&) = delete;
+    PreparedDraft& operator=(PreparedDraft&&) = delete;
+
+    std::span<const uint8_t> code() const {
+      return storage_.first(info_.code_size.total);
+    }
+    // Includes trap padding/private unwind space, without an encoding claim.
+    std::span<const uint8_t> storage() const { return storage_; }
+    const DraftInfo& info() const { return info_; }
+    std::span<const SourceMapEntry> source_map() const { return source_map_; }
+    size_t allocation_size() const { return storage_.size(); }
+    uint32_t execute_offset() const { return execute_offset_; }
+
+   private:
+    friend class X64Emitter;
+    PreparedDraft(const uint8_t* code, size_t allocation_size,
+                  uint32_t execute_offset, const EmitFunctionInfo& info,
+                  std::vector<SourceMapEntry>&& source_map)
+        : storage_(code, allocation_size),
+          info_{{info.code_size.prolog, info.code_size.body,
+                 info.code_size.epilog, info.code_size.tail,
+                 info.code_size.total},
+                info.prolog_stack_alloc_offset,
+                info.stack_size},
+          source_map_(std::move(source_map)),
+          execute_offset_(execute_offset) {}
+    ~PreparedDraft() = default;
+
+    const std::span<const uint8_t> storage_;
+    const DraftInfo info_;
+    const std::vector<SourceMapEntry> source_map_;
+    const uint32_t execute_offset_;
+  };
+
+  // Dormant, synchronous compile-only transaction. Requires a pristine emitter,
+  // current, validated/finalized/register-allocated ordinary-profile HIR with
+  // no checkpoint opcodes, a nonprotecting allocator and coincident cache
+  // write/execution mappings. Ordinary callers
+  // do not use this hook. True means inspection completed and storage was
+  // aborted, never committed, registered, published or made into an entry.
+  //
+  // The callback receives read-only views, with owned immutable scalar/map
+  // snapshots. It must not invoke/publish/cast away const on code, retain code
+  // pointers or any spans/views/references after callback exit, or reuse
+  // finalized bytes at another base. C++ cannot prevent raw-pointer escape.
+  // Copies of metadata are safe.
+  // Keep this emitter, allocator, processor/backend and cache alive throughout;
+  // serialize use and exclude teardown or direct inherited-generator mutation.
+  // Recursive calls to this hook and public Emit are rejected while active.
+  // C++ exceptions propagate after scratch restoration, abort and full discard;
+  // unhandled hardware faults/process exit have no cleanup guarantee.
+  bool WithPreparedDraft(
+      hir::HIRBuilder& builder,
+      const std::function<void(const PreparedDraft&)>& inspect);
+
  public:
   // Reserved:  rsp, rsi, rdi
   // Scratch:   rax/rcx/rdx
@@ -427,6 +499,10 @@ class X64Emitter : public Xbyak::CodeGenerator {
       label_cache_;  // for creating labels that need to be referenced much
                      // later by tail emitters
   MXCSRMode mxcsr_mode_ = MXCSRMode::Unknown;
+
+ private:
+  void DiscardPreparedDraft() noexcept;
+  bool prepared_draft_active_ = false;
 };
 
 }  // namespace x64

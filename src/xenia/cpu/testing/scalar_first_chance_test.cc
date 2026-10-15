@@ -89,8 +89,9 @@ struct Fixture {
                              kMemoryProtectRead | kMemoryProtectWrite));
     const std::array<uint32_t, 4> code = {kLiR10One, word, kLiR10Two, kBlr};
     for (size_t index = 0; index < code.size(); ++index) {
-      xe::store_and_swap<uint32_t>(memory->TranslateVirtual(kCode + index * 4),
-                                   code[index]);
+      xe::store_and_swap<uint32_t>(
+          memory->TranslateVirtual(kCode + static_cast<uint32_t>(index) * 4),
+          code[index]);
     }
     processor = std::make_unique<Processor>(memory.get(), nullptr);
     REQUIRE(processor->Setup(std::make_unique<backend::x64::X64Backend>()));

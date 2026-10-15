@@ -179,9 +179,15 @@ void Processor::OfferScalarAccessFirstChance(
   } active(scalar_access_first_chance_active);
   // The retained immutable handler is invoked without any registry/memory lock.
   // It may enter guest code on this thread. No continuation result is accepted.
-  (*handler)(thread, fault);
-  // Only normal return is supported here. A terminal callback need not return;
-  // this hook never changes the PC or skips the native memory operation.
+  try {
+    (*handler)(thread, fault);
+  } catch (...) {
+    std::memcpy(context, &saved, sizeof(saved));
+    throw;
+  }
+  // A terminal callback need not return. Normal return preserves the original
+  // access; a host exception preserves its propagation after restoring context.
+  // Neither path changes the PC or skips a native memory instruction.
   std::memcpy(context, &saved, sizeof(saved));
 }
 

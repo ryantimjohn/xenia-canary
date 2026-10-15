@@ -66,8 +66,9 @@ class Processor {
  public:
   // Experimental search-only boundary. This is modeled emulator state, not a
   // complete architectural CONTEXT. The snapshot is valid only during the
-  // callback. Returning always restores the live PPCContext and executes the
-  // original memory instruction; there is no disposition or resume operation.
+  // callback. Normal return restores the live PPCContext before the original
+  // memory instruction. Host exceptions restore it before propagating. There is
+  // no disposition or resume operation.
   // Disabled by default; Windows x64 LWZ/STW with RA=0 and a literal address
   // wholly inside the protected zero guard only. Dynamic RA is unsupported.
   // Eligibility observes current guard protection and instruction identity,

@@ -287,6 +287,44 @@ void ChangeOperand(ppc::PPCContext* context, void* count, void*) {
   context->r[10] = 7;
 }
 
+TEST_CASE(
+    "Scalar first chance restores context and nesting after host exception",
+    "[cpu][scalar-first-chance]") {
+  Options options;
+  Fixture fixture(ScalarWord(true));
+  auto* function = fixture.Resolve();
+  auto* site = fixture.processor->RegisterScalarAccessFirstChance(
+      function, kCode + 4, ScalarWord(true));
+  REQUIRE(site);
+  fixture.thread->context()->r[10] = 1;
+  ppc::PPCContext saved;
+  std::memcpy(&saved, fixture.thread->context(), sizeof(saved));
+  struct CallbackFailure {};
+  size_t callbacks = 0;
+  fixture.processor->set_scalar_access_first_chance_handler(
+      [&](ThreadState* thread,
+          const Processor::ScalarAccessFirstChance& fault) {
+        ++callbacks;
+        CHECK(fault.modeled_context->r[10] == 1);
+        thread->context()->r[10] = 0xBAD;
+        thread->context()->f[7] = -1.0;
+        throw CallbackFailure{};
+      });
+  // Direct builtin invocation tests host-exception cleanup, without making a
+  // claim that the guest instruction ran or requiring unwinding through JIT.
+  REQUIRE_THROWS_AS(site->Call(fixture.thread.get(), 0xBCBCBCBC),
+                    CallbackFailure);
+  CHECK(std::memcmp(fixture.thread->context(), &saved, sizeof(saved)) == 0);
+  fixture.processor->set_scalar_access_first_chance_handler(
+      [&](ThreadState*, const Processor::ScalarAccessFirstChance& fault) {
+        ++callbacks;
+        CHECK(fault.modeled_context->r[10] == 1);
+      });
+  REQUIRE(site->Call(fixture.thread.get(), 0xBCBCBCBC));
+  CHECK(callbacks == 2);  // The first callback's TLS nesting guard was reset.
+  CHECK(std::memcmp(fixture.thread->context(), &saved, sizeof(saved)) == 0);
+}
+
 TEST_CASE("Scalar boundary control reloads native operands after CALL_EXTERN",
           "[cpu][scalar-first-chance]") {
   Options options;

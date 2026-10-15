@@ -11,6 +11,9 @@
 
 #include "xenia/kernel/kernel_state.h"
 
+// SDK-derived fork-only integration; exclude from every upstream contribution.
+#include "xenia/kernel/sdk_private_first_chance.h"
+
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -79,9 +82,11 @@ KernelState::KernelState(Emulator* emulator)
       kMemoryProtectRead | kMemoryProtectWrite);
 
   xenia_assert(fixed_alloc_worked);
+  InstallPrivateFirstChanceDispatcher(this);
 }
 
 KernelState::~KernelState() {
+  UninstallPrivateFirstChanceDispatcher(this);
   SetExecutableModule(nullptr);
 
   if (dispatch_thread_running_) {

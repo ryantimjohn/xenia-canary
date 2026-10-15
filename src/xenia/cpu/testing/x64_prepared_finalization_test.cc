@@ -35,6 +35,8 @@
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/ppc/ppc_context.h"
+#include "xenia/cpu/ppc/ppc_hir_builder.h"
+#include "xenia/cpu/ppc/ppc_instr.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/memory.h"
 
@@ -44,6 +46,7 @@ DECLARE_uint32(align_all_basic_blocks);
 DECLARE_bool(debug);
 DECLARE_bool(store_all_context_values);
 DECLARE_bool(full_optimization_even_with_debug);
+DECLARE_bool(emit_inline_mmio_checks);
 
 namespace xe::cpu::testing {
 namespace {
@@ -1963,6 +1966,706 @@ TEST_CASE(
 }
 
 }  // namespace midblock_gpr
+
+namespace capture_stw {
+
+using namespace hir;
+using Capture = ppc::DormantCheckpointGprCapture;
+using Local = midblock_gpr::Local;
+constexpr uint32_t kPC = 0x80008004;
+constexpr uint32_t kWord = 0x91400000;  // stw r10,0(r0), literal zero base.
+constexpr uint64_t kR0 = 0x2468ACE0;    // Deliberately synthetic nonzero r0.
+constexpr uint64_t kSentinel = 0x13579BDF;
+
+class CurrentPPC final : public ppc::PPCHIRBuilder {
+ public:
+  explicit CurrentPPC(ppc::PPCFrontend* frontend)
+      : PPCHIRBuilder(frontend), previous_(GetCurrent()) {
+    MakeCurrent();
+  }
+  ~CurrentPPC() override {
+    if (GetCurrent() == this) {
+      RemoveCurrent();
+      if (previous_) {
+        previous_->MakeCurrent();
+      }
+    }
+  }
+
+ private:
+  HIRBuilder* const previous_;
+};
+
+class BindingProof final : public compiler::CompilerPass {
+ public:
+  BindingProof(const Capture& capture, Value* computed, Instr* access,
+               bool promoted, bool& observed)
+      : capture_(capture),
+        computed_(computed),
+        access_(access),
+        promoted_(promoted),
+        observed_(observed) {}
+  bool Run(HIRBuilder* builder) override {
+    size_t context_stores = 0, captures = 0, accesses = 0;
+    for (auto i = builder->first_block()->instr_head; i; i = i->next) {
+      if (i->opcode->num == OPCODE_STORE_CONTEXT) {
+        ++context_stores;
+        REQUIRE(i->src2.value->IsConstant());
+        const auto reg = i->src1.offset;
+        REQUIRE(
+            (reg == real_hir::GPROffset(0) || reg == real_hir::GPROffset(10)));
+        REQUIRE(i->src2.value->constant.u64 ==
+                (reg == real_hir::GPROffset(0) ? kR0 : kSentinel));
+      }
+      if (i->opcode->num == OPCODE_STORE_LOCAL &&
+          i->src1.value == capture_.gpr_slots[10]) {
+        ++captures;
+        auto value = i->src2.value;
+        if (promoted_) {
+          REQUIRE(value->def);
+          REQUIRE(value->def->opcode->num == OPCODE_ASSIGN);
+          value = value->def->src1.value;
+        }
+        REQUIRE(value == computed_);
+      }
+      if (i == access_) {
+        ++accesses;
+      }
+    }
+    REQUIRE(context_stores == 2);  // Earlier computed r10 store was removed.
+    REQUIRE(captures == 1);
+    REQUIRE(accesses == 1);
+    REQUIRE(access_->opcode->num == OPCODE_STORE_OFFSET);
+    REQUIRE(access_->src1.value->IsConstant());
+    REQUIRE(access_->src1.value->constant.u64 == 0);
+    REQUIRE(access_->src2.value->IsConstant());
+    REQUIRE(access_->src2.value->constant.u64 == 0);
+    auto value = access_->src3.value;
+    REQUIRE(value->type == INT32_TYPE);
+    REQUIRE(value->def);
+    if (promoted_) {
+      REQUIRE(access_->flags == 0);
+      REQUIRE(value->def->opcode->num == OPCODE_BYTE_SWAP);
+      value = value->def->src1.value;
+      REQUIRE(value->def);
+    } else {
+      REQUIRE(access_->flags == LOAD_STORE_BYTE_SWAP);
+    }
+    REQUIRE(value->def->opcode->num == OPCODE_TRUNCATE);
+    value = value->def->src1.value;
+    if (promoted_) {
+      REQUIRE(value->def);
+      REQUIRE(value->def->opcode->num == OPCODE_ASSIGN);
+      value = value->def->src1.value;
+    }
+    REQUIRE(value == computed_);
+    observed_ = true;
+    return true;
+  }
+
+ private:
+  const Capture& capture_;
+  Value* computed_;
+  Instr* access_;
+  bool promoted_;
+  bool& observed_;
+};
+
+std::vector<Local> CheckHIR(HIRBuilder& builder, const Capture& capture) {
+  std::vector<Local> locals;
+  REQUIRE(builder.locals().size() > 33);
+  for (auto slot : builder.locals()) {
+    REQUIRE(slot);
+    REQUIRE_FALSE(slot->IsConstant());
+    int owner = -1;
+    for (size_t reg = 0; reg < 32; ++reg) {
+      if (slot == capture.gpr_slots[reg]) {
+        owner = static_cast<int>(reg);
+      }
+    }
+    if (slot == capture.ea_slot) {
+      owner = 32;
+    }
+    REQUIRE(slot->type == (owner == 32 ? INT32_TYPE : INT64_TYPE));
+    REQUIRE(std::none_of(locals.begin(), locals.end(), [&](const Local& local) {
+      return local.slot == slot;
+    }));
+    locals.push_back({slot, owner == 32 ? 4u : 8u, owner});
+  }
+  auto body = builder.first_block();
+  REQUIRE(body);
+  REQUIRE(body->instr_tail);
+  REQUIRE(body->instr_tail->opcode->num == OPCODE_RETURN);
+  auto scaffold = body->next;
+  REQUIRE(scaffold);
+  REQUIRE(scaffold == builder.last_block());
+  REQUIRE(scaffold->prev == body);
+  REQUIRE(scaffold->next == nullptr);
+  REQUIRE(scaffold->instr_head == nullptr);
+  REQUIRE(scaffold->instr_tail == nullptr);
+  REQUIRE(scaffold->label_head == nullptr);
+  REQUIRE(scaffold->label_tail == nullptr);
+  REQUIRE(scaffold->incoming_edge_head == nullptr);
+  REQUIRE(scaffold->outgoing_edge_head == nullptr);
+  REQUIRE(scaffold->incoming_values == nullptr);
+  size_t captures = 0, stores = 0, adds = 0, truncates = 0, context_stores = 0;
+  for (auto i = body->instr_head; i; i = i->next) {
+    REQUIRE(i->block == body);
+    if (i->opcode->num != OPCODE_STORE_OFFSET) {
+      REQUIRE(i->flags == 0);
+    }
+    switch (i->opcode->num) {
+      case OPCODE_LOAD_LOCAL:
+      case OPCODE_STORE_LOCAL: {
+        auto found = std::find_if(
+            locals.begin(), locals.end(),
+            [&](const Local& l) { return l.slot == i->src1.value; });
+        REQUIRE(found != locals.end());
+        if (i->opcode->num == OPCODE_LOAD_LOCAL) {
+          REQUIRE(found->capture == -1);
+          REQUIRE(i->dest->GetLocalSlot() == found->slot);
+          REQUIRE(i->dest->type == INT64_TYPE);
+          ++found->reads;
+        } else {
+          REQUIRE(i->src2.value->type ==
+                  (found->width == 4 ? INT32_TYPE : INT64_TYPE));
+          if (found->capture >= 0) {
+            REQUIRE(stores == 0);
+            REQUIRE(found->capture == static_cast<int>(captures++));
+          } else {
+            REQUIRE(i->src2.value->GetLocalSlot() == found->slot);
+          }
+          ++found->writes;
+        }
+        break;
+      }
+      case OPCODE_STORE_OFFSET:
+        REQUIRE(captures == 33);
+        REQUIRE(stores++ == 0);
+        REQUIRE(i->flags == LOAD_STORE_BYTE_SWAP);
+        REQUIRE(i->src1.value->IsConstant());
+        REQUIRE(i->src1.value->constant.u64 == 0);
+        REQUIRE(i->src2.value->IsConstant());
+        REQUIRE(i->src2.value->constant.u64 == 0);
+        REQUIRE(i->src3.value->type == INT32_TYPE);
+        break;
+      case OPCODE_STORE_CONTEXT:
+        REQUIRE(i->src2.value->IsConstant());
+        if (i->src1.offset == real_hir::GPROffset(0)) {
+          REQUIRE(captures == 0);
+          REQUIRE(i->src2.value->constant.u64 == kR0);
+        } else {
+          REQUIRE(i->src1.offset == real_hir::GPROffset(10));
+          REQUIRE(stores == 1);
+          REQUIRE(i->src2.value->constant.u64 == kSentinel);
+        }
+        ++context_stores;
+        break;
+      case OPCODE_LOAD_CONTEXT:
+        REQUIRE(i->dest->type == INT64_TYPE);
+        break;
+      case OPCODE_ADD:
+        REQUIRE(i->dest->type == INT64_TYPE);
+        REQUIRE(i->src2.value->IsConstant());
+        REQUIRE(i->src2.value->constant.u64 == 1);
+        ++adds;
+        break;
+      case OPCODE_TRUNCATE:
+        REQUIRE(i->dest->type == INT32_TYPE);
+        REQUIRE(i->src1.value->type == INT64_TYPE);
+        ++truncates;
+        break;
+      default:
+        REQUIRE((i->opcode->num == OPCODE_SOURCE_OFFSET ||
+                 i->opcode->num == OPCODE_RETURN));
+    }
+  }
+  REQUIRE(captures == 33);
+  REQUIRE(stores == 1);
+  REQUIRE(context_stores == 2);
+  REQUIRE(adds == 1);
+  REQUIRE(truncates == 1);
+  // Synthetic constant r0 leaves 31 nonconstant current GPR values.
+  REQUIRE(locals.size() - 33 >= 31 - X64Emitter::GPR_COUNT);
+  for (const auto& local : locals) {
+    REQUIRE(local.writes == 1);
+    REQUIRE((local.capture >= 0 ? local.reads == 0 : local.reads > 0));
+  }
+  return locals;
+}
+
+struct Token {
+  int guest = -1;  // -1 unknown, -2 literal; otherwise entry GPR index.
+  int64_t delta = 0;
+  bool low32 = false;  // Truncated value with known zero upper half in a reg.
+  bool swapped = false;
+};
+
+size_t Register(const cs_x86_op& op) {
+  // Seven allocator-visible registers plus the ordinary store's ECX scratch.
+  constexpr std::array<unsigned, 8> full = {
+      X86_REG_RBX, X86_REG_R10, X86_REG_R11, X86_REG_R12,
+      X86_REG_R13, X86_REG_R14, X86_REG_R15, X86_REG_RCX};
+  constexpr std::array<unsigned, 8> low = {
+      X86_REG_EBX,  X86_REG_R10D, X86_REG_R11D, X86_REG_R12D,
+      X86_REG_R13D, X86_REG_R14D, X86_REG_R15D, X86_REG_ECX};
+  REQUIRE(op.type == X86_OP_REG);
+  REQUIRE((op.size == 4 || op.size == 8));
+  const auto& names = op.size == 8 ? full : low;
+  const auto found = std::find(names.begin(), names.end(), op.reg);
+  REQUIRE(found != names.end());
+  return static_cast<size_t>(found - names.begin());
+}
+
+void CheckBytes(std::vector<Local>& locals,
+                const X64Emitter::PreparedDraft& view, bool membase_low_zero,
+                bool movbe_enabled) {
+  REQUIRE(view.code().size() <= real_hir::kMaxBytes);
+  const auto stack = view.info().stack_size;
+  REQUIRE((stack + 8) % 16 == 0);
+  for (auto& local : locals) {
+    REQUIRE(local.slot->IsConstant());
+    REQUIRE(local.slot->type == INT32_TYPE);
+    local.offset = local.slot->constant.u32;
+    REQUIRE(local.offset >= StackLayout::GUEST_STACK_SIZE);
+    REQUIRE(local.offset % local.width == 0);
+    REQUIRE(local.width <= stack);
+    REQUIRE(local.offset <= stack - local.width);
+  }
+  for (size_t a = 0; a < locals.size(); ++a) {
+    for (size_t b = a + 1; b < locals.size(); ++b) {
+      REQUIRE((locals[a].offset + locals[a].width <= locals[b].offset ||
+               locals[b].offset + locals[b].width <= locals[a].offset));
+    }
+  }
+  const auto map = view.source_map();
+  REQUIRE(map.size() == 4);
+  REQUIRE(view.info().code_size.prolog <= view.code().size());
+  REQUIRE(view.info().code_size.body <=
+          view.code().size() - view.info().code_size.prolog);
+  for (size_t i = 0; i < map.size(); ++i) {
+    REQUIRE(map[i].guest_address == kPC - 4 + i * 4);
+    REQUIRE(map[i].code_offset >= view.info().code_size.prolog);
+    REQUIRE(map[i].code_offset <=
+            view.info().code_size.prolog + view.info().code_size.body);
+    if (i) {
+      REQUIRE(map[i - 1].code_offset < map[i].code_offset);
+    }
+  }
+  REQUIRE(map.back().code_offset <= view.code().size());
+  REQUIRE(map.back().code_offset - map.front().code_offset <= 4096);
+  std::array<Token, 8> registers{};
+  std::array<size_t, 32> inputs{};
+  std::vector<Token> memory(locals.size());
+  std::vector<size_t> reads(locals.size()), writes(locals.size());
+  size_t captures = 0, adds = 0, r0_stores = 0, guest_stores = 0,
+         overwrites = 0, swaps = 0, scratch_copies = 0;
+  real_hir::Decoder decoder;
+  REQUIRE(decoder.instruction);
+  for (size_t phase = 0; phase < 3; ++phase) {
+    const uint8_t* cursor = view.code().data() + map[phase].code_offset;
+    size_t remaining = map[phase + 1].code_offset - map[phase].code_offset;
+    uint64_t address = map[phase].code_offset;
+    while (remaining) {
+      REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                             decoder.instruction));
+      const auto opcode = decoder.instruction->id;
+      const bool add = opcode == X86_INS_ADD, inc = opcode == X86_INS_INC;
+      const bool arithmetic = add || inc;
+      const bool swap = opcode == X86_INS_BSWAP,
+                 movbe = opcode == X86_INS_MOVBE;
+      REQUIRE((opcode == X86_INS_MOV || arithmetic || swap || movbe));
+      REQUIRE(decoder.instruction->detail);
+      const auto& x = decoder.instruction->detail->x86;
+      REQUIRE(x.addr_size == 8);
+      REQUIRE(x.op_count == (inc || swap ? 1 : 2));
+      for (auto prefix : x.prefix) {
+        REQUIRE(prefix == 0);
+      }
+      const uint64_t flags = X86_EFLAGS_MODIFY_AF | X86_EFLAGS_MODIFY_OF |
+                             X86_EFLAGS_MODIFY_PF | X86_EFLAGS_MODIFY_SF |
+                             X86_EFLAGS_MODIFY_ZF;
+      REQUIRE(x.eflags == (add   ? flags | X86_EFLAGS_MODIFY_CF
+                           : inc ? flags
+                                 : 0));
+      const auto& destination = x.operands[0];
+      const auto& source = x.operands[inc || swap ? 0 : 1];
+      REQUIRE(destination.access ==
+              (arithmetic || swap ? CS_AC_READ | CS_AC_WRITE : CS_AC_WRITE));
+      std::vector<unsigned> expected_reads, expected_writes;
+      auto read = [&](unsigned reg) {
+        if (std::find(expected_reads.begin(), expected_reads.end(), reg) ==
+            expected_reads.end()) {
+          expected_reads.push_back(reg);
+        }
+      };
+      if (destination.type == X86_OP_REG) {
+        Register(destination);
+        expected_writes.push_back(destination.reg);
+        if (arithmetic || swap) {
+          read(destination.reg);
+        }
+      }
+      if (!inc && !swap && source.type == X86_OP_REG) {
+        if (source.reg == X86_REG_EDI) {
+          REQUIRE(source.size == 4);
+          REQUIRE(membase_low_zero);
+        } else {
+          Register(source);
+        }
+        REQUIRE(source.access == CS_AC_READ);
+        read(source.reg);
+      }
+      if (destination.type == X86_OP_MEM ||
+          (!inc && !swap && source.type == X86_OP_MEM)) {
+        REQUIRE_FALSE(arithmetic || swap);
+        const auto& mem = destination.type == X86_OP_MEM ? destination : source;
+        REQUIRE((mem.size == 4 || mem.size == 8));
+        REQUIRE((mem.mem.base == X86_REG_RSI || mem.mem.base == X86_REG_RSP ||
+                 mem.mem.base == X86_REG_RDI));
+        REQUIRE(mem.mem.index == X86_REG_INVALID);
+        REQUIRE(mem.mem.segment == X86_REG_INVALID);
+        read(mem.mem.base);
+      }
+      if (arithmetic) {
+        expected_writes.push_back(X86_REG_EFLAGS);
+      }
+      cs_regs actual_reads{}, actual_writes{};
+      uint8_t read_count = 0, write_count = 0;
+      REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, actual_reads,
+                             &read_count, actual_writes,
+                             &write_count) == CS_ERR_OK);
+      std::sort(expected_reads.begin(), expected_reads.end());
+      std::sort(expected_writes.begin(), expected_writes.end());
+      std::sort(actual_reads, actual_reads + read_count);
+      std::sort(actual_writes, actual_writes + write_count);
+      REQUIRE(read_count == expected_reads.size());
+      REQUIRE(write_count == expected_writes.size());
+      REQUIRE(std::equal(expected_reads.begin(), expected_reads.end(),
+                         actual_reads));
+      REQUIRE(std::equal(expected_writes.begin(), expected_writes.end(),
+                         actual_writes));
+      auto register_value = [&](const cs_x86_op& op) {
+        if (op.reg == X86_REG_EDI) {
+          REQUIRE(op.size == 4);
+          REQUIRE(membase_low_zero);
+          return Token{-2, 0, true, false};
+        }
+        auto token = registers[Register(op)];
+        REQUIRE(token.guest != -1);
+        if (op.size == 4) {
+          token.low32 = true;
+        }
+        return token;
+      };
+      auto local_index = [&](const cs_x86_op& op) {
+        REQUIRE(op.mem.base == X86_REG_RSP);
+        auto found =
+            std::find_if(locals.begin(), locals.end(), [&](const Local& l) {
+              return op.mem.disp == l.offset && op.size == l.width;
+            });
+        REQUIRE(found != locals.end());
+        return static_cast<size_t>(found - locals.begin());
+      };
+      if (arithmetic) {
+        REQUIRE(phase == 0);
+        REQUIRE(destination.type == X86_OP_REG);
+        REQUIRE(destination.size == 8);
+        auto left = register_value(destination);
+        Token right{-2, inc ? 1 : source.type == X86_OP_IMM ? source.imm : 0};
+        if (!inc && source.type != X86_OP_IMM) {
+          right = register_value(source);
+        }
+        if (left.guest == -2) {
+          std::swap(left, right);
+        }
+        REQUIRE(left.guest == 10);
+        REQUIRE(left.delta == 0);
+        REQUIRE_FALSE(left.low32 || left.swapped);
+        REQUIRE(right.guest == -2);
+        REQUIRE(right.delta == 1);
+        REQUIRE_FALSE(right.low32 || right.swapped);
+        REQUIRE(adds++ == 0);
+        registers[Register(destination)] = {10, 1, false, false};
+        continue;
+      }
+      if (swap) {
+        REQUIRE(phase == 1);
+        REQUIRE_FALSE(movbe_enabled);
+        REQUIRE(destination.reg == X86_REG_ECX);
+        REQUIRE(destination.size == 4);
+        auto value = register_value(destination);
+        REQUIRE(value.guest == 10);
+        REQUIRE(value.delta == 1);
+        REQUIRE(value.low32);
+        REQUIRE_FALSE(value.swapped);
+        REQUIRE(scratch_copies == 1);
+        REQUIRE(swaps++ == 0);
+        value.swapped = true;
+        // BSWAP ECX writes ECX, also clearing RCX's upper half.
+        registers[Register(destination)] = value;
+        continue;
+      }
+      Token value;
+      if (source.type == X86_OP_REG) {
+        value = register_value(source);
+      } else if (source.type == X86_OP_IMM) {
+        REQUIRE((source.imm == 0 || source.imm == 1 || source.imm == kR0 ||
+                 source.imm == kSentinel));
+        value = {-2, source.imm};
+      } else {
+        REQUIRE(source.type == X86_OP_MEM);
+        REQUIRE(source.access == CS_AC_READ);
+        REQUIRE(destination.type == X86_OP_REG);
+        REQUIRE(destination.size == source.size);
+        if (source.mem.base == X86_REG_RSI) {
+          REQUIRE(source.size == 8);
+          REQUIRE(source.mem.disp >= real_hir::GPROffset(0));
+          const auto offset = source.mem.disp - real_hir::GPROffset(0);
+          REQUIRE(offset % 8 == 0);
+          REQUIRE(offset / 8 < inputs.size());
+          const auto guest = static_cast<size_t>(offset / 8);
+          REQUIRE(guest != 0);
+          REQUIRE(phase == (guest == 10 ? 0 : 1));
+          REQUIRE(inputs[guest]++ == 0);
+          value = {static_cast<int>(guest), 0};
+        } else {
+          const auto local = local_index(source);
+          REQUIRE(locals[local].capture == -1);
+          REQUIRE(writes[local] > 0);
+          ++reads[local];
+          value = memory[local];
+          REQUIRE(value.guest >= 0);
+        }
+      }
+      if (destination.type == X86_OP_REG) {
+        REQUIRE_FALSE(movbe);
+        if (source.type == X86_OP_REG) {
+          REQUIRE(source.size == destination.size);
+        }
+        if (destination.size == 4) {
+          value.low32 = true;  // MOV r32 clears upper32.
+        }
+        const auto reg = Register(destination);
+        if (reg == 7) {
+          REQUIRE(phase == 1);
+          REQUIRE_FALSE(movbe_enabled);
+          REQUIRE(destination.size == 4);
+          REQUIRE(source.type == X86_OP_REG);
+          REQUIRE(source.reg != X86_REG_ECX);
+          REQUIRE(value.guest == 10);
+          REQUIRE(value.delta == 1);
+          REQUIRE(value.low32);
+          REQUIRE_FALSE(value.swapped);
+          REQUIRE(scratch_copies++ == 0);
+        }
+        registers[reg] = value;
+      } else {
+        REQUIRE(destination.type == X86_OP_MEM);
+        if (destination.mem.base == X86_REG_RDI) {
+          REQUIRE(phase == 1);
+          REQUIRE(captures == 33);
+          REQUIRE(r0_stores == 1);
+          REQUIRE(destination.mem.disp == 0);
+          REQUIRE(destination.size == 4);
+          REQUIRE(source.type == X86_OP_REG);
+          REQUIRE(source.size == 4);
+          REQUIRE(value.guest == 10);
+          REQUIRE(value.delta == 1);
+          REQUIRE(value.low32);
+          if (movbe) {
+            REQUIRE(movbe_enabled);
+            REQUIRE_FALSE(value.swapped);
+            value.swapped = true;  // MOVBE stores byte-reversed uint32(token).
+          } else {
+            REQUIRE_FALSE(movbe_enabled);
+            REQUIRE(source.reg == X86_REG_ECX);
+            REQUIRE(value.swapped);
+          }
+          REQUIRE(value.swapped);
+          REQUIRE(guest_stores++ == 0);
+        } else if (destination.mem.base == X86_REG_RSI) {
+          REQUIRE_FALSE(movbe);
+          REQUIRE(destination.size == 8);
+          REQUIRE(value.guest == -2);
+          REQUIRE_FALSE(value.swapped);
+          if (destination.mem.disp == real_hir::GPROffset(0)) {
+            REQUIRE(phase == 0);
+            REQUIRE(value.delta == kR0);
+            REQUIRE(r0_stores++ == 0);
+          } else {
+            REQUIRE(phase == 2);
+            REQUIRE(guest_stores == 1);
+            REQUIRE(destination.mem.disp == real_hir::GPROffset(10));
+            REQUIRE(value.delta == kSentinel);
+            REQUIRE(overwrites++ == 0);
+          }
+        } else {
+          REQUIRE_FALSE(movbe);
+          const auto local = local_index(destination);
+          const auto owner = locals[local].capture;
+          if (owner >= 0) {
+            REQUIRE(phase == 1);
+            REQUIRE(owner == static_cast<int>(captures++));
+            if (owner == 0 || owner == 32) {
+              REQUIRE(value.guest == -2);
+              REQUIRE(value.delta == (owner == 0 ? kR0 : 0));
+            } else {
+              REQUIRE(value.guest == owner);
+              REQUIRE(value.delta == (owner == 10 ? 1 : 0));
+              REQUIRE_FALSE(value.low32);
+            }
+            REQUIRE_FALSE(value.swapped);
+          } else {
+            REQUIRE(value.guest >= 0);
+            REQUIRE_FALSE(value.low32 || value.swapped);
+          }
+          memory[local] = value;
+          ++writes[local];
+        }
+      }
+    }
+    REQUIRE(address == map[phase + 1].code_offset);
+  }
+  REQUIRE(captures == 33);
+  REQUIRE(adds == 1);
+  REQUIRE(r0_stores == 1);
+  REQUIRE(guest_stores == 1);
+  REQUIRE(overwrites == 1);
+  REQUIRE(swaps == (movbe_enabled ? 0 : 1));
+  REQUIRE(scratch_copies == (movbe_enabled ? 0 : 1));
+  for (size_t reg = 0; reg < 32; ++reg) {
+    REQUIRE(inputs[reg] == (reg == 0 ? 0 : 1));
+  }
+  for (size_t i = 0; i < locals.size(); ++i) {
+    REQUIRE(reads[i] == locals[i].reads);
+    REQUIRE(writes[i] == locals[i].writes);
+  }
+}
+
+TEST_CASE(
+    "Dormant capture binds current GPR state to actual ordinary STW bytes",
+    "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  REQUIRE(cvars::align_all_basic_blocks == 0);
+  REQUIRE((cvars::full_optimization_even_with_debug ||
+           (!cvars::debug && !cvars::store_all_context_values)));
+  struct RestoreMMIO {
+    bool original = cvars::emit_inline_mmio_checks;
+    ~RestoreMMIO() { cvars::emit_inline_mmio_checks = original; }
+  } restore_mmio;
+  cvars::emit_inline_mmio_checks =
+      false;  // This bounded direct-store recipe only.
+  Fixture fixture;
+  CurrentPPC builder(fixture.processor.frontend());
+  builder.SourceOffset(kPC - 4);
+  builder.StoreGPR(0, builder.LoadConstantUint64(kR0));
+  auto entry = builder.LoadGPR(10);
+  auto computed = builder.Add(entry, builder.LoadConstantInt64(1));
+  builder.StoreGPR(10, computed);
+  builder.SourceOffset(kPC);
+  Capture capture;
+  REQUIRE(ppc::BuildDormantCheckpointGprCapture(builder, kPC, kWord, &capture));
+  REQUIRE(builder.locals().size() == 33);
+  ppc::InstrData instruction{};
+  instruction.code = kWord;
+  instruction.address = kPC;
+  instruction.opcode = ppc::LookupOpcode(kWord);
+  instruction.opcode_info = &ppc::GetOpcodeInfo(instruction.opcode);
+  REQUIRE(instruction.opcode == ppc::PPCOpcode::stw);
+  REQUIRE(instruction.opcode_info->emit);
+  REQUIRE(instruction.opcode_info->emit(builder, instruction) == 0);
+  auto access = builder.current_block()->instr_tail;
+  REQUIRE(access->opcode->num == OPCODE_STORE_OFFSET);
+  builder.SourceOffset(kPC + 4);
+  builder.StoreGPR(10, builder.LoadConstantUint64(kSentinel));
+  builder.SourceOffset(kPC + 8);
+  builder.Return();
+  REQUIRE(builder.Finalize());
+  bool promoted = false, optimized = false;
+  namespace passes = compiler::passes;
+  compiler::Compiler compiler(&fixture.processor);
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::ContextPromotionPass>());
+  compiler.AddPass(std::make_unique<BindingProof>(capture, computed, access,
+                                                  true, promoted));
+  auto simplify = std::make_unique<passes::ConditionalGroupPass>();
+  simplify->AddPass(std::make_unique<passes::SimplificationPass>());
+  simplify->AddPass(std::make_unique<passes::ConstantPropagationPass>());
+  compiler.AddPass(std::move(simplify));
+  REQUIRE(fixture.backend->machine_info()->supports_extended_load_store);
+  compiler.AddPass(std::make_unique<passes::MemorySequenceCombinationPass>());
+  compiler.AddPass(std::make_unique<passes::SimplificationPass>());
+  compiler.AddPass(std::make_unique<passes::DeadCodeEliminationPass>());
+  compiler.AddPass(std::make_unique<BindingProof>(capture, computed, access,
+                                                  false, optimized));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+      fixture.backend->machine_info()));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  REQUIRE(compiler.Compile(&builder));
+  REQUIRE(promoted);
+  REQUIRE(optimized);
+  REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+  auto locals = CheckHIR(builder, capture);
+  XbyakAllocator allocator;
+  real_hir::HIREmitter emitter(fixture.backend, &allocator);
+  const auto scratch = emitter.getCode();
+  const auto unwind_size = fixture.cache->QueryUnwindStorageSize();
+  const bool zero_low = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+                            fixture.memory.virtual_membase())) == 0;
+  REQUIRE(emitter.CanUseMembaseLow32As0() == zero_low);
+  const bool movbe = emitter.IsFeatureEnabled(kX64EmitMovbe);
+  INFO("Observed host-selected ordinary store encoding: "
+       << (movbe ? "MOVBE32" : "ECX/BSWAP/MOV32"));
+  uint64_t pc = 0;
+  size_t span = 0, callbacks = 0;
+  REQUIRE(emitter.WithPreparedDraft(
+      builder, [&](const X64Emitter::PreparedDraft& view) {
+        ++callbacks;
+        pc = fixture.cache->execute_base_address() + view.execute_offset();
+        span = view.allocation_size();
+        REQUIRE(reinterpret_cast<uint64_t>(view.code().data()) == pc);
+        CheckCommitted(pc, span, PAGE_EXECUTE_READWRITE);
+        emitter.Snapshot(view, scratch);
+        CheckBytes(locals, view, zero_low, movbe);
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+      }));
+  REQUIRE(callbacks == 1);
+  REQUIRE(emitter.getCode() == scratch);
+  emitter.CheckDiscarded();
+  fixture.CheckAborted(pc, span);
+  REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+  const uint8_t trap = 0xCC;
+  uint64_t next_pc = 0;
+  size_t next_span = 0;
+  REQUIRE(fixture.cache->WithPreparedGuestCode(
+      &trap, CodeInfo(1), [&](PreparedGuestCode& next) {
+        next_pc = fixture.cache->execute_base_address() + next.execute_offset();
+        next_span = next.allocation_size();
+        REQUIRE(next_pc == pc + span);
+        fixture.CheckUnpublished(next_pc, next_span);
+      }));
+  fixture.CheckAborted(pc, span);
+  fixture.CheckAborted(next_pc, next_span);
+  // No prepared byte is invoked. This synthetic straight-line GPR-only case
+  // proves the observed encoding path, not both host feature selections. The
+  // actual game's preceding callback-install call/CFG is unsupported by the
+  // capture helper. No checkpoint pair, full bank/precision validity, Xbox ABI,
+  // invocation ownership, publication or mapping-lease admission is
+  // established.
+}
+
+}  // namespace capture_stw
 
 }  // namespace
 }  // namespace xe::cpu::testing

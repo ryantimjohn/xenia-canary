@@ -43,6 +43,8 @@ class PPCHIRBuilder : public hir::HIRBuilder {
   GuestFunction* function() const { return function_; }
   Function* LookupFunction(uint32_t address);
   Label* LookupLabel(uint32_t address);
+  void MaybeEmitScalarAccessFirstChance(uint32_t guest_pc,
+                                        uint32_t raw_instruction);
 
   Value* LoadLR();
   void StoreLR(Value* value);

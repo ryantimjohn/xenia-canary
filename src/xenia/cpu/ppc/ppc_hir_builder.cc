@@ -72,6 +72,16 @@ PPCHIRBuilder::~PPCHIRBuilder() = default;
 
 PPCBuiltins* PPCHIRBuilder::builtins() const { return frontend_->builtins(); }
 
+void PPCHIRBuilder::MaybeEmitScalarAccessFirstChance(uint32_t guest_pc,
+                                                     uint32_t raw_instruction) {
+  if (auto* handler = frontend_->processor()->RegisterScalarAccessFirstChance(
+          function_, guest_pc, raw_instruction)) {
+    // CALL_EXTERN is a context-promotion boundary. Emit it before computing
+    // operands so a returning helper cannot leave cached pre-call operands.
+    CallExtern(handler);
+  }
+}
+
 void PPCHIRBuilder::Reset() {
   function_ = nullptr;
   start_address_ = 0;

@@ -200,6 +200,7 @@ void Processor::RemoveModule(const std::string_view name) {
     const std::vector<uint32_t> addressed_functions =
         (*itr)->GetAddressedFunctions();
 
+    scalar_access_module_generations_.erase(itr->get());
     modules_.erase(itr);
 
     for (const uint32_t entry : addressed_functions) {

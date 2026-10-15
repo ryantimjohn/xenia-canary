@@ -684,6 +684,8 @@ struct STORE_LOCAL_I64
     if (i.src2.is_constant && i.src2.constant() == 0) {
       e.xor_(e.eax, e.eax);
       e.mov(e.qword[e.rsp + i.src1.constant()], e.rax);
+    } else if (i.src2.is_constant) {
+      e.MovMem64(e.rsp + i.src1.constant(), i.src2.constant());
     } else {
       e.mov(e.qword[e.rsp + i.src1.constant()], i.src2);
     }

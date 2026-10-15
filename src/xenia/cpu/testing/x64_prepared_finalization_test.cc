@@ -2673,6 +2673,188 @@ TEST_CASE(
 
 }  // namespace capture_stw
 
+namespace local_i64_constants {
+
+constexpr uint32_t kPC = 0x80009000;
+constexpr std::array<uint64_t, 8> kValues = {
+    0x000000002468ACE0ull,  // The nonzero captured r0 in the ordinary STW case.
+    0x000000007FFFFFFFull, 0x0000000080000000ull, 0xFFFFFFFF80000000ull,
+    0xFFFFFFFF7FFFFFFFull, 0x0123456789ABCDEFull, 0x8000000000000000ull,
+    0xFFFFFFFFFFFFFFFFull};
+
+// Reconstruct the semantic eight-byte local value from every decoded write.
+// This does not select the writer's immediate or split-immediate strategy.
+void CheckStores(const std::array<hir::Value*, kValues.size()>& slots,
+                 const X64Emitter::PreparedDraft& view, uint64_t membase) {
+  REQUIRE(view.code().size() <= real_hir::kMaxBytes);
+  const auto map = view.source_map();
+  REQUIRE(map.size() == kValues.size() + 1);
+  REQUIRE(view.info().code_size.prolog <= view.code().size());
+  REQUIRE(view.info().code_size.body <=
+          view.code().size() - view.info().code_size.prolog);
+  std::array<uint32_t, kValues.size()> offsets{};
+  for (size_t row = 0; row < slots.size(); ++row) {
+    REQUIRE(slots[row]->IsConstant());
+    REQUIRE(slots[row]->type == hir::INT32_TYPE);
+    offsets[row] = slots[row]->constant.u32;
+    REQUIRE(offsets[row] >= StackLayout::GUEST_STACK_SIZE);
+    REQUIRE(offsets[row] % 8 == 0);
+    REQUIRE(view.info().stack_size >= 8);
+    REQUIRE(offsets[row] <= view.info().stack_size - 8);
+    for (size_t earlier = 0; earlier < row; ++earlier) {
+      REQUIRE(offsets[earlier] != offsets[row]);
+    }
+  }
+  for (size_t marker = 0; marker < map.size(); ++marker) {
+    REQUIRE(map[marker].guest_address ==
+            kPC + static_cast<uint32_t>(marker * 4));
+    REQUIRE(map[marker].code_offset >= view.info().code_size.prolog);
+    REQUIRE(map[marker].code_offset <= view.code().size());
+    REQUIRE(map[marker].code_offset <=
+            view.info().code_size.prolog + view.info().code_size.body);
+    if (marker) {
+      REQUIRE(map[marker - 1].code_offset < map[marker].code_offset);
+    }
+  }
+  real_hir::Decoder decoder;
+  REQUIRE(decoder.instruction);
+  for (size_t row = 0; row < kValues.size(); ++row) {
+    std::array<bool, 8> written{};
+    std::array<uint8_t, 8> bytes{};
+    const uint8_t* cursor = view.code().data() + map[row].code_offset;
+    size_t remaining = map[row + 1].code_offset - map[row].code_offset;
+    REQUIRE(remaining <= 32);
+    uint64_t address = map[row].code_offset;
+    while (remaining) {
+      REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                             decoder.instruction));
+      REQUIRE(decoder.instruction->id == X86_INS_MOV);
+      REQUIRE(decoder.instruction->detail);
+      const auto& x = decoder.instruction->detail->x86;
+      REQUIRE(x.op_count == 2);
+      REQUIRE(x.addr_size == 8);
+      REQUIRE(x.eflags == 0);
+      for (auto prefix : x.prefix) {
+        REQUIRE(prefix == 0);
+      }
+      const auto& destination = x.operands[0];
+      const auto& source = x.operands[1];
+      REQUIRE(destination.type == X86_OP_MEM);
+      REQUIRE(destination.access == CS_AC_WRITE);
+      REQUIRE((destination.size == 4 || destination.size == 8));
+      const auto width = static_cast<size_t>(destination.size);
+      REQUIRE(destination.mem.base == X86_REG_RSP);
+      REQUIRE(destination.mem.index == X86_REG_INVALID);
+      REQUIRE(destination.mem.segment == X86_REG_INVALID);
+      REQUIRE(destination.mem.disp >= static_cast<int64_t>(offsets[row]));
+      const auto first =
+          static_cast<size_t>(destination.mem.disp - offsets[row]);
+      REQUIRE(first <= size_t{8} - width);
+      REQUIRE(first % width == 0);
+      uint64_t value = 0;
+      std::vector<unsigned> expected_reads{X86_REG_RSP};
+      if (source.type == X86_OP_IMM) {
+        value = static_cast<uint64_t>(source.imm);
+      } else {
+        REQUIRE(source.type == X86_OP_REG);
+        REQUIRE(source.access == CS_AC_READ);
+        REQUIRE(source.size == destination.size);
+        // MovMem64 may use the known membase value itself, or its known-zero
+        // low half. No unassigned allocator/scratch register is accepted.
+        REQUIRE(source.reg == (source.size == 8 ? X86_REG_RDI : X86_REG_EDI));
+        if (source.size == 4) {
+          REQUIRE(static_cast<uint32_t>(membase) == 0);
+          value = 0;
+        } else {
+          value = membase;
+        }
+        expected_reads.push_back(source.reg);
+      }
+      cs_regs reads{}, writes{};
+      uint8_t read_count = 0, write_count = 0;
+      REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, reads,
+                             &read_count, writes, &write_count) == CS_ERR_OK);
+      REQUIRE(write_count == 0);
+      std::sort(expected_reads.begin(), expected_reads.end());
+      std::sort(reads, reads + read_count);
+      REQUIRE(read_count == expected_reads.size());
+      REQUIRE(std::equal(expected_reads.begin(), expected_reads.end(), reads));
+      for (size_t byte = 0; byte < width; ++byte) {
+        REQUIRE_FALSE(written[first + byte]);
+        written[first + byte] = true;
+        bytes[first + byte] = static_cast<uint8_t>(value >> (byte * 8));
+      }
+    }
+    REQUIRE(address == map[row + 1].code_offset);
+    for (size_t byte = 0; byte < bytes.size(); ++byte) {
+      REQUIRE(written[byte]);
+      REQUIRE(bytes[byte] == static_cast<uint8_t>(kValues[row] >> (byte * 8)));
+    }
+  }
+}
+
+TEST_CASE("Unpublished x64 local stores retain nonzero INT64 constant bits",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  REQUIRE(cvars::align_all_basic_blocks == 0);
+  Fixture fixture;
+  real_hir::CurrentHIR builder;
+  std::array<hir::Value*, kValues.size()> slots{};
+  for (size_t row = 0; row < slots.size(); ++row) {
+    slots[row] = builder.AllocLocal(hir::INT64_TYPE);
+    builder.SourceOffset(kPC + static_cast<uint32_t>(row * 4));
+    builder.StoreLocal(slots[row], builder.LoadConstantUint64(kValues[row]));
+  }
+  builder.SourceOffset(kPC + static_cast<uint32_t>(kValues.size() * 4));
+  builder.Return();
+  REQUIRE(builder.Finalize());
+  namespace passes = compiler::passes;
+  compiler::Compiler compiler(&fixture.processor);
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+      fixture.backend->machine_info()));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  REQUIRE(compiler.Compile(&builder));
+  REQUIRE(builder.locals().size() == kValues.size());
+  XbyakAllocator allocator;
+  real_hir::HIREmitter emitter(fixture.backend, &allocator);
+  const auto scratch = emitter.getCode();
+  const auto unwind_size = fixture.cache->QueryUnwindStorageSize();
+  uint64_t pc = 0;
+  size_t span = 0, callbacks = 0;
+  REQUIRE(emitter.WithPreparedDraft(
+      builder, [&](const X64Emitter::PreparedDraft& view) {
+        ++callbacks;
+        pc = fixture.cache->execute_base_address() + view.execute_offset();
+        span = view.allocation_size();
+        REQUIRE(reinterpret_cast<uint64_t>(view.code().data()) == pc);
+        CheckCommitted(pc, span, PAGE_EXECUTE_READWRITE);
+        emitter.Snapshot(view, scratch);
+        CheckStores(
+            slots, view,
+            reinterpret_cast<uintptr_t>(fixture.memory.virtual_membase()));
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+      }));
+  REQUIRE(callbacks == 1);
+  REQUIRE(emitter.getCode() == scratch);
+  emitter.CheckDiscarded();
+  fixture.CheckAborted(pc, span);
+  REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+  // Compiled and decoded only. No emitted instruction, guest access or entry
+  // is invoked; this does not establish game-site or checkpoint eligibility.
+}
+
+}  // namespace local_i64_constants
+
 }  // namespace
 }  // namespace xe::cpu::testing
 

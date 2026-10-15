@@ -1282,6 +1282,47 @@ TEST_CASE("Real x64 draft preserves 32 canonical-entry GPR tokens through RA",
         CheckCommitted(pc, span, PAGE_EXECUTE_READWRITE);
         emitter.Snapshot(view, original_scratch);
         CheckBytes(plan, view);
+        // At least 32 - 7 distinct INT64 spills force the actual frame beyond
+        // UWOP_ALLOC_SMALL. Check the producer's private bytes independently
+        // from the emitted stack/prolog scalars, without publishing a table.
+        static_assert(StackLayout::GUEST_STACK_SIZE +
+                          (kCount - X64Emitter::GPR_COUNT) * sizeof(uint64_t) >
+                      128);
+        const auto& info = view.info();
+        REQUIRE(info.stack_size > 128);
+        REQUIRE(info.stack_size < 65536);
+        REQUIRE(info.stack_size % 8 == 0);
+        REQUIRE(info.code_size.prolog < 256);
+        REQUIRE(info.prolog_stack_alloc_offset > 0);
+        REQUIRE(info.prolog_stack_alloc_offset <= info.code_size.prolog);
+        REQUIRE(view.code().size() == info.code_size.total);
+        REQUIRE(view.storage().size() == span);
+        REQUIRE(view.code().data() == view.storage().data());
+        REQUIRE(view.unwind_offset() == (view.code().size() + 15) / 16 * 16);
+        REQUIRE(view.unwind_offset() <= span);
+        const auto unwind = view.unwind_info();
+        REQUIRE(unwind.size() == unwind_size);
+        REQUIRE(unwind.size() >= 8);
+        REQUIRE(unwind.data() == view.storage().data() + view.unwind_offset());
+        REQUIRE(unwind.size() == span - view.unwind_offset());
+        const auto scaled_stack = info.stack_size / 8;
+        const std::array<uint8_t, 8> expected_unwind = {
+            1,
+            static_cast<uint8_t>(info.code_size.prolog),
+            2,
+            0,
+            static_cast<uint8_t>(info.prolog_stack_alloc_offset),
+            1,  // UWOP_ALLOC_LARGE, OpInfo 0: one following size slot.
+            static_cast<uint8_t>(scaled_stack),
+            static_cast<uint8_t>(scaled_stack >> 8)};
+        REQUIRE(std::equal(expected_unwind.begin(), expected_unwind.end(),
+                           unwind.begin()));
+        REQUIRE(std::all_of(view.storage().begin() + view.code().size(),
+                            view.storage().begin() + view.unwind_offset(),
+                            [](uint8_t byte) { return byte == 0xCC; }));
+        REQUIRE(std::all_of(unwind.begin() + expected_unwind.size(),
+                            unwind.end(),
+                            [](uint8_t byte) { return byte == 0xCC; }));
         fixture.CheckUnpublished(pc, span);
         REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
       }));
@@ -1304,7 +1345,7 @@ TEST_CASE("Real x64 draft preserves 32 canonical-entry GPR tokens through RA",
   fixture.CheckAborted(next_pc, next_span);
   // Assumes the 32 entry PPCContext GPR fields are canonical. It does not prove
   // an arbitrary optimized site's live register bank, FPR/VMX/flags precision,
-  // full-bank capture, guest ABI, native unwind serialization or checkpoint
+  // full-bank capture, guest ABI, OS unwinding or checkpoint
   // eligibility. No capture-validity mask is set and no bytes are invoked.
 }
 

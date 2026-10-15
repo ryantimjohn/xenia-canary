@@ -876,6 +876,416 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
 
 }  // namespace real_hir
 
+namespace canonical_gpr {
+
+using namespace hir;
+constexpr uint32_t kPC = 0x80006000;
+constexpr size_t kCount = 32;
+
+size_t CaptureGPR(size_t position) {
+  REQUIRE(position < kCount);
+  // Keep old r3 furthest from its definition, across the sentinel overwrite.
+  return position == kCount - 1 ? 3 : position < 3 ? position : position + 1;
+}
+
+enum class Kind { Input, Spill, Reload, Overwrite, Output };
+struct Move {
+  Kind kind;
+  size_t phase;
+  size_t guest;
+  const Value* value;
+  Value* slot;
+};
+struct Plan {
+  std::array<Value*, kCount> slots{};
+  std::array<uint32_t, 4> markers{};
+  std::vector<Move> moves;
+  size_t spill_count = 0;
+};
+
+void CheckAllocated(const Value* value, const backend::MachineInfo& machine) {
+  REQUIRE(value);
+  REQUIRE(value->type == INT64_TYPE);
+  REQUIRE_FALSE(value->IsConstant());
+  REQUIRE(value->def);
+  REQUIRE(value->def->dest == value);
+  REQUIRE(value->reg.set == &machine.register_sets[0]);
+  REQUIRE(value->reg.index >= 0);
+  REQUIRE(static_cast<uint32_t>(value->reg.index) < value->reg.set->count);
+}
+
+Plan CheckHIR(HIRBuilder& builder, const std::array<Value*, kCount>& inputs,
+              const backend::MachineInfo& machine) {
+  REQUIRE(machine.register_sets[0].count == X64Emitter::GPR_COUNT);
+  REQUIRE(X64Emitter::GPR_COUNT < kCount);
+  Plan plan;
+  auto body = builder.first_block();
+  REQUIRE(body);
+  REQUIRE(body->instr_tail);
+  REQUIRE(body->instr_tail->opcode->num == OPCODE_RETURN);
+  // As in the approved eight-GPR case, RA appends and relocates local ops
+  // after Return ended the body, leaving one exact empty terminal scaffold.
+  auto scaffold = body->next;
+  REQUIRE(scaffold);
+  REQUIRE(scaffold == builder.last_block());
+  REQUIRE(scaffold->prev == body);
+  REQUIRE(scaffold->next == nullptr);
+  REQUIRE(scaffold->instr_head == nullptr);
+  REQUIRE(scaffold->instr_tail == nullptr);
+  REQUIRE(scaffold->label_head == nullptr);
+  REQUIRE(scaffold->label_tail == nullptr);
+  REQUIRE(scaffold->incoming_edge_head == nullptr);
+  REQUIRE(scaffold->outgoing_edge_head == nullptr);
+  REQUIRE(scaffold->incoming_values == nullptr);
+  std::array<Instr*, kCount> reloads{};
+  std::array<bool, kCount> seen_inputs{}, seen_outputs{};
+  size_t markers = 0, loads = 0, stores = 0, overwrites = 0;
+  auto owner = [&](const Value* value) {
+    const auto found = std::find(inputs.begin(), inputs.end(), value);
+    REQUIRE(found != inputs.end());
+    return static_cast<size_t>(found - inputs.begin());
+  };
+  for (auto instr = body->instr_head; instr; instr = instr->next) {
+    REQUIRE(instr->block == body);
+    REQUIRE(instr->flags == 0);
+    const auto opcode = instr->opcode->num;
+    if (opcode == OPCODE_SOURCE_OFFSET) {
+      REQUIRE(markers < plan.markers.size());
+      REQUIRE(instr->src1.offset == kPC + markers * 4);
+      plan.markers[markers++] = uint32_t(body->ordinal << 16) | instr->ordinal;
+      continue;
+    }
+    REQUIRE(markers > 0);
+    const size_t phase = markers - 1;
+    if (opcode == OPCODE_LOAD_CONTEXT) {
+      REQUIRE(phase == 0);
+      REQUIRE(loads < kCount);
+      auto value = inputs[loads];
+      CheckAllocated(value, machine);
+      REQUIRE(value->def == instr);
+      REQUIRE(instr->src1.offset == real_hir::GPROffset(loads));
+      REQUIRE_FALSE(seen_inputs[loads]);
+      seen_inputs[loads] = true;
+      plan.moves.push_back({Kind::Input, phase, loads++, value, nullptr});
+    } else if (opcode == OPCODE_STORE_LOCAL) {
+      REQUIRE(phase == 0);
+      const auto guest = owner(instr->src2.value);
+      REQUIRE(seen_inputs[guest]);
+      REQUIRE(plan.slots[guest] == nullptr);
+      auto slot = inputs[guest]->GetLocalSlot();
+      REQUIRE(slot);
+      REQUIRE(slot->type == INT64_TYPE);
+      REQUIRE_FALSE(slot->IsConstant());
+      REQUIRE(instr->src1.value == slot);
+      REQUIRE(std::find(plan.slots.begin(), plan.slots.end(), slot) ==
+              plan.slots.end());
+      REQUIRE(std::count(builder.locals().begin(), builder.locals().end(),
+                         slot) == 1);
+      plan.slots[guest] = slot;
+      ++plan.spill_count;
+      plan.moves.push_back({Kind::Spill, phase, guest, inputs[guest], slot});
+    } else if (opcode == OPCODE_LOAD_LOCAL) {
+      REQUIRE(phase == 2);
+      REQUIRE(instr->src1.value);
+      const auto found =
+          std::find(plan.slots.begin(), plan.slots.end(), instr->src1.value);
+      REQUIRE(found != plan.slots.end());
+      const auto guest = static_cast<size_t>(found - plan.slots.begin());
+      REQUIRE(plan.slots[guest]);
+      REQUIRE(reloads[guest] == nullptr);
+      REQUIRE_FALSE(seen_outputs[guest]);
+      CheckAllocated(instr->dest, machine);
+      REQUIRE(instr->dest->def == instr);
+      REQUIRE(instr->dest->GetLocalSlot() == plan.slots[guest]);
+      reloads[guest] = instr;
+      plan.moves.push_back(
+          {Kind::Reload, phase, guest, instr->dest, plan.slots[guest]});
+    } else if (opcode == OPCODE_STORE_CONTEXT) {
+      REQUIRE(instr->src2.value->type == INT64_TYPE);
+      if (phase == 1) {
+        REQUIRE(loads == kCount);
+        REQUIRE(overwrites++ == 0);
+        REQUIRE(instr->src1.offset == real_hir::GPROffset(3));
+        REQUIRE(instr->src2.value->IsConstant());
+        REQUIRE(instr->src2.value->constant.u64 == real_hir::kValue);
+        plan.moves.push_back({Kind::Overwrite, phase, 3, nullptr, nullptr});
+      } else {
+        REQUIRE(phase == 2);
+        REQUIRE(overwrites == 1);
+        const auto guest = CaptureGPR(stores++);
+        REQUIRE(instr->src1.offset == real_hir::GPROffset(guest));
+        REQUIRE_FALSE(seen_outputs[guest]);
+        CheckAllocated(instr->src2.value, machine);
+        if (plan.slots[guest]) {
+          REQUIRE(reloads[guest]);
+          REQUIRE(instr->src2.value == reloads[guest]->dest);
+        } else {
+          REQUIRE(instr->src2.value == inputs[guest]);
+          REQUIRE(inputs[guest]->GetLocalSlot() == nullptr);
+        }
+        seen_outputs[guest] = true;
+        plan.moves.push_back(
+            {Kind::Output, phase, guest, instr->src2.value, nullptr});
+      }
+    } else {
+      REQUIRE(opcode == OPCODE_RETURN);
+      REQUIRE(phase == 3);
+      REQUIRE(instr == body->instr_tail);
+    }
+  }
+  REQUIRE(markers == plan.markers.size());
+  REQUIRE(loads == kCount);
+  REQUIRE(stores == kCount);
+  REQUIRE(overwrites == 1);
+  REQUIRE(plan.spill_count <= kCount);
+  REQUIRE(plan.spill_count >= kCount - X64Emitter::GPR_COUNT);
+  REQUIRE(builder.locals().size() == plan.spill_count);
+  REQUIRE(plan.slots[3]);
+  for (size_t guest = 0; guest < kCount; ++guest) {
+    REQUIRE(seen_inputs[guest]);
+    REQUIRE(seen_outputs[guest]);
+    REQUIRE((reloads[guest] != nullptr) == (plan.slots[guest] != nullptr));
+  }
+  return plan;
+}
+
+void CheckBytes(const Plan& plan, const X64Emitter::PreparedDraft& view) {
+  constexpr std::array<unsigned int, X64Emitter::GPR_COUNT> registers = {
+      X86_REG_RBX, X86_REG_R10, X86_REG_R11, X86_REG_R12,
+      X86_REG_R13, X86_REG_R14, X86_REG_R15};
+  REQUIRE(view.code().size() <= real_hir::kMaxBytes);
+  const auto stack = view.info().stack_size;
+  REQUIRE(stack >= StackLayout::GUEST_STACK_SIZE + plan.spill_count * 8);
+  REQUIRE(stack < StackLayout::GUEST_STACK_SIZE + plan.spill_count * 8 + 16);
+  REQUIRE((stack + 8) % 16 == 0);
+  std::vector<uint32_t> offsets;
+  for (auto slot : plan.slots) {
+    if (!slot) {
+      continue;
+    }
+    // Actual Emit assigns these scalar offsets, not native stack addresses.
+    REQUIRE(slot->IsConstant());
+    REQUIRE(slot->type == INT32_TYPE);
+    const auto offset = slot->constant.u32;
+    REQUIRE(offset >= StackLayout::GUEST_STACK_SIZE);
+    REQUIRE(offset % sizeof(uint64_t) == 0);
+    REQUIRE(offset <= stack - sizeof(uint64_t));
+    REQUIRE(std::find(offsets.begin(), offsets.end(), offset) == offsets.end());
+    offsets.push_back(offset);
+  }
+  REQUIRE(offsets.size() == plan.spill_count);
+  const auto map = view.source_map();
+  REQUIRE(map.size() == plan.markers.size());
+  REQUIRE(view.info().code_size.prolog <= view.code().size());
+  REQUIRE(view.info().code_size.body <=
+          view.code().size() - view.info().code_size.prolog);
+  const auto epilog = view.info().code_size.prolog + view.info().code_size.body;
+  REQUIRE(epilog <= view.code().size());
+  for (size_t i = 0; i < map.size(); ++i) {
+    REQUIRE(map[i].guest_address == kPC + i * 4);
+    REQUIRE(map[i].hir_offset == plan.markers[i]);
+    REQUIRE(map[i].code_offset >= view.info().code_size.prolog);
+    REQUIRE(map[i].code_offset <= epilog);
+    if (i) {
+      REQUIRE(map[i - 1].code_offset < map[i].code_offset);
+    }
+  }
+  REQUIRE(map.back().code_offset - map.front().code_offset <= 2048);
+  std::array<int, X64Emitter::GPR_COUNT> register_tokens;
+  std::array<int, kCount> local_tokens;
+  register_tokens.fill(-1);
+  local_tokens.fill(-1);
+  std::array<size_t, kCount> loads{}, spills{}, reloads{}, writes{};
+  size_t position = 0, output = 0, overwrites = 0;
+  real_hir::Decoder decoder;
+  REQUIRE(decoder.instruction);
+  for (size_t phase = 0; phase < 3; ++phase) {
+    const size_t begin = map[phase].code_offset;
+    const size_t end = map[phase + 1].code_offset;
+    const uint8_t* cursor = view.code().data() + begin;
+    size_t remaining = end - begin;
+    uint64_t address = begin;  // Numeric offset; no executable entry is formed.
+    while (remaining) {
+      REQUIRE(position < plan.moves.size());
+      const auto& expected = plan.moves[position++];
+      REQUIRE(expected.phase == phase);
+      REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                             decoder.instruction));
+      REQUIRE(decoder.instruction->id == X86_INS_MOV);
+      REQUIRE(decoder.instruction->detail);
+      const auto& x = decoder.instruction->detail->x86;
+      REQUIRE(x.op_count == 2);
+      REQUIRE(x.addr_size == sizeof(uint64_t));
+      REQUIRE(x.eflags == 0);
+      for (auto prefix : x.prefix) {
+        REQUIRE(prefix == 0);
+      }
+      const auto& destination = x.operands[0];
+      const auto& source = x.operands[1];
+      REQUIRE(destination.size == sizeof(uint64_t));
+      REQUIRE(destination.access == CS_AC_WRITE);
+      const bool load =
+          expected.kind == Kind::Input || expected.kind == Kind::Reload;
+      const bool local =
+          expected.kind == Kind::Spill || expected.kind == Kind::Reload;
+      const auto& memory = load ? source : destination;
+      REQUIRE(memory.type == X86_OP_MEM);
+      REQUIRE(memory.size == sizeof(uint64_t));
+      const auto base = local ? X86_REG_RSP : X86_REG_RSI;
+      REQUIRE(memory.mem.base == base);
+      REQUIRE(memory.mem.index == X86_REG_INVALID);
+      REQUIRE(memory.mem.segment == X86_REG_INVALID);
+      const auto offset = local ? expected.slot->constant.u32
+                                : real_hir::GPROffset(expected.guest);
+      REQUIRE(memory.mem.disp == static_cast<int64_t>(offset));
+      cs_regs reads{}, native_writes{};
+      uint8_t read_count = 0, write_count = 0;
+      REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, reads,
+                             &read_count, native_writes,
+                             &write_count) == CS_ERR_OK);
+      const bool immediate = expected.kind == Kind::Overwrite;
+      REQUIRE(read_count == (load || immediate ? 1 : 2));
+      REQUIRE(std::find(reads, reads + read_count, base) != reads + read_count);
+      REQUIRE(write_count == (load ? 1 : 0));
+      if (immediate) {
+        REQUIRE(destination.type == X86_OP_MEM);
+        REQUIRE(source.type == X86_OP_IMM);
+        REQUIRE(static_cast<uint64_t>(source.imm) == real_hir::kValue);
+        REQUIRE(overwrites++ == 0);
+        continue;
+      }
+      const auto& reg = load ? destination : source;
+      REQUIRE(reg.type == X86_OP_REG);
+      REQUIRE(reg.size == sizeof(uint64_t));
+      const auto index = static_cast<size_t>(expected.value->reg.index);
+      REQUIRE(index < registers.size());
+      REQUIRE(reg.reg == registers[index]);
+      if (load) {
+        REQUIRE(source.access == CS_AC_READ);
+        REQUIRE(native_writes[0] == reg.reg);
+        if (local) {
+          REQUIRE(local_tokens[expected.guest] ==
+                  static_cast<int>(expected.guest));
+          REQUIRE(reloads[expected.guest]++ == 0);
+          register_tokens[index] = local_tokens[expected.guest];
+        } else {
+          REQUIRE(loads[expected.guest]++ == 0);
+          register_tokens[index] = static_cast<int>(expected.guest);
+        }
+      } else {
+        REQUIRE(destination.type == X86_OP_MEM);
+        REQUIRE(source.access == CS_AC_READ);
+        REQUIRE(std::find(reads, reads + read_count, reg.reg) !=
+                reads + read_count);
+        REQUIRE(register_tokens[index] == static_cast<int>(expected.guest));
+        if (local) {
+          REQUIRE(spills[expected.guest]++ == 0);
+          local_tokens[expected.guest] = register_tokens[index];
+        } else {
+          REQUIRE(overwrites == 1);
+          REQUIRE(expected.guest == CaptureGPR(output++));
+          REQUIRE(writes[expected.guest]++ == 0);
+        }
+      }
+    }
+    REQUIRE(address == end);
+  }
+  REQUIRE(position == plan.moves.size());
+  REQUIRE(output == kCount);
+  REQUIRE(overwrites == 1);
+  for (size_t guest = 0; guest < kCount; ++guest) {
+    REQUIRE(loads[guest] == 1);
+    REQUIRE(writes[guest] == 1);
+    REQUIRE(spills[guest] == (plan.slots[guest] ? 1 : 0));
+    REQUIRE(reloads[guest] == spills[guest]);
+  }
+}
+
+TEST_CASE("Real x64 draft preserves 32 canonical-entry GPR tokens through RA",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  REQUIRE(cvars::align_all_basic_blocks == 0);
+  Fixture fixture;
+  XbyakAllocator allocator;
+  real_hir::HIREmitter emitter(fixture.backend, &allocator);
+  real_hir::CurrentHIR builder;
+  builder.SourceOffset(kPC);
+  std::array<Value*, kCount> inputs{};
+  for (size_t guest = 0; guest < kCount; ++guest) {
+    inputs[guest] = builder.LoadContext(real_hir::GPROffset(guest), INT64_TYPE);
+  }
+  builder.SourceOffset(kPC + 4);
+  builder.StoreContext(real_hir::GPROffset(3),
+                       builder.LoadConstantUint64(real_hir::kValue));
+  builder.SourceOffset(kPC + 8);
+  for (size_t position = 0; position < kCount; ++position) {
+    const auto guest = CaptureGPR(position);
+    builder.StoreContext(real_hir::GPROffset(guest), inputs[guest]);
+  }
+  builder.SourceOffset(kPC + 12);
+  builder.Return();
+  REQUIRE(builder.Finalize());
+  REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+  namespace passes = compiler::passes;
+  compiler::Compiler compiler(&fixture.processor);
+  // Ordered context effects are retained explicitly. No context-promotion or
+  // full ordinary-translator pipeline compatibility is asserted by this case.
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+      fixture.backend->machine_info()));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  REQUIRE(compiler.Compile(&builder));
+  REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+  const auto plan = CheckHIR(builder, inputs, *fixture.backend->machine_info());
+  const auto original_scratch = emitter.getCode();
+  const auto unwind_size = fixture.cache->QueryUnwindStorageSize();
+  uint64_t pc = 0;
+  size_t span = 0, callbacks = 0;
+  REQUIRE(emitter.WithPreparedDraft(
+      builder, [&](const X64Emitter::PreparedDraft& view) {
+        ++callbacks;
+        pc = fixture.cache->execute_base_address() + view.execute_offset();
+        span = view.allocation_size();
+        REQUIRE(reinterpret_cast<uint64_t>(view.code().data()) == pc);
+        CheckCommitted(pc, span, PAGE_EXECUTE_READWRITE);
+        emitter.Snapshot(view, original_scratch);
+        CheckBytes(plan, view);
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+      }));
+  REQUIRE(callbacks == 1);
+  REQUIRE(emitter.getCode() == original_scratch);
+  emitter.CheckDiscarded();
+  fixture.CheckAborted(pc, span);
+  REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+  uint64_t next_pc = 0;
+  size_t next_span = 0;
+  const uint8_t trap = 0xCC;
+  REQUIRE(fixture.cache->WithPreparedGuestCode(
+      &trap, CodeInfo(1), [&](PreparedGuestCode& next) {
+        next_pc = fixture.cache->execute_base_address() + next.execute_offset();
+        next_span = next.allocation_size();
+        REQUIRE(next_pc == pc + span);
+        fixture.CheckUnpublished(next_pc, next_span);
+      }));
+  fixture.CheckAborted(pc, span);
+  fixture.CheckAborted(next_pc, next_span);
+  // Assumes the 32 entry PPCContext GPR fields are canonical. It does not prove
+  // an arbitrary optimized site's live register bank, FPR/VMX/flags precision,
+  // full-bank capture, guest ABI, native unwind serialization or checkpoint
+  // eligibility. No capture-validity mask is set and no bytes are invoked.
+}
+
+}  // namespace canonical_gpr
+
 }  // namespace
 }  // namespace xe::cpu::testing
 

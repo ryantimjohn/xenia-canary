@@ -406,8 +406,16 @@ TEST_CASE("Unexpected body effects and control flow reject the full recipe",
   Fixture helper(false);
   helper.SetCodeWord(1, 0x4BFE1EF5);
   CHECK_FALSE(helper.Build().recipe);
+  Fixture known_store(false);
+  // lis r9,0x8231; addi r3,r9,0x1A40 establish r3 before this store.
+  // Its address is 0x8230E1C4; treating r3 as unknown would reject valid code.
+  known_store.SetCodeWord(7, 0x9163C784);
+  const auto known_build = known_store.Build();
+  REQUIRE(known_build.recipe);
+  CHECK(known_store.Unwind(*known_build.recipe).status ==
+        Status::kSupportedPartialFrame);
   Fixture unknown_store(false);
-  unknown_store.SetCodeWord(7, 0x9163C784);  // stw through unknown r3.
+  unknown_store.SetCodeWord(7, 0x9164C784);  // stw through unassigned r4.
   CHECK_FALSE(unknown_store.Build().recipe);
 }
 

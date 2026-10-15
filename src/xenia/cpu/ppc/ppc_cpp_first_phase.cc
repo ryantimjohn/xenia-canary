@@ -93,7 +93,7 @@ class Reader {
 
 bool RelativeTarget(uint32_t pc, uint32_t instruction, bool linked,
                     uint32_t& target) {
-  if ((instruction & 0xFC000003) != (linked ? 0x48000001 : 0x48000000)) {
+  if ((instruction & 0xFC000003) != (linked ? 0x48000001u : 0x48000000u)) {
     return false;
   }
   int64_t displacement = instruction & 0x03FFFFFC;

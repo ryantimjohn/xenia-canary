@@ -2601,6 +2601,8 @@ TEST_CASE(
   simplify->AddPass(std::make_unique<passes::ConstantPropagationPass>());
   compiler.AddPass(std::move(simplify));
   REQUIRE(fixture.backend->machine_info()->supports_extended_load_store);
+  REQUIRE(fixture.backend->machine_info()->register_sets[0].count == 7);
+  REQUIRE(X64Emitter::GPR_COUNT == 7);
   compiler.AddPass(std::make_unique<passes::MemorySequenceCombinationPass>());
   compiler.AddPass(std::make_unique<passes::SimplificationPass>());
   compiler.AddPass(std::make_unique<passes::DeadCodeEliminationPass>());

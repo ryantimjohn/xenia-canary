@@ -3041,11 +3041,12 @@ std::vector<Local> CheckHIR(HIRBuilder& builder, Block* body,
   return locals;
 }
 
-// Only the source-delimited capture interval is decoded. Tokens here denote
+// The optional prefix is admitted only by CheckStackSync below. Tokens denote
 // fresh post-call context inputs, with no relation to pre-call values or to an
 // observed callee. Existing entry/STW decoders are intentionally unchanged.
 void CheckBytes(std::vector<Local>& locals,
-                const X64Emitter::PreparedDraft& view, bool membase_low_zero) {
+                const X64Emitter::PreparedDraft& view, bool membase_low_zero,
+                size_t prefix_size = 0) {
   REQUIRE(view.code().size() <= real_hir::kMaxBytes);
   const auto stack = view.info().stack_size;
   REQUIRE((stack + 8) % 16 == 0);
@@ -3089,9 +3090,10 @@ void CheckBytes(std::vector<Local>& locals,
   size_t captures = 0;
   real_hir::Decoder decoder;
   REQUIRE(decoder.instruction);
-  const uint8_t* cursor = view.code().data() + map[3].code_offset;
-  size_t remaining = map[4].code_offset - map[3].code_offset;
-  uint64_t address = map[3].code_offset;
+  REQUIRE(prefix_size < map[4].code_offset - map[3].code_offset);
+  const uint8_t* cursor = view.code().data() + map[3].code_offset + prefix_size;
+  size_t remaining = map[4].code_offset - map[3].code_offset - prefix_size;
+  uint64_t address = map[3].code_offset + prefix_size;
   while (remaining) {
     REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
                            decoder.instruction));
@@ -3235,8 +3237,144 @@ void CheckBytes(std::vector<Local>& locals,
   }
 }
 
-TEST_CASE("Dormant post-call capture uses fresh context and current r10",
-          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+// This one recipe uses the size16 helper. Decode only its TEST/JNZ prefix and
+// the branch-selected, terminal CALL/data/JMP stub, never the inline data or
+// unrelated prolog/epilog/tails. All addresses are numeric observations only.
+size_t CheckStackSync(const X64Emitter::PreparedDraft& view, uint64_t pc,
+                      const X64Backend& backend) {
+  REQUIRE(cvars::enable_host_guest_stack_synchronization);
+  const auto code = view.code();
+  REQUIRE(reinterpret_cast<uint64_t>(code.data()) == pc);
+  REQUIRE(view.info().code_size.total == code.size());
+  REQUIRE(code.size() <= real_hir::kMaxBytes);
+  REQUIRE(view.source_map().size() == 7);
+  REQUIRE(view.source_map()[3].guest_address == kPC);
+  REQUIRE(view.source_map()[4].guest_address == kPC + 4);
+  const size_t begin = view.source_map()[3].code_offset;
+  const size_t end = view.source_map()[4].code_offset;
+  REQUIRE(begin < end);
+  REQUIRE(end <= code.size());
+  constexpr size_t kPrefixSize = 12;
+  REQUIRE(end - begin > kPrefixSize);
+  constexpr std::array<uint8_t, 8> kPrefix = {0xF7, 0xC4, 0x0F, 0,
+                                              0,    0,    0x0F, 0x85};
+  REQUIRE(std::equal(kPrefix.begin(), kPrefix.end(), code.data() + begin));
+  real_hir::Decoder decoder;
+  REQUIRE(decoder.instruction);
+  const uint8_t* cursor = code.data() + begin;
+  size_t remaining = kPrefixSize;
+  uint64_t address = pc + begin;
+  auto decode = [&](unsigned id, size_t size) {
+    const auto start = address;
+    REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                           decoder.instruction));
+    REQUIRE(decoder.instruction->id == id);
+    REQUIRE(decoder.instruction->size == size);
+    REQUIRE(decoder.instruction->address == start);
+    REQUIRE(decoder.instruction->detail);
+    const auto& x = decoder.instruction->detail->x86;
+    REQUIRE(x.addr_size == 8);
+    for (auto prefix : x.prefix) {
+      REQUIRE(prefix == 0);
+    }
+  };
+  auto effects = [&](std::vector<unsigned> expected_reads,
+                     std::vector<unsigned> expected_writes) {
+    cs_regs reads{}, writes{};
+    uint8_t read_count = 0, write_count = 0;
+    REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, reads,
+                           &read_count, writes, &write_count) == CS_ERR_OK);
+    std::sort(reads, reads + read_count);
+    std::sort(writes, writes + write_count);
+    std::sort(expected_reads.begin(), expected_reads.end());
+    std::sort(expected_writes.begin(), expected_writes.end());
+    REQUIRE(read_count == expected_reads.size());
+    REQUIRE(write_count == expected_writes.size());
+    REQUIRE(std::equal(expected_reads.begin(), expected_reads.end(), reads));
+    REQUIRE(std::equal(expected_writes.begin(), expected_writes.end(), writes));
+  };
+  decode(X86_INS_TEST, 6);
+  const auto& test = decoder.instruction->detail->x86;
+  constexpr uint64_t kTestFlags =
+      X86_EFLAGS_RESET_OF | X86_EFLAGS_MODIFY_SF | X86_EFLAGS_MODIFY_ZF |
+      X86_EFLAGS_UNDEFINED_AF | X86_EFLAGS_MODIFY_PF | X86_EFLAGS_RESET_CF;
+  REQUIRE(test.eflags == kTestFlags);
+  REQUIRE(test.op_count == 2);
+  REQUIRE(test.operands[0].type == X86_OP_REG);
+  REQUIRE(test.operands[0].reg == X86_REG_ESP);
+  REQUIRE(test.operands[0].size == 4);
+  REQUIRE(test.operands[0].access == CS_AC_READ);
+  REQUIRE(test.operands[1].type == X86_OP_IMM);
+  REQUIRE(test.operands[1].imm == 15);
+  REQUIRE(test.operands[1].size == 4);
+  REQUIRE(test.operands[1].access == 0);
+  effects({X86_REG_ESP}, {X86_REG_EFLAGS});
+  decode(X86_INS_JNE, 6);
+  const auto& branch = decoder.instruction->detail->x86;
+  REQUIRE(branch.eflags == X86_EFLAGS_TEST_ZF);
+  REQUIRE(branch.op_count == 1);
+  REQUIRE(branch.operands[0].type == X86_OP_IMM);
+  REQUIRE(branch.operands[0].access == 0);
+  const auto stub = static_cast<uint64_t>(branch.operands[0].imm);
+  int32_t branch_displacement = 0;
+  std::memcpy(&branch_displacement, code.data() + begin + 8, 4);
+  REQUIRE(branch_displacement > 0);
+  REQUIRE(stub == address + branch_displacement);
+  effects({X86_REG_EFLAGS}, {});
+  REQUIRE(remaining == 0);
+  const auto resume = address;
+  REQUIRE(resume == pc + begin + kPrefixSize);
+  REQUIRE(stub >= pc);
+  const uint64_t stub_offset = stub - pc;
+  const size_t prolog = view.info().code_size.prolog;
+  REQUIRE(prolog <= code.size());
+  REQUIRE(view.info().code_size.body <= code.size() - prolog);
+  REQUIRE(stub_offset >= prolog + view.info().code_size.body);
+  REQUIRE(stub_offset <= code.size());
+  // The overflow tail was queued by the prolog before this synchronization
+  // tail. This fixture queues no later tails; total size bounds this stub.
+  constexpr size_t kStubSize = 5 + 2 + 5;
+  REQUIRE(code.size() - stub_offset == kStubSize);
+  REQUIRE(view.info().stack_size >= 256);
+  REQUIRE(view.info().stack_size < 65536);
+  const auto helper =
+      backend.synchronize_guest_and_host_stack_helper_for_size(2);
+  REQUIRE(helper);
+  cursor = code.data() + stub_offset;
+  remaining = 5;  // CALL only; the following two bytes are data.
+  address = stub;
+  REQUIRE(*cursor == 0xE8);
+  decode(X86_INS_CALL, 5);
+  const auto& call = decoder.instruction->detail->x86;
+  REQUIRE(call.eflags == 0);
+  REQUIRE(call.op_count == 1);
+  REQUIRE(call.operands[0].type == X86_OP_IMM);
+  REQUIRE(call.operands[0].access == 0);
+  REQUIRE(static_cast<uint64_t>(call.operands[0].imm) ==
+          reinterpret_cast<uint64_t>(helper));
+  effects({X86_REG_RSP, X86_REG_RIP}, {X86_REG_RSP});
+  REQUIRE(remaining == 0);
+  const uint32_t frame_size = cursor[0] | (uint32_t{cursor[1]} << 8);
+  REQUIRE(frame_size == view.info().stack_size);
+  cursor += 2;
+  address += 2;
+  remaining = 5;
+  REQUIRE(*cursor == 0xE9);
+  decode(X86_INS_JMP, 5);
+  const auto& jump = decoder.instruction->detail->x86;
+  REQUIRE(jump.eflags == 0);
+  REQUIRE(jump.op_count == 1);
+  REQUIRE(jump.operands[0].type == X86_OP_IMM);
+  REQUIRE(jump.operands[0].access == 0);
+  REQUIRE(static_cast<uint64_t>(jump.operands[0].imm) == resume);
+  effects({}, {});
+  REQUIRE(remaining == 0);
+  REQUIRE(cursor == code.data() + code.size());
+  REQUIRE(address == pc + code.size());
+  return kPrefixSize;
+}
+
+void RunCapture(bool synchronize_stack) {
   REQUIRE(GetTracingMode() == 0);
   REQUIRE_FALSE(cvars::trace_functions);
   REQUIRE_FALSE(cvars::trace_function_coverage);
@@ -3255,11 +3393,12 @@ TEST_CASE("Dormant post-call capture uses fresh context and current r10",
       cvars::emit_inline_mmio_checks = mmio;
     }
   } restore_options;
-  // This bounded MOV proof excludes optional post-call sync TEST/branch/helper
-  // emission, and emits the following ordinary STW with inline MMIO checks off.
-  cvars::enable_host_guest_stack_synchronization = false;
+  // Set synchronization before backend helper initialization. The following
+  // ordinary STW is emitted with inline MMIO checks off in both fixtures.
+  cvars::enable_host_guest_stack_synchronization = synchronize_stack;
   cvars::emit_inline_mmio_checks = false;
   Fixture fixture;
+  REQUIRE(cvars::enable_host_guest_stack_synchronization == synchronize_stack);
   X64Function callee(nullptr,
                      kUnusedGuestSlot + 4);  // Unregistered, never called.
   REQUIRE(callee.machine_code() == nullptr);
@@ -3328,7 +3467,9 @@ TEST_CASE("Dormant post-call capture uses fresh context and current r10",
         pc = fixture.cache->execute_base_address() + view.execute_offset();
         span = view.allocation_size();
         emitter.Snapshot(view, scratch);
-        CheckBytes(locals, view, zero_low);
+        const size_t prefix_size =
+            synchronize_stack ? CheckStackSync(view, pc, *fixture.backend) : 0;
+        CheckBytes(locals, view, zero_low, prefix_size);
         fixture.CheckUnpublished(pc, span);
         REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
       }));
@@ -3351,6 +3492,17 @@ TEST_CASE("Dormant post-call capture uses fresh context and current r10",
   // No prepared code, call target, or guest store is invoked. No whole CALL
   // decoder, callee-runtime, actual DC3 CFG, combined post-call STW dataflow,
   // checkpoint pair, precision/ABI, mapping lease or publication proof.
+}
+
+TEST_CASE("Dormant post-call capture uses fresh context and current r10",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  RunCapture(false);
+}
+
+TEST_CASE("Dormant post-call capture bounds default-on stack synchronization",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(cvars::enable_host_guest_stack_synchronization);
+  RunCapture(true);
 }
 
 TEST_CASE("Dormant post-call capture rejects unsupported prefixes unchanged",

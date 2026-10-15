@@ -2565,10 +2565,13 @@ TEST_CASE(
   Fixture fixture;
   CurrentPPC builder(fixture.processor.frontend());
   builder.SourceOffset(kPC - 4);
-  builder.StoreGPR(0, builder.LoadConstantUint64(kR0));
+  // Synthetic setup bypasses StoreGPR's per-instruction trace bookkeeping,
+  // which is initialized by the full PPCHIRBuilder::Emit loop, not its ctor.
+  builder.StoreContext(real_hir::GPROffset(0),
+                       builder.LoadConstantUint64(kR0));
   auto entry = builder.LoadGPR(10);
   auto computed = builder.Add(entry, builder.LoadConstantInt64(1));
-  builder.StoreGPR(10, computed);
+  builder.StoreContext(real_hir::GPROffset(10), computed);
   builder.SourceOffset(kPC);
   Capture capture;
   REQUIRE(ppc::BuildDormantCheckpointGprCapture(builder, kPC, kWord, &capture));
@@ -2584,7 +2587,8 @@ TEST_CASE(
   auto access = builder.current_block()->instr_tail;
   REQUIRE(access->opcode->num == OPCODE_STORE_OFFSET);
   builder.SourceOffset(kPC + 4);
-  builder.StoreGPR(10, builder.LoadConstantUint64(kSentinel));
+  builder.StoreContext(real_hir::GPROffset(10),
+                       builder.LoadConstantUint64(kSentinel));
   builder.SourceOffset(kPC + 8);
   builder.Return();
   REQUIRE(builder.Finalize());

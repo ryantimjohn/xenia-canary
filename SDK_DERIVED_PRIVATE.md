@@ -1,14 +1,23 @@
-<!-- SDK-DERIVED PRIVATE EXPERIMENT: Do not merge into xenia-canary or submit
-upstream. .github/CONTRIBUTING.md excludes XDK-derived information, not just
-copied code. This warning does not make these changes eligible upstream. -->
+<!-- SDK-DERIVED FORK-ONLY WORK: Eligible for this fork's kinect branch after
+validation. MUST NOT enter upstream PRs or cherry-pick series targeting
+xenia-canary:canary_experimental, or any other upstream contribution.
+.github/CONTRIBUTING.md excludes XDK-derived information, not just copied code. -->
 
-# SDK-DERIVED PRIVATE EXPERIMENT
+# SDK-DERIVED FORK-ONLY WORK
 
-Do not merge this branch into xenia-canary or submit it upstream. The project's
-`.github/CONTRIBUTING.md` excludes information derived from the official XDK,
-including independently written code using that information. This isolated
-private experiment was explicitly authorized by the local user. This notice
-does not change the project's policy or license.
+These SDK-derived changes are eligible for integration into the `kinect` branch
+of the user's own fork after validation. They **MUST NOT** be included in an
+upstream PR or cherry-pick series targeting `xenia-canary:canary_experimental`,
+or in any other upstream contribution. The project's `.github/CONTRIBUTING.md`
+excludes information derived from the official XDK, including independently
+written code using that information. Keep these files, these changes, and any
+SDK-derived follow-ups out of upstream-bound contribution series.
+
+The local user explicitly authorized this fork-only work. The retained
+`SDK_DERIVED_PRIVATE.md` filename records its origin as a private experiment;
+the current integration policy permits validated use in this fork's `kinect`.
+This notice does not change the upstream project's policy or license, and
+removing a warning would not remove the SDK-derived provenance.
 
 The only behavior added is a dependency-light kernel wire codec for exactly one
 0xA40-byte Xbox 360 CONTEXT record. It accepts explicit caller-owned integer

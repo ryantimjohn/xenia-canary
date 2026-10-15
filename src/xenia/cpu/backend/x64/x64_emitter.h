@@ -275,7 +275,8 @@ class X64Emitter : public Xbyak::CodeGenerator {
   // Dormant, synchronous compile-only transaction. Requires a pristine emitter,
   // current, validated/finalized/register-allocated ordinary-profile HIR with
   // no checkpoint opcodes, a nonprotecting allocator and coincident cache
-  // write/execution mappings. Ordinary callers
+  // write/execution mappings and disabled call-time profiling when available.
+  // Ordinary callers
   // do not use this hook. True means inspection completed and storage was
   // aborted, never committed, registered, published or made into an entry.
   //

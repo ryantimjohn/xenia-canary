@@ -832,6 +832,27 @@ TEST_CASE("Real HIR x64 emission finalizes in unpublished prepared storage",
     previous_pc = pc;
     previous_span = span;
     if (attempt == 0) {
+#if XE_X64_PROFILER_AVAILABLE == 1
+      {
+        struct RestoreProfiling {
+          const bool original = cvars::instrument_call_times;
+          ~RestoreProfiling() { cvars::instrument_call_times = original; }
+        } restore;
+        cvars::instrument_call_times = true;
+        size_t profiling_callbacks = 0;
+        REQUIRE_FALSE(emitter.WithPreparedDraft(
+            builder, [&](const PreparedDraft&) { ++profiling_callbacks; }));
+        REQUIRE(profiling_callbacks == 0);
+        REQUIRE(emitter.getCode() == original_scratch);
+        emitter.CheckDiscarded();
+        fixture.CheckAborted(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_inputs_size);
+        // The next exact reservation offset also proves no span was consumed.
+        // The private profiler map is unobserved; the production gate rejects
+        // before protected Emit can call its mutating record accessor.
+      }
+      REQUIRE_FALSE(cvars::instrument_call_times);
+#endif
       // Orphan/malformed checkpoint HIR is rejected before any emission or
       // reservation. The next transaction's exact offset checks nonallocation.
       CurrentHIR checkpoint;

@@ -165,6 +165,13 @@ bool X64Emitter::Emit(GuestFunction* function, HIRBuilder* builder,
 bool X64Emitter::WithPreparedDraft(
     HIRBuilder& builder,
     const std::function<void(const PreparedDraft&)>& inspect) {
+#if XE_X64_PROFILER_AVAILABLE == 1
+  // Protected emission would allocate a backend profiler record for guest 0,
+  // which cannot be rolled back by aborting the prepared code reservation.
+  if (cvars::instrument_call_times) {
+    return false;
+  }
+#endif
   if (prepared_draft_active_ || !inspect || !processor_ || !code_cache_ ||
       !allocator_ || allocator_->useProtect() ||
       processor_->compilation_options().profile !=

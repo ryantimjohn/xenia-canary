@@ -2318,7 +2318,7 @@ void CheckBytes(std::vector<Local>& locals,
       }
       if (destination.type == X86_OP_MEM ||
           (!inc && !swap && source.type == X86_OP_MEM)) {
-        REQUIRE_FALSE(arithmetic || swap);
+        REQUIRE_FALSE((arithmetic || swap));
         const auto& mem = destination.type == X86_OP_MEM ? destination : source;
         REQUIRE((mem.size == 4 || mem.size == 8));
         REQUIRE((mem.mem.base == X86_REG_RSI || mem.mem.base == X86_REG_RSP ||
@@ -2381,10 +2381,10 @@ void CheckBytes(std::vector<Local>& locals,
         }
         REQUIRE(left.guest == 10);
         REQUIRE(left.delta == 0);
-        REQUIRE_FALSE(left.low32 || left.swapped);
+        REQUIRE_FALSE((left.low32 || left.swapped));
         REQUIRE(right.guest == -2);
         REQUIRE(right.delta == 1);
-        REQUIRE_FALSE(right.low32 || right.swapped);
+        REQUIRE_FALSE((right.low32 || right.swapped));
         REQUIRE(adds++ == 0);
         registers[Register(destination)] = {10, 1, false, false};
         continue;
@@ -2518,7 +2518,7 @@ void CheckBytes(std::vector<Local>& locals,
             REQUIRE_FALSE(value.swapped);
           } else {
             REQUIRE(value.guest >= 0);
-            REQUIRE_FALSE(value.low32 || value.swapped);
+            REQUIRE_FALSE((value.low32 || value.swapped));
           }
           memory[local] = value;
           ++writes[local];

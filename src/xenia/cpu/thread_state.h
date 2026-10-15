@@ -38,8 +38,6 @@ class ThreadState {
   static uint32_t GetThreadID();
 
  private:
-  friend class Processor;
-  bool scalar_access_first_chance_active_ = false;
   Processor* processor_;
   Memory* memory_;
   void* backend_data_;

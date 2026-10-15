@@ -306,6 +306,15 @@ class Processor {
   Module* builtin_module_ = nullptr;
   uint32_t next_builtin_address_ = 0xFFFF0000u;
 
+  // Maps thread ID to state. Updated on thread create, and threads are never
+  // removed. Must be guarded with the global lock.
+  std::map<uint32_t, std::unique_ptr<ThreadDebugInfo>> thread_debug_infos_;
+
+  // TODO(benvanik): cleanup/change structures.
+  std::vector<Breakpoint*> breakpoints_;
+
+  Irql irql_;
+
   struct ScalarAccessFirstChanceSite {
     Module* module;
     uint64_t module_generation;
@@ -317,6 +326,7 @@ class Processor {
                                            void* arg1);
   void OfferScalarAccessFirstChance(ppc::PPCContext* context,
                                     const ScalarAccessFirstChanceSite& site);
+  // Append state to retain the offsets of existing Processor members.
   uint64_t next_scalar_access_module_generation_ = 1;
   bool scalar_access_site_limit_reported_ = false;
   std::map<Module*, uint64_t> scalar_access_module_generations_;
@@ -325,15 +335,6 @@ class Processor {
       scalar_access_first_chance_sites_;
   std::shared_ptr<const ScalarAccessFirstChanceHandler>
       scalar_access_first_chance_handler_;
-
-  // Maps thread ID to state. Updated on thread create, and threads are never
-  // removed. Must be guarded with the global lock.
-  std::map<uint32_t, std::unique_ptr<ThreadDebugInfo>> thread_debug_infos_;
-
-  // TODO(benvanik): cleanup/change structures.
-  std::vector<Breakpoint*> breakpoints_;
-
-  Irql irql_;
 };
 
 }  // namespace cpu

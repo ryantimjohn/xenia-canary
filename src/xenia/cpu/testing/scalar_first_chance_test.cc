@@ -189,6 +189,12 @@ TEST_CASE(
         // callback also proves that no registry lock spans guest invocation.
         site->Call(thread, 0xBCBCBCBC);
         CHECK(callbacks == 1);
+        {
+          ThreadState nested(fixture.processor.get(), 0x101);
+          site->Call(&nested, 0xBCBCBCBC);
+          CHECK(callbacks == 1);
+          CHECK(ThreadState::Get() == thread);
+        }
         fixture.processor->set_scalar_access_first_chance_handler({});
         thread->context()->r[10] = 0xBAD;
         thread->context()->r[0] = 0;

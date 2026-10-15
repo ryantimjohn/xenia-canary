@@ -31,6 +31,9 @@ namespace {
 // current guest protection. Neither check prevents a concurrent mapping change.
 constexpr uint32_t kZeroGuardEnd = 0x10000;
 [[maybe_unused]] constexpr size_t kMaxFirstChanceSites = 8192;
+// Conservative: every nested offer on this host thread declines, including
+// offers involving a different guest ThreadState during a callback.
+thread_local bool scalar_access_first_chance_active = false;
 
 uint32_t LiteralAddress(uint32_t word) {
   const uint32_t low = word & 0xFFFF;
@@ -133,7 +136,7 @@ void Processor::OfferScalarAccessFirstChance(
   auto* thread = ThreadState::Get();
   if (!cvars::zero_page_scalar_first_chance || !cvars::protect_zero ||
       !thread || thread->processor() != this || thread->context() != context ||
-      thread->scalar_access_first_chance_active_) {
+      scalar_access_first_chance_active) {
     return;
   }
   const uint32_t address = LiteralAddress(site.raw_instruction);
@@ -173,7 +176,7 @@ void Processor::OfferScalarAccessFirstChance(
     bool& active;
     explicit ActiveScope(bool& value) : active(value) { active = true; }
     ~ActiveScope() { active = false; }
-  } active(thread->scalar_access_first_chance_active_);
+  } active(scalar_access_first_chance_active);
   // The retained immutable handler is invoked without any registry/memory lock.
   // It may enter guest code on this thread. No continuation result is accepted.
   (*handler)(thread, fault);

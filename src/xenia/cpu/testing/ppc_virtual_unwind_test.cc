@@ -1,3 +1,8 @@
+// FORK-ONLY INTEGRATION STAGING: Intended for this fork's kinect branch.
+// Keep SDK-derived follow-ups out of upstream PR/cherry-pick series targeting
+// xenia-canary:canary_experimental or other upstream contributions. The added
+// chain fixtures use supplied-game instruction bytes and synthetic owned state.
+
 /**
  ******************************************************************************
  * Xenia : Xbox 360 Emulator Research Project                                 *
@@ -111,6 +116,46 @@ struct Fixture {
   }
 };
 
+// Both complete instruction arrays above match the supplied image. These stack
+// bytes and register values are synthetic caller-owned inputs. Their explicit
+// coherent provenance describes this fixture, never an actual fault capture.
+struct ChainFixture {
+  static constexpr uint32_t kCallerSp = Fixture::kSp + 0x60;
+  static constexpr uint32_t kOuterSp = Fixture::kSp + 0xD0;
+
+  Fixture first{false};
+  Fixture second{true};
+  std::vector<uint8_t> stack = std::vector<uint8_t>(0xD0);
+  VirtualUnwindRegisters registers = first.registers;
+
+  ChainFixture() {
+    PutBe32(stack, 0x00, kCallerSp);
+    PutBe32(stack, 0x58, 0x82313054);
+    PutBe32(stack, 0x60, kOuterSp);
+    PutBe64(stack, 0xC0, Fixture::kSavedR31);
+    PutBe32(stack, 0xC8, 0x827FC5E0);
+    registers.gpr[31] = kCallerSp;
+    registers.low32_valid = uint32_t{1} << 31;
+  }
+
+  OwnedStackSnapshotView Stack() const {
+    return {Fixture::kSp, stack, Provenance::kCoherentPrecise};
+  }
+
+  VirtualUnwindRegisters AfterFirst(
+      const VirtualUnwindResult& first_result) const {
+    auto next = registers;
+    next.control_pc = first_result.return_address32;
+    next.gpr[1] = first_result.caller_sp_address32;
+    // Only an address32 was recovered. Do not claim its high bits are known.
+    next.full64_valid &= ~(uint32_t{1} << 1);
+    next.low32_valid |= uint32_t{1} << 1;
+    // The first recipe cannot write r31 and assumes its direct callees preserve
+    // nonvolatile state. Carry the original valid low32; A recovers no r31.
+    return next;
+  }
+};
+
 void CheckFailure(const VirtualUnwindResult& result, Status status) {
   CHECK(result.status == status);
   CHECK(result.caller_sp_address32 == 0);
@@ -151,6 +196,69 @@ TEST_CASE("A-frame output does not manufacture B-frame register validity",
   REQUIRE(first_frame.status == Status::kSupportedPartialFrame);
   second.registers.low32_valid = 0;
   CheckFailure(second.Unwind(*second_recipe.recipe), Status::kMissingRegister);
+}
+
+TEST_CASE("Observed body recipes chain through one synthetic owned stack",
+          "[cpu][virtual-unwind][chain]") {
+  ChainFixture fixture;
+  const auto first_recipe = fixture.first.Build();
+  const auto second_recipe = fixture.second.Build();
+  REQUIRE(first_recipe.recipe);
+  REQUIRE(second_recipe.recipe);
+
+  const auto first = TryVirtualUnwindFrame(*first_recipe.recipe,
+                                           fixture.registers, fixture.Stack());
+  REQUIRE(first.status == Status::kSupportedPartialFrame);
+  CHECK(first.caller_sp_address32 == ChainFixture::kCallerSp);
+  CHECK(first.return_address32 == 0x82313054);
+  CHECK_FALSE(first.recovered_r31_valid);
+  CHECK(first.recovered_r31_full64 == 0);
+
+  const auto caller = fixture.AfterFirst(first);
+  CHECK(caller.control_pc == 0x82313054);
+  CHECK(caller.gpr[31] == ChainFixture::kCallerSp);
+  CHECK((caller.low32_valid & (uint32_t{1} << 31)) != 0);
+  CHECK((caller.full64_valid & (uint32_t{1} << 1)) == 0);
+  const auto second =
+      TryVirtualUnwindFrame(*second_recipe.recipe, caller, fixture.Stack());
+  REQUIRE(second.status == Status::kSupportedPartialFrame);
+  CHECK(second.caller_sp_address32 == ChainFixture::kOuterSp);
+  CHECK(second.return_address32 == 0x827FC5E0);
+  CHECK(second.recovered_r31_valid);
+  CHECK(second.recovered_r31_full64 == Fixture::kSavedR31);
+}
+
+TEST_CASE("A successful first frame cannot validate a damaged second frame",
+          "[cpu][virtual-unwind][chain]") {
+  ChainFixture fixture;
+  Status expected = Status::kMissingRegister;
+  SECTION("The original r31 low bits must have explicit capture validity") {
+    fixture.registers.low32_valid = 0;
+  }
+  SECTION("Carried r31 must equal the second frame's SP in its low32 bits") {
+    fixture.registers.gpr[31] = ChainFixture::kCallerSp + 8;
+    expected = Status::kInconsistentFrame;
+  }
+  SECTION("The second backchain must match its recognized frame size") {
+    PutBe32(fixture.stack, 0x60, ChainFixture::kOuterSp + 16);
+    expected = Status::kInconsistentFrame;
+  }
+  SECTION("The second saved LR must fit wholly inside the owned snapshot") {
+    fixture.stack.resize(0xCB);
+    expected = Status::kBounds;
+  }
+  const auto first_recipe = fixture.first.Build();
+  const auto second_recipe = fixture.second.Build();
+  REQUIRE(first_recipe.recipe);
+  REQUIRE(second_recipe.recipe);
+  const auto first = TryVirtualUnwindFrame(*first_recipe.recipe,
+                                           fixture.registers, fixture.Stack());
+  REQUIRE(first.status == Status::kSupportedPartialFrame);
+  CHECK(first.caller_sp_address32 == ChainFixture::kCallerSp);
+  CHECK(first.return_address32 == 0x82313054);
+  const auto second = TryVirtualUnwindFrame(
+      *second_recipe.recipe, fixture.AfterFirst(first), fixture.Stack());
+  CheckFailure(second, expected);
 }
 
 TEST_CASE("Saved return address is kept exact at a function boundary",

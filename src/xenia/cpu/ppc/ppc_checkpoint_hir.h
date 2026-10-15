@@ -51,6 +51,21 @@ bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
                                       uint32_t raw_instruction,
                                       DormantCheckpointGprCapture* output);
 
+// Separate, equally dormant construction-time alternative for exactly two
+// unlabelled blocks. The first has the same pure typed GPR prefix, ending in
+// SOURCE_OFFSET/constant SET_RETURN_ADDRESS/constant LR store/direct CALL with
+// flags zero; the second starts at that return PC and has the entry helper's
+// same-block prefix. No other transfer, labels, analysis edges or locals are
+// accepted. Fresh context loads represent the returning call's current context,
+// not pre-call SSA; this assumes the ordinary returning guest-call contract.
+// All rejection precedes mutation. Later construction can invalidate this
+// shape: callers must independently prove finalized CFG and emitted effects.
+// This neither admits a game CFG nor proves callee runtime behavior or CALL
+// lowering. The entry helper and checkpoint-pair restrictions remain unchanged.
+bool BuildDormantPostCallCheckpointGprCapture(
+    hir::HIRBuilder& builder, uint32_t guest_pc, uint32_t raw_instruction,
+    DormantCheckpointGprCapture* output);
+
 // Constructs retained, non-executable requests for D-form lwz/stw. The pair ID
 // is unique within this HIR function, not a runtime epoch or lifetime proof.
 // The request owns numeric guest PC/raw instruction data; it does NOT store a

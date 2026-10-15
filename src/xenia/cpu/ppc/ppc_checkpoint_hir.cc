@@ -11,6 +11,7 @@
 
 #include <unordered_set>
 
+#include "xenia/cpu/function.h"
 #include "xenia/cpu/ppc/ppc_context.h"
 
 namespace xe::cpu::ppc {
@@ -119,31 +120,7 @@ bool LoadWriteback(const Instr* access, uint32_t reg) {
          store->src2.value == extend->dest;
 }
 
-}  // namespace
-
-bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
-                                      uint32_t guest_pc,
-                                      uint32_t raw_instruction,
-                                      DormantCheckpointGprCapture* output) {
-  if (!output || output->ea_slot || HIRBuilder::GetCurrent() != &builder ||
-      !SupportedWord(guest_pc, raw_instruction) || !builder.locals().empty()) {
-    return false;
-  }
-  for (auto slot : output->gpr_slots) {
-    if (slot) {
-      return false;
-    }
-  }
-  auto block = builder.current_block();
-  if (!block || block != builder.first_block() ||
-      block != builder.last_block() || block->prev || block->next ||
-      block->label_head || block->label_tail || block->incoming_edge_head ||
-      block->outgoing_edge_head || block->incoming_values ||
-      !block->instr_tail ||
-      block->instr_tail->opcode->num != OPCODE_SOURCE_OFFSET ||
-      block->instr_tail->src1.offset != guest_pc) {
-    return false;
-  }
+bool CapturePrefix(const Block* block, uint32_t guest_pc, const Instr* stop) {
   const auto gpr_offset = [](uint64_t offset) {
     return offset >= offsetof(PPCContext, r) &&
            offset < offsetof(PPCContext, r) + sizeof(PPCContext::r) &&
@@ -156,8 +133,8 @@ bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
   };
   uint64_t previous_pc = 0;
   bool has_marker = false;
-  for (auto i = block->instr_head; i; i = i->next) {
-    if (i->block != block || i->flags) {
+  for (auto i = block->instr_head; i != stop; i = i->next) {
+    if (!i || i->block != block || i->flags) {
       return false;
     }
     switch (i->opcode->num) {
@@ -195,6 +172,81 @@ bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
       return false;
     }
   }
+  return true;
+}
+
+bool BuildDormantCheckpointGprCaptureImpl(hir::HIRBuilder& builder,
+                                          uint32_t guest_pc,
+                                          uint32_t raw_instruction,
+                                          DormantCheckpointGprCapture* output,
+                                          bool after_call) {
+  if (!output || output->ea_slot || HIRBuilder::GetCurrent() != &builder ||
+      !SupportedWord(guest_pc, raw_instruction) || !builder.locals().empty()) {
+    return false;
+  }
+  for (auto slot : output->gpr_slots) {
+    if (slot) {
+      return false;
+    }
+  }
+  auto block = builder.current_block();
+  if (!block || block != builder.last_block() || block->next ||
+      block->label_head || block->label_tail || block->incoming_edge_head ||
+      block->outgoing_edge_head || block->incoming_values ||
+      !block->instr_tail ||
+      block->instr_tail->opcode->num != OPCODE_SOURCE_OFFSET ||
+      block->instr_tail->src1.offset != guest_pc) {
+    return false;
+  }
+  if (!after_call) {
+    if (block != builder.first_block() || block->prev) {
+      return false;
+    }
+  } else {
+    // Before Finalize/CFG, reject every alternative HIR route: exactly two
+    // unlabelled blocks, no pre-existing analysis, and no transfer other than
+    // the final ordinary direct call in the predecessor. This is a construction
+    // snapshot, not a proof against later builder mutation or runtime
+    // nonreturn.
+    const auto predecessor = block->prev;
+    if (!predecessor || predecessor != builder.first_block() ||
+        predecessor->prev || predecessor->next != block ||
+        predecessor->label_head || predecessor->label_tail ||
+        predecessor->incoming_edge_head || predecessor->outgoing_edge_head ||
+        predecessor->incoming_values) {
+      return false;
+    }
+    const auto call = predecessor->instr_tail;
+    const auto lr_store = call ? call->prev : nullptr;
+    const auto return_address = lr_store ? lr_store->prev : nullptr;
+    const auto marker = return_address ? return_address->prev : nullptr;
+    if (!call || call->block != predecessor ||
+        call->opcode->num != OPCODE_CALL || call->flags || call->dest ||
+        !call->src1.symbol || !call->src1.symbol->is_guest() ||
+        !call->src1.symbol->address() || (call->src1.symbol->address() & 3) ||
+        call->src2.value || call->src3.value || !lr_store ||
+        lr_store->opcode->num != OPCODE_STORE_CONTEXT || lr_store->flags ||
+        lr_store->block != predecessor || lr_store->dest ||
+        lr_store->src1.offset != offsetof(PPCContext, lr) || !return_address ||
+        return_address->opcode->num != OPCODE_SET_RETURN_ADDRESS ||
+        return_address->flags || return_address->block != predecessor ||
+        return_address->dest || !marker || marker->block != predecessor ||
+        marker->opcode->num != OPCODE_SOURCE_OFFSET || marker->flags ||
+        marker->src1.offset > UINT32_MAX - 4 ||
+        marker->src1.offset + 4 > guest_pc ||
+        !Constant64(return_address->src1.value, marker->src1.offset + 4) ||
+        !Constant64(lr_store->src2.value, marker->src1.offset + 4) ||
+        !block->instr_head ||
+        block->instr_head->opcode->num != OPCODE_SOURCE_OFFSET ||
+        block->instr_head->src1.offset != marker->src1.offset + 4 ||
+        !CapturePrefix(predecessor, static_cast<uint32_t>(marker->src1.offset),
+                       return_address)) {
+      return false;
+    }
+  }
+  if (!CapturePrefix(block, guest_pc, nullptr)) {
+    return false;
+  }
   // All rejection checks precede HIR/local allocation and output mutation.
   std::array<Value*, 32> values{};
   DormantCheckpointGprCapture result;
@@ -216,6 +268,23 @@ bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
   builder.StoreLocal(result.ea_slot, ea);
   *output = result;
   return true;
+}
+
+}  // namespace
+
+bool BuildDormantCheckpointGprCapture(hir::HIRBuilder& builder,
+                                      uint32_t guest_pc,
+                                      uint32_t raw_instruction,
+                                      DormantCheckpointGprCapture* output) {
+  return BuildDormantCheckpointGprCaptureImpl(builder, guest_pc,
+                                              raw_instruction, output, false);
+}
+
+bool BuildDormantPostCallCheckpointGprCapture(
+    hir::HIRBuilder& builder, uint32_t guest_pc, uint32_t raw_instruction,
+    DormantCheckpointGprCapture* output) {
+  return BuildDormantCheckpointGprCaptureImpl(builder, guest_pc,
+                                              raw_instruction, output, true);
 }
 
 bool BuildCheckpointScalarPair(hir::HIRBuilder& builder, uint64_t pair_id,

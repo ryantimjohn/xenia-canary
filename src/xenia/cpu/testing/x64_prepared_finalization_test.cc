@@ -27,6 +27,7 @@
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
+#include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/backend/x64/x64_stack_layout.h"
 #include "xenia/cpu/backend/x64/x64_tracers.h"
 #include "xenia/cpu/compiler/compiler.h"
@@ -2854,6 +2855,602 @@ TEST_CASE("Unpublished x64 local stores retain nonzero INT64 constant bits",
 }
 
 }  // namespace local_i64_constants
+
+namespace postcall_gpr {
+
+using namespace hir;
+using Capture = ppc::DormantCheckpointGprCapture;
+using Local = midblock_gpr::Local;
+constexpr uint32_t kPC = 0x80009010;
+constexpr uint32_t kCallPC = kPC - 8;
+constexpr uint32_t kWord = 0x91400000;
+
+Value* Prefix(HIRBuilder& builder, X64Function& callee) {
+  builder.SourceOffset(kPC - 16);
+  auto before = builder.LoadContext(real_hir::GPROffset(3), INT64_TYPE);
+  builder.StoreContext(real_hir::GPROffset(3),
+                       builder.Add(before, builder.LoadConstantInt64(99)));
+  builder.StoreContext(real_hir::GPROffset(10), builder.LoadConstantInt64(55));
+  builder.SourceOffset(kCallPC);
+  builder.SetReturnAddress(builder.LoadConstantUint64(kCallPC + 4));
+  builder.StoreContext(offsetof(ppc::PPCContext, lr),
+                       builder.LoadConstantUint64(kCallPC + 4));
+  builder.Call(&callee);
+  builder.SourceOffset(kCallPC + 4);
+  builder.StoreContext(real_hir::GPROffset(10), builder.LoadConstantInt64(1));
+  builder.SourceOffset(kPC);
+  return before;
+}
+
+class PromotionProof final : public compiler::CompilerPass {
+ public:
+  PromotionProof(Block* body, const Capture& capture, bool& observed)
+      : body_(body), capture_(capture), observed_(observed) {}
+  bool Run(HIRBuilder* builder) override {
+    const auto predecessor = builder->first_block();
+    REQUIRE(predecessor->next == body_);
+    REQUIRE(body_->prev == predecessor);
+    REQUIRE(body_->next == nullptr);
+    REQUIRE(predecessor->incoming_edge_head == nullptr);
+    REQUIRE(body_->outgoing_edge_head == nullptr);
+    auto branch = predecessor->instr_tail;
+    REQUIRE(branch->opcode->num == OPCODE_BRANCH);
+    REQUIRE(branch->src1.label->block == body_);
+    REQUIRE(branch->prev->opcode->num == OPCODE_CALL);
+    REQUIRE(branch->prev->flags == 0);
+    auto edge = body_->incoming_edge_head;
+    REQUIRE(edge);
+    REQUIRE(edge == predecessor->outgoing_edge_head);
+    REQUIRE(edge->src == predecessor);
+    REQUIRE(edge->dest == body_);
+    REQUIRE(edge->flags == (Edge::UNCONDITIONAL | Edge::DOMINATES));
+    REQUIRE(edge->incoming_next == nullptr);
+    REQUIRE(edge->incoming_prev == nullptr);
+    REQUIRE(edge->outgoing_next == nullptr);
+    REQUIRE(edge->outgoing_prev == nullptr);
+    size_t captures = 0, context_stores = 0;
+    for (auto i = body_->instr_head; i; i = i->next) {
+      if (i->opcode->num == OPCODE_STORE_CONTEXT) {
+        REQUIRE(i->src1.offset == real_hir::GPROffset(10));
+        REQUIRE(i->src2.value->IsConstant());
+        REQUIRE(i->src2.value->constant.u64 == capture_stw::kSentinel);
+        ++context_stores;  // The earlier post-call r10=1 context store is dead.
+      }
+      if (i->opcode->num != OPCODE_STORE_LOCAL) {
+        continue;
+      }
+      if (captures < 32) {
+        REQUIRE(i->src1.value == capture_.gpr_slots[captures]);
+        auto definition = i->src2.value->def;
+        REQUIRE(definition);
+        REQUIRE(definition->block == body_);
+        if (captures == 10) {
+          REQUIRE(definition->opcode->num == OPCODE_ASSIGN);
+          REQUIRE(definition->src1.value->IsConstant());
+          REQUIRE(definition->src1.value->constant.u64 == 1);
+        } else {
+          REQUIRE(definition->opcode->num == OPCODE_LOAD_CONTEXT);
+          REQUIRE(definition->src1.offset == real_hir::GPROffset(captures));
+        }
+      } else {
+        REQUIRE(captures == 32);
+        REQUIRE(i->src1.value == capture_.ea_slot);
+        REQUIRE(i->src2.value->IsConstant());
+        REQUIRE(i->src2.value->type == INT32_TYPE);
+        REQUIRE(i->src2.value->constant.u32 == 0);
+      }
+      ++captures;
+    }
+    REQUIRE(captures == 33);
+    REQUIRE(context_stores == 1);
+    observed_ = true;
+    return true;
+  }
+
+ private:
+  Block* body_;
+  const Capture& capture_;
+  bool& observed_;
+};
+
+std::vector<Local> CheckHIR(HIRBuilder& builder, Block* body,
+                            const Capture& capture,
+                            const backend::MachineInfo& machine) {
+  std::vector<Local> locals;
+  for (auto slot : builder.locals()) {
+    int owner = -1;
+    for (size_t reg = 0; reg < 32; ++reg) {
+      if (slot == capture.gpr_slots[reg]) {
+        owner = static_cast<int>(reg);
+      }
+    }
+    if (slot == capture.ea_slot) {
+      owner = 32;
+    }
+    REQUIRE(slot->type == (owner == 32 ? INT32_TYPE : INT64_TYPE));
+    REQUIRE(std::none_of(locals.begin(), locals.end(),
+                         [&](const Local& l) { return l.slot == slot; }));
+    locals.push_back({slot, owner == 32 ? 4u : 8u, owner});
+  }
+  REQUIRE(locals.size() >= 33);
+  REQUIRE(locals.size() - 33 >= 31 - X64Emitter::GPR_COUNT);
+  size_t captures = 0, loads = 0;
+  bool interval = false, finished = false;
+  for (auto i = body->instr_head; i; i = i->next) {
+    if (i->opcode->num == OPCODE_SOURCE_OFFSET) {
+      if (i->src1.offset == kPC) {
+        interval = true;
+      }
+      if (i->src1.offset == kPC + 4) {
+        interval = false;
+        finished = true;
+      }
+      continue;
+    }
+    if (!interval) {
+      continue;
+    }
+    REQUIRE(i->flags == 0);
+    if (i->opcode->num == OPCODE_LOAD_CONTEXT) {
+      canonical_gpr::CheckAllocated(i->dest, machine);
+      REQUIRE(i->dest->def->block == body);
+      REQUIRE(i->src1.offset != real_hir::GPROffset(10));
+      ++loads;
+      continue;
+    }
+    REQUIRE((i->opcode->num == OPCODE_LOAD_LOCAL ||
+             i->opcode->num == OPCODE_STORE_LOCAL));
+    auto found =
+        std::find_if(locals.begin(), locals.end(),
+                     [&](const Local& l) { return l.slot == i->src1.value; });
+    REQUIRE(found != locals.end());
+    if (i->opcode->num == OPCODE_LOAD_LOCAL) {
+      REQUIRE(found->capture == -1);
+      canonical_gpr::CheckAllocated(i->dest, machine);
+      REQUIRE(i->dest->GetLocalSlot() == found->slot);
+      ++found->reads;
+    } else {
+      REQUIRE(i->src2.value->type ==
+              (found->width == 4 ? INT32_TYPE : INT64_TYPE));
+      if (found->capture >= 0) {
+        REQUIRE(found->capture == static_cast<int>(captures++));
+        if (found->capture == 10 || found->capture == 32) {
+          REQUIRE(i->src2.value->IsConstant());
+          if (found->capture == 10) {
+            REQUIRE(i->src2.value->constant.u64 == 1);
+          } else {
+            REQUIRE(i->src2.value->constant.u32 == 0);
+          }
+        } else {
+          canonical_gpr::CheckAllocated(i->src2.value, machine);
+        }
+      } else {
+        canonical_gpr::CheckAllocated(i->src2.value, machine);
+        REQUIRE(i->src2.value->GetLocalSlot() == found->slot);
+      }
+      ++found->writes;
+    }
+  }
+  REQUIRE(finished);
+  REQUIRE(captures == 33);
+  REQUIRE(loads == 31);
+  for (const auto& local : locals) {
+    REQUIRE(local.writes == 1);
+    REQUIRE((local.capture >= 0 ? local.reads == 0 : local.reads > 0));
+  }
+  return locals;
+}
+
+// Only the source-delimited capture interval is decoded. Tokens here denote
+// fresh post-call context inputs, with no relation to pre-call values or to an
+// observed callee. Existing entry/STW decoders are intentionally unchanged.
+void CheckBytes(std::vector<Local>& locals,
+                const X64Emitter::PreparedDraft& view, bool membase_low_zero) {
+  REQUIRE(view.code().size() <= real_hir::kMaxBytes);
+  const auto stack = view.info().stack_size;
+  REQUIRE((stack + 8) % 16 == 0);
+  for (auto& local : locals) {
+    REQUIRE(local.slot->IsConstant());
+    REQUIRE(local.slot->type == INT32_TYPE);
+    local.offset = local.slot->constant.u32;
+    REQUIRE(local.offset >= StackLayout::GUEST_STACK_SIZE);
+    REQUIRE(local.offset % local.width == 0);
+    REQUIRE(local.width <= stack);
+    REQUIRE(local.offset <= stack - local.width);
+  }
+  for (size_t a = 0; a < locals.size(); ++a) {
+    for (size_t b = a + 1; b < locals.size(); ++b) {
+      REQUIRE((locals[a].offset + locals[a].width <= locals[b].offset ||
+               locals[b].offset + locals[b].width <= locals[a].offset));
+    }
+  }
+  const auto map = view.source_map();
+  constexpr std::array<uint32_t, 7> pcs = {kPC - 16, kCallPC, kCallPC + 4, kPC,
+                                           kPC + 4,  kPC + 8, kPC + 12};
+  REQUIRE(map.size() == pcs.size());
+  const auto prolog = view.info().code_size.prolog;
+  REQUIRE(prolog <= view.code().size());
+  REQUIRE(view.info().code_size.body <= view.code().size() - prolog);
+  for (size_t n = 0; n < map.size(); ++n) {
+    REQUIRE(map[n].guest_address == pcs[n]);
+    REQUIRE(map[n].code_offset >= prolog);
+    REQUIRE(map[n].code_offset <= prolog + view.info().code_size.body);
+    if (n) {
+      REQUIRE(map[n].code_offset >= map[n - 1].code_offset);
+    }
+  }
+  REQUIRE(map[3].code_offset < map[4].code_offset);
+  REQUIRE(map[4].code_offset - map[3].code_offset <= 2048);
+  using Token = midblock_gpr::Token;
+  std::array<Token, X64Emitter::GPR_COUNT> registers{};
+  std::vector<Token> memory(locals.size());
+  std::vector<size_t> reads(locals.size()), writes(locals.size());
+  std::array<size_t, 32> inputs{};
+  size_t captures = 0;
+  real_hir::Decoder decoder;
+  REQUIRE(decoder.instruction);
+  const uint8_t* cursor = view.code().data() + map[3].code_offset;
+  size_t remaining = map[4].code_offset - map[3].code_offset;
+  uint64_t address = map[3].code_offset;
+  while (remaining) {
+    REQUIRE(cs_disasm_iter(decoder.handle, &cursor, &remaining, &address,
+                           decoder.instruction));
+    REQUIRE(decoder.instruction->id == X86_INS_MOV);
+    REQUIRE(decoder.instruction->detail);
+    const auto& x = decoder.instruction->detail->x86;
+    REQUIRE(x.addr_size == 8);
+    REQUIRE(x.op_count == 2);
+    REQUIRE(x.eflags == 0);
+    for (auto prefix : x.prefix) {
+      REQUIRE(prefix == 0);
+    }
+    const auto& destination = x.operands[0];
+    const auto& source = x.operands[1];
+    // This recipe's HIR operations each lower to one memory MOV. Reject
+    // unaccounted register copies/materializations as well as non-MOV effects.
+    REQUIRE(((destination.type == X86_OP_REG && source.type == X86_OP_MEM) ||
+             (destination.type == X86_OP_MEM && source.type != X86_OP_MEM)));
+    REQUIRE((destination.size == 4 || destination.size == 8));
+    REQUIRE(destination.access == CS_AC_WRITE);
+    REQUIRE(source.access == (source.type == X86_OP_IMM ? 0 : CS_AC_READ));
+    std::vector<unsigned> expected_reads, expected_writes;
+    auto read = [&](unsigned reg) {
+      if (std::find(expected_reads.begin(), expected_reads.end(), reg) ==
+          expected_reads.end()) {
+        expected_reads.push_back(reg);
+      }
+    };
+    auto local_index = [&](const cs_x86_op& op) {
+      REQUIRE(op.mem.base == X86_REG_RSP);
+      auto found =
+          std::find_if(locals.begin(), locals.end(), [&](const Local& l) {
+            return op.mem.disp == l.offset && op.size == l.width;
+          });
+      REQUIRE(found != locals.end());
+      return static_cast<size_t>(found - locals.begin());
+    };
+    for (const auto* op : {&source, &destination}) {
+      if (op->type == X86_OP_MEM) {
+        REQUIRE((op->size == 4 || op->size == 8));
+        REQUIRE((op->mem.base == X86_REG_RSI || op->mem.base == X86_REG_RSP));
+        REQUIRE(op->mem.index == X86_REG_INVALID);
+        REQUIRE(op->mem.segment == X86_REG_INVALID);
+        read(op->mem.base);
+      }
+    }
+    Token value;
+    if (source.type == X86_OP_IMM) {
+      value = {-2, source.imm, false};
+    } else if (source.type == X86_OP_REG) {
+      read(source.reg);
+      if (source.reg == X86_REG_EDI) {
+        REQUIRE(membase_low_zero);
+        REQUIRE(source.size == 4);
+        value = {-2, 0, true};
+      } else {
+        value = registers[midblock_gpr::Register(source)];
+        REQUIRE(value.guest != -1);
+        if (source.size == 4) {
+          value.low32 = true;
+        }
+      }
+    } else {
+      REQUIRE(source.type == X86_OP_MEM);
+      if (source.mem.base == X86_REG_RSI) {
+        REQUIRE(source.size == 8);
+        REQUIRE(source.mem.disp >= real_hir::GPROffset(0));
+        const auto offset = source.mem.disp - real_hir::GPROffset(0);
+        REQUIRE(offset % 8 == 0);
+        REQUIRE(offset / 8 < 32);
+        const auto reg = static_cast<size_t>(offset / 8);
+        REQUIRE(reg != 10);
+        REQUIRE(inputs[reg]++ == 0);
+        value = {static_cast<int>(reg), 0, false};
+      } else {
+        const auto local = local_index(source);
+        REQUIRE(locals[local].capture == -1);
+        REQUIRE(writes[local] == 1);
+        value = memory[local];
+        ++reads[local];
+      }
+    }
+    if (destination.type == X86_OP_REG) {
+      const auto reg = midblock_gpr::Register(destination);
+      if (destination.size == 4) {
+        // A real 32-bit destination clears its upper half. Only literals may
+        // subsequently serve a full-width capture; unknown tokens stay narrow.
+        if (value.guest == -2) {
+          value.delta = static_cast<uint32_t>(value.delta);
+        }
+        value.low32 = value.guest != -2;
+      }
+      registers[reg] = value;
+      expected_writes.push_back(destination.reg);
+    } else {
+      REQUIRE(destination.type == X86_OP_MEM);
+      const auto local = local_index(destination);
+      const auto owner = locals[local].capture;
+      if (owner >= 0) {
+        REQUIRE(owner == static_cast<int>(captures++));
+        if (owner == 10 || owner == 32) {
+          REQUIRE(value.guest == -2);
+          REQUIRE(value.delta == (owner == 10 ? 1 : 0));
+        } else {
+          REQUIRE(value.guest == owner);
+          REQUIRE(value.delta == 0);
+          REQUIRE_FALSE(value.low32);
+        }
+      } else {
+        REQUIRE(value.guest >= 0);
+        REQUIRE(value.guest != 10);
+        REQUIRE_FALSE(value.low32);
+      }
+      memory[local] = value;
+      ++writes[local];
+    }
+    cs_regs actual_reads{}, actual_writes{};
+    uint8_t read_count = 0, write_count = 0;
+    REQUIRE(cs_regs_access(decoder.handle, decoder.instruction, actual_reads,
+                           &read_count, actual_writes,
+                           &write_count) == CS_ERR_OK);
+    std::sort(expected_reads.begin(), expected_reads.end());
+    std::sort(expected_writes.begin(), expected_writes.end());
+    std::sort(actual_reads, actual_reads + read_count);
+    std::sort(actual_writes, actual_writes + write_count);
+    REQUIRE(read_count == expected_reads.size());
+    REQUIRE(write_count == expected_writes.size());
+    REQUIRE(
+        std::equal(expected_reads.begin(), expected_reads.end(), actual_reads));
+    REQUIRE(std::equal(expected_writes.begin(), expected_writes.end(),
+                       actual_writes));
+  }
+  REQUIRE(address == map[4].code_offset);
+  REQUIRE(captures == 33);
+  for (size_t reg = 0; reg < 32; ++reg) {
+    REQUIRE(inputs[reg] == (reg == 10 ? 0 : 1));
+  }
+  for (size_t i = 0; i < locals.size(); ++i) {
+    REQUIRE(reads[i] == locals[i].reads);
+    REQUIRE(writes[i] == locals[i].writes);
+  }
+}
+
+TEST_CASE("Dormant post-call capture uses fresh context and current r10",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  REQUIRE(GetTracingMode() == 0);
+  REQUIRE_FALSE(cvars::trace_functions);
+  REQUIRE_FALSE(cvars::trace_function_coverage);
+  REQUIRE_FALSE(cvars::trace_function_references);
+  REQUIRE_FALSE(cvars::trace_function_data);
+  REQUIRE_FALSE(cvars::emit_source_annotations);
+  REQUIRE_FALSE(cvars::instrument_call_times);
+  REQUIRE(cvars::align_all_basic_blocks == 0);
+  REQUIRE((cvars::full_optimization_even_with_debug ||
+           (!cvars::debug && !cvars::store_all_context_values)));
+  struct RestoreOptions {
+    bool sync = cvars::enable_host_guest_stack_synchronization;
+    bool mmio = cvars::emit_inline_mmio_checks;
+    ~RestoreOptions() {
+      cvars::enable_host_guest_stack_synchronization = sync;
+      cvars::emit_inline_mmio_checks = mmio;
+    }
+  } restore_options;
+  // This bounded MOV proof excludes optional post-call sync TEST/branch/helper
+  // emission, and emits the following ordinary STW with inline MMIO checks off.
+  cvars::enable_host_guest_stack_synchronization = false;
+  cvars::emit_inline_mmio_checks = false;
+  Fixture fixture;
+  X64Function callee(nullptr,
+                     kUnusedGuestSlot + 4);  // Unregistered, never called.
+  REQUIRE(callee.machine_code() == nullptr);
+  capture_stw::CurrentPPC builder(fixture.processor.frontend());
+  Prefix(builder, callee);
+  auto body = builder.current_block();
+  Capture capture;
+  REQUIRE_FALSE(
+      ppc::BuildDormantCheckpointGprCapture(builder, kPC, kWord, &capture));
+  REQUIRE(builder.locals().empty());
+  REQUIRE(ppc::BuildDormantPostCallCheckpointGprCapture(builder, kPC, kWord,
+                                                        &capture));
+  // A separate source delimiter bounds capture bytes only. The following
+  // ordinary STW is emitted, but its CALL-to-STW dataflow is not this oracle.
+  builder.SourceOffset(kPC + 4);
+  ppc::InstrData instruction{};
+  instruction.code = kWord;
+  instruction.address = kPC + 4;
+  instruction.opcode = ppc::LookupOpcode(kWord);
+  instruction.opcode_info = &ppc::GetOpcodeInfo(instruction.opcode);
+  REQUIRE(instruction.opcode == ppc::PPCOpcode::stw);
+  REQUIRE(instruction.opcode_info->emit);
+  REQUIRE(instruction.opcode_info->emit(builder, instruction) == 0);
+  builder.SourceOffset(kPC + 8);
+  builder.StoreContext(real_hir::GPROffset(10),
+                       builder.LoadConstantUint64(capture_stw::kSentinel));
+  builder.SourceOffset(kPC + 12);
+  builder.Return();
+  REQUIRE(builder.Finalize());
+  bool observed = false;
+  namespace passes = compiler::passes;
+  compiler::Compiler compiler(&fixture.processor);
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::ContextPromotionPass>());
+  compiler.AddPass(std::make_unique<PromotionProof>(body, capture, observed));
+  auto simplify = std::make_unique<passes::ConditionalGroupPass>();
+  simplify->AddPass(std::make_unique<passes::SimplificationPass>());
+  simplify->AddPass(std::make_unique<passes::ConstantPropagationPass>());
+  compiler.AddPass(std::move(simplify));
+  compiler.AddPass(std::make_unique<passes::MemorySequenceCombinationPass>());
+  compiler.AddPass(std::make_unique<passes::SimplificationPass>());
+  compiler.AddPass(std::make_unique<passes::DeadCodeEliminationPass>());
+  REQUIRE(fixture.backend->machine_info()->register_sets[0].count == 7);
+  compiler.AddPass(std::make_unique<passes::RegisterAllocationPass>(
+      fixture.backend->machine_info()));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  REQUIRE(compiler.Compile(&builder));
+  REQUIRE(observed);
+  REQUIRE_FALSE(ppc::ContainsCheckpointHIR(builder));
+  auto locals =
+      CheckHIR(builder, body, capture, *fixture.backend->machine_info());
+  XbyakAllocator allocator;
+  real_hir::HIREmitter emitter(fixture.backend, &allocator);
+  const auto scratch = emitter.getCode();
+  const auto unwind_size = fixture.cache->QueryUnwindStorageSize();
+  const bool zero_low = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(
+                            fixture.memory.virtual_membase())) == 0;
+  REQUIRE(emitter.CanUseMembaseLow32As0() == zero_low);
+  uint64_t pc = 0;
+  size_t span = 0, callbacks = 0;
+  REQUIRE(emitter.WithPreparedDraft(
+      builder, [&](const X64Emitter::PreparedDraft& view) {
+        ++callbacks;
+        pc = fixture.cache->execute_base_address() + view.execute_offset();
+        span = view.allocation_size();
+        emitter.Snapshot(view, scratch);
+        CheckBytes(locals, view, zero_low);
+        fixture.CheckUnpublished(pc, span);
+        REQUIRE(fixture.cache->QueryUnwindStorageSize() == unwind_size);
+      }));
+  REQUIRE(callbacks == 1);
+  REQUIRE(callee.machine_code() == nullptr);
+  REQUIRE(emitter.getCode() == scratch);
+  emitter.CheckDiscarded();
+  fixture.CheckAborted(pc, span);
+  const uint8_t trap = 0xCC;
+  size_t next_span = 0;
+  REQUIRE(fixture.cache->WithPreparedGuestCode(
+      &trap, CodeInfo(1), [&](PreparedGuestCode& next) {
+        next_span = next.allocation_size();
+        REQUIRE(fixture.cache->execute_base_address() + next.execute_offset() ==
+                pc + span);
+        fixture.CheckUnpublished(pc + span, next.allocation_size());
+      }));
+  fixture.CheckAborted(pc, span);
+  fixture.CheckAborted(pc + span, next_span);
+  // No prepared code, call target, or guest store is invoked. No whole CALL
+  // decoder, callee-runtime, actual DC3 CFG, combined post-call STW dataflow,
+  // checkpoint pair, precision/ABI, mapping lease or publication proof.
+}
+
+TEST_CASE("Dormant post-call capture rejects unsupported prefixes unchanged",
+          "[cpu][code-cache-prepare][x64-prepared-finalization]") {
+  for (size_t variant = 0; variant < 18; ++variant) {
+    X64Function callee(nullptr, variant == 16   ? kUnusedGuestSlot + 1
+                                : variant == 17 ? 0
+                                                : kUnusedGuestSlot + 4);
+    BuiltinFunction builtin(nullptr, kUnusedGuestSlot + 4);
+    real_hir::CurrentHIR builder;
+    auto before = Prefix(builder, callee);
+    auto body = builder.current_block();
+    auto predecessor = builder.first_block();
+    auto call = predecessor->instr_tail;
+    switch (variant) {
+      case 0:
+        call->flags = CALL_TAIL;
+        break;
+      case 1:
+        call->flags = CALL_POSSIBLE_RETURN;
+        break;
+      case 2:
+        call->src1.symbol = nullptr;
+        break;
+      case 3:
+        call->opcode = &OPCODE_CALL_TRUE_info;
+        break;
+      case 4:
+        call->opcode = &OPCODE_CALL_INDIRECT_info;
+        break;
+      case 5:
+        call->prev->src1.offset = real_hir::GPROffset(3);
+        break;
+      case 6:
+        call->prev->src2.value = builder.LoadConstantInt64(0);
+        break;
+      case 7:
+        call->prev->prev->src1.value = builder.LoadConstantInt64(0);
+        break;
+      case 8:
+        builder.MarkLabel(builder.NewLabel(), body);
+        break;
+      case 9:
+        builder.MarkLabel(builder.NewLabel(), predecessor);
+        break;
+      case 10:
+        builder.AddEdge(predecessor, body, Edge::UNCONDITIONAL);
+        break;
+      case 11:
+        builder.StoreContext(real_hir::GPROffset(3),
+                             before);  // Cross-call SSA.
+        builder.SourceOffset(kPC + 4);
+        break;
+      case 12:
+        builder.StoreLocal(builder.AllocLocal(INT64_TYPE),
+                           builder.LoadConstantInt64(1));
+        builder.SourceOffset(kPC + 4);
+        break;
+      case 13:
+        builder.Call(&callee);  // Third block; no generic CFG admission.
+        builder.SourceOffset(kPC + 4);
+        break;
+      case 14:
+        body->instr_head->src1.offset = kCallPC;
+        break;
+      case 15:
+        call->src1.symbol = &builtin;
+        break;
+    }
+    const uint32_t pc = variant >= 11 && variant <= 13 ? kPC + 4 : kPC;
+    Capture output;
+    const auto prior_output = output;
+    const auto prior_locals = builder.locals();
+    const auto prior_ordinal = builder.max_value_ordinal();
+    const auto prior_current = builder.current_block();
+    std::vector<Instr*> instructions;
+    for (auto block = builder.first_block(); block; block = block->next) {
+      for (auto i = block->instr_head; i; i = i->next) {
+        instructions.push_back(i);
+      }
+    }
+    REQUIRE_FALSE(ppc::BuildDormantPostCallCheckpointGprCapture(
+        builder, pc, kWord, &output));
+    REQUIRE(output.gpr_slots == prior_output.gpr_slots);
+    REQUIRE(output.ea_slot == prior_output.ea_slot);
+    REQUIRE(builder.locals() == prior_locals);
+    REQUIRE(builder.max_value_ordinal() == prior_ordinal);
+    REQUIRE(builder.current_block() == prior_current);
+    size_t position = 0;
+    for (auto block = builder.first_block(); block; block = block->next) {
+      for (auto i = block->instr_head; i; i = i->next) {
+        REQUIRE(position < instructions.size());
+        REQUIRE(i == instructions[position++]);
+      }
+    }
+    REQUIRE(position == instructions.size());
+  }
+}
+
+}  // namespace postcall_gpr
 
 }  // namespace
 }  // namespace xe::cpu::testing

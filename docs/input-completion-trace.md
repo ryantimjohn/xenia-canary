@@ -18,8 +18,15 @@ or recording timestamps.
 
 Changed completion rows cover entries in `[180000,240000)` milliseconds after
 that anchor. At most 64 rows are emitted across all three APIs, plus one cap
-notice. One previous signature per API bounds deduplication; packet number alone
-does not count as a change. Alternating callers/threads may consume this budget.
+notice. Fixed buckets retain one previous semantic signature for each of three
+APIs and six user classes: ports 0-3, a known other/any index, and an unread index.
+Thus there are at most 18 initial baselines. Raw flags, raw user values within
+the other class, caller LR/thread, packet number and driver-call count do not
+count as changes. Alternating ports/callers/flags cannot consume the row budget
+without changes to route/result/UI state, output validity, A or keystroke fields.
+Those excluded fields remain metadata on emitted rows and in applicable
+counters; their independent changes may be unseen. Genuine semantic changes can
+still exhaust 64 rows, leaving later changes inconclusive.
 API numbers are 0=GetState, 1=GetKeystroke, 2=GetKeystrokeEx. Route numbers are
 0=invalid output, 1=invalid user, 2=UI gate, 3=input driver path.
 
@@ -52,7 +59,8 @@ Validation source is `xam_input_completion_test.cc`, tag `[input-completion]` in
 `xenia-kernel-tests` (existing recursive test discovery). It exercises the exact
 production dispatch helpers with fake UI/driver dependencies, including null
 index on the UI gate, A, EMPTY, key-up and disconnection; disabled/enabled result
-parity; window/dedup/cap/counters; and real export trampolines on safe early
+parity; window/dedup/cap/counters; concurrent reservations and interleaved polling
+noise followed by late A; and real export trampolines on safe early
 returns using guest-format buffers. Full emulator UI/input lifecycle and live
 caller consumption still require a separately authorized runtime observation.
 
@@ -60,4 +68,4 @@ Production compilation changes only `xam_input.cc`; the helper is header-only.
 No class layout or other kernel archive members change. Recompile that object
 with its actual include closure, replace that one canonical kernel member, and
 validate a fresh archive/relink before any game test. No tests or build have been
-run as part of source preparation.
+run as part of source preparation. There are five test cases.

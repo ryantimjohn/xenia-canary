@@ -27,12 +27,12 @@ struct Completion {
   uint32_t packet = 0;
   uint16_t virtual_key = 0, edge_flags = 0;
 
-  // Packet churn alone must not spend the bounded row budget.
+  // Caller, packet, raw flags, dispatch count and raw user-index churn must not
+  // spend the budget. The caller selects a fixed API/user-class bucket first.
+  // These fields remain metadata/counters when a semantic change emits a row.
   bool Same(const Completion& b) const {
-    return route == b.route && result == b.result && user == b.user &&
-           flags == b.flags && driver_calls == b.driver_calls &&
-           user_valid == b.user_valid && ui_checked == b.ui_checked &&
-           ui_active == b.ui_active &&
+    return route == b.route && result == b.result &&
+           ui_checked == b.ui_checked && ui_active == b.ui_active &&
            output_initialized == b.output_initialized &&
            output_valid == b.output_valid && a == b.a &&
            virtual_key == b.virtual_key && edge_flags == b.edge_flags;
@@ -198,10 +198,9 @@ class Collector {
     const uint64_t elapsed =
         entry.epoch_ms >= anchor_ms_ ? entry.epoch_ms - anchor_ms_ : 0;
     if (elapsed >= 180000 && elapsed < 240000 && rows_ < 64) {
-      auto& previous = previous_[Index(entry.api)];
-      if (!previous.valid || previous.thread != entry.thread ||
-          previous.lr != entry.lr || !previous.completion.Same(completion)) {
-        previous = {true, entry.thread, entry.lr, completion};
+      auto& previous = previous_[Index(entry.api)][UserClass(completion)];
+      if (!previous.valid || !previous.completion.Same(completion)) {
+        previous = {true, completion};
         event.row = true;
         event.row_number = ++rows_;
         event.cap_notice = rows_ == 64;
@@ -217,6 +216,12 @@ class Collector {
 
  private:
   static size_t Index(Api api) { return static_cast<size_t>(api); }
+  static size_t UserClass(const Completion& completion) {
+    // Four ordinary ports, one known other/any index, one unread index.
+    return !completion.user_valid ? 5
+           : completion.user < 4  ? completion.user
+                                  : 4;
+  }
   static void Increment(uint64_t& value) {
     if (value != UINT64_MAX) {
       ++value;
@@ -224,8 +229,6 @@ class Collector {
   }
   struct Previous {
     bool valid = false;
-    uint32_t thread = 0;
-    uint64_t lr = 0;
     Completion completion;
   };
   const bool enabled_;
@@ -234,7 +237,7 @@ class Collector {
   uint64_t anchor_ms_ = 0, sequence_ = 0;
   uint32_t rows_ = 0;
   std::array<Counts, 3> counts_{};
-  std::array<Previous, 3> previous_{};
+  std::array<std::array<Previous, 6>, 3> previous_{};
 };
 
 }  // namespace xe::kernel::xam::input_observe

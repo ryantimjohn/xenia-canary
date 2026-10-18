@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstring>
+#include <thread>
 #include <type_traits>
 
 #include "third_party/catch/include/catch.hpp"
@@ -227,5 +228,91 @@ TEST_CASE("Actual input export trampolines keep the three-register guest ABI",
     CHECK(context.r[4] == 0x12345678);
     CHECK(context.r[6] == 0x1122334455667788);
   }
+}
+
+TEST_CASE("Interleaved input noise preserves late A and concurrent accounting",
+          "[input-completion]") {
+  Collector collector(true);
+  Completion completion;
+  completion.route = Route::kDriver;
+  completion.result = X_ERROR_SUCCESS;
+  completion.user_valid = true;
+  completion.output_initialized = completion.output_valid = true;
+  auto entry = collector.Begin(Api::kState, 6, 0, 1000);
+  collector.End(entry, completion, 1001);
+  uint64_t driver_calls = 0;
+  uint32_t rows = 0;
+  for (uint32_t i = 0; i < 256; ++i) {
+    completion.user = i % 4;
+    completion.flags = i;
+    completion.packet = i;
+    completion.driver_calls = i % 2 ? 4 : 1;
+    driver_calls += completion.driver_calls;
+    entry = collector.Begin(Api::kState, i % 2 + 6, i % 2 ? 0x1234 : 0x5678,
+                            181000 + i);
+    auto event = collector.End(entry, completion, 181001 + i);
+    rows += event.row;
+    CHECK_FALSE(event.cap_notice);
+  }
+  CHECK(rows == 4);
+  completion.user = 0;
+  completion.a = true;
+  completion.driver_calls = 1;
+  entry = collector.Begin(Api::kState, 9, 0x9999, 191000);
+  auto late_a = collector.End(entry, completion, 191001);
+  CHECK(late_a.row);
+  CHECK(late_a.row_number == 5);
+  CHECK(late_a.completion.a);
+  completion.a = false;
+  entry = collector.Begin(Api::kState, 10, 0, 241000);
+  auto summary = collector.End(entry, completion, 241001);
+  CHECK(summary.summary);
+  CHECK(summary.counts[0].entries == 259);
+  CHECK(summary.counts[0].completions == 259);
+  CHECK(summary.counts[0].driver_calls == driver_calls + 2);
+
+  Collector concurrent(true);
+  completion = {};
+  completion.route = Route::kDriver;
+  completion.driver_calls = 1;
+  entry = concurrent.Begin(Api::kState, 6, 0, 1000);
+  concurrent.End(entry, completion, 1001);
+  std::array<Collector::Event, 64> events{};
+  std::array<std::thread, 8> workers;
+  for (uint32_t worker = 0; worker < workers.size(); ++worker) {
+    workers[worker] = std::thread([&, worker] {
+      for (uint32_t i = worker * 8; i < worker * 8 + 8; ++i) {
+        Completion c;
+        c.route = Route::kDriver;
+        c.driver_calls = 1;
+        c.result = i + 1;  // All unique semantic changes, in any schedule.
+        auto e = concurrent.Begin(Api::kState, worker, 0x1234, 181000 + i);
+        events[i] = concurrent.End(e, c, 181100 + i);
+      }
+    });
+  }
+  for (auto& worker : workers) {
+    worker.join();
+  }
+  std::array<bool, 64> seen{};
+  uint32_t cap_notices = 0;
+  for (const auto& event : events) {
+    REQUIRE(event.row);
+    REQUIRE(event.row_number >= 1);
+    REQUIRE(event.row_number <= 64);
+    CHECK_FALSE(seen[event.row_number - 1]);
+    seen[event.row_number - 1] = true;
+    cap_notices += event.cap_notice;
+  }
+  CHECK(cap_notices == 1);
+  entry = concurrent.Begin(Api::kState, 6, 0, 241000);
+  summary = concurrent.End(entry, completion, 241001);
+  CHECK(summary.summary);
+  CHECK_FALSE(summary.row);
+  CHECK(summary.counts[0].entries == 66);
+  CHECK(summary.counts[0].completions == 66);
+  CHECK(summary.counts[0].driver_calls == 66);
+  CHECK(summary.counts[1].entries == 0);
+  CHECK(summary.counts[2].entries == 0);
 }
 }  // namespace xe::kernel::xam::input_observe::test

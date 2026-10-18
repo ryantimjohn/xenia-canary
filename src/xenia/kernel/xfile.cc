@@ -70,14 +70,6 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
   }
   if (ticket >= 64) return;
 
-  uint32_t canonical_handle = 0;
-  {
-    // ObjectTable mutates the handle vector under this same global region.
-    // Only snapshot identity here; never hold it across I/O or log formatting.
-    auto lock = global_critical_region::AcquireDirect();
-    const auto handles = file.handles();
-    if (!handles.empty()) canonical_handle = handles.front();
-  }
   std::string path = file.entry()->absolute_path();  // Guest VFS path only.
   const bool path_truncated = path.size() > 256;
   if (path_truncated) {
@@ -94,11 +86,11 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
   const std::string destination = guest_buffer_translated
                                       ? fmt::format("{:08X}", guest_buffer)
                                       : "unmatched";
-  XELOGI("Disc read completion: seq={} elapsed_ms={} canonical_handle={:08X} "
+  XELOGI("Disc read completion: seq={} elapsed_ms={} "
          "guest_buffer={} requested={} resolved_offset={} actual={} "
          "completion_status={:08X} notify_completion={} path_truncated={} path={}",
-         ticket + 1, elapsed_ms, canonical_handle, destination, requested, offset,
-         actual, status, notify_completion, path_truncated, path);
+         ticket + 1, elapsed_ms, destination, requested, offset, actual, status,
+         notify_completion, path_truncated, path);
   if (ticket == 63) {
     XELOGI("Disc read completion trace: 64 rows reserved; further matching "
            "completions suppressed for this process");

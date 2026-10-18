@@ -31,11 +31,11 @@ reflect budget reservation; scheduling may reorder rows and the cap notice.
 The logger's usual level/filter settings still apply.
 
 The trace point is in `XFile::ReadInternal`, after `out_bytes_read` is assigned
-and before completion-port/event notification. Rows report canonical object
-handle (zero if no handle remains), guest destination or `unmatched`, requested
+and before completion-port/event notification. Rows report guest destination
+or `unmatched`, requested
 count, resolved offset, actual count, actual completion status and notification
-flag. The canonical handle can differ from an alias passed to NtReadFile and
-can be recycled later; use sequence/time/path together when correlating.
+flag. No handle or alias identity is captured; use sequence/time/path together
+when correlating. The trace takes no additional global/object-table lock.
 NtReadFile may subsequently return PENDING for a nonsynchronous handle even
 though this actual completion already happened. The trace status is therefore
 not labeled as the syscall return status.

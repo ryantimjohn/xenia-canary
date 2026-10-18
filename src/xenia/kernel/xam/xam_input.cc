@@ -7,16 +7,26 @@
  ******************************************************************************
  */
 
+#include <chrono>
+
+#include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
 #include "xenia/hid/input.h"
 #include "xenia/hid/input_system.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/input_observe.h"
 #include "xenia/kernel/xam/xam_private.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 DECLARE_bool(allow_mic_initialization);
+
+DEFINE_bool(input_completion_trace, false,
+            "Private bounded input completion diagnostic (180-240s from first "
+            "input shim entry; no input changes).",
+            "HID");
 
 namespace xe {
 namespace kernel {
@@ -30,6 +40,103 @@ using xe::hid::X_INPUT_STATE;
 using xe::hid::X_INPUT_VIBRATION;
 using xe::hid::X_USER_DEVICE_CLASS;
 using xe::hid::X_USER_DEVICE_TYPE;
+
+namespace {
+namespace observe = input_observe;
+
+observe::Collector& InputObserver() {
+  // Process-lifetime snapshot: changing the cvar after the first input shim has
+  // no effect. No guest/title object layout or input-driver state is changed.
+  static observe::Collector collector(cvars::input_completion_trace);
+  return collector;
+}
+
+uint64_t InputEpochMillis() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+
+observe::Collector::Entry BeginInputObservation(observe::Api api) {
+  auto& collector = InputObserver();
+  if (!collector.enabled()) {
+    return {};
+  }
+  auto* thread = XThread::GetCurrentThread();
+  const uint32_t thread_id = thread ? thread->thread_id() : 0;
+  const uint64_t lr = thread ? thread->thread_state()->context()->lr : 0;
+  auto entry = collector.Begin(api, thread_id, lr, InputEpochMillis());
+  if (entry.anchor) {
+    XELOGI(
+        "INPUT_COMPLETE anchor_epoch_ms={} entry_sequence={} api={} "
+        "thread={:08X} lr={:016X} window_entry_ms=[180000,240000)",
+        entry.anchor_ms, entry.sequence, uint32_t(api), thread_id, lr);
+  }
+  return entry;
+}
+
+void EndInputObservation(const observe::Collector::Entry& entry,
+                         const observe::Completion& completion) {
+  if (!entry.enabled) {
+    return;
+  }
+  // End returns scalar copies, releasing its mutex before any
+  // formatting/logging.
+  auto event = InputObserver().End(entry, completion, InputEpochMillis());
+  if (event.row) {
+    XELOGI(
+        "INPUT_COMPLETE row={} api={} entry_sequence={} entry_epoch_ms={} "
+        "entry_elapsed_ms={} completion_epoch_ms={} thread={:08X} "
+        "lr={:016X} route={} result={:08X} user_valid={} user={} flags={:08X} "
+        "ui_checked={} ui_active={} driver_calls={} output_initialized={} "
+        "output_valid={} a={} packet={} vk={:04X} edges={:04X}",
+        event.row_number, uint32_t(entry.api), entry.sequence, entry.epoch_ms,
+        entry.epoch_ms - entry.anchor_ms, event.through_epoch_ms, entry.thread,
+        entry.lr, uint32_t(completion.route), completion.result,
+        completion.user_valid, completion.user, completion.flags,
+        completion.ui_checked, completion.ui_active, completion.driver_calls,
+        completion.output_initialized, completion.output_valid, completion.a,
+        completion.packet, completion.virtual_key, completion.edge_flags);
+  }
+  if (event.cap_notice) {
+    XELOGI("INPUT_COMPLETE changed-row cap=64 reached; counters continue");
+  }
+  if (event.summary) {
+    for (uint32_t i = 0; i < event.counts.size(); ++i) {
+      const auto& counts = event.counts[i];
+      XELOGI(
+          "INPUT_COMPLETE summary api={} through_completion_epoch_ms={} "
+          "trigger_entry_sequence={} entries={} completions={} ui_gates={} "
+          "driver_calls={} (snapshot through this call; not final totals)",
+          i, event.through_epoch_ms, entry.sequence, counts.entries,
+          counts.completions, counts.gates, counts.driver_calls);
+    }
+  }
+}
+
+// Invoked once per OUTER export; the non-Ex export does not re-enter the Ex
+// export, preserving the original public ABI and avoiding nested trace counts.
+uint32_t InputGetKeystroke(observe::Api api, lpdword_t user_index_ptr,
+                           dword_t flags,
+                           pointer_t<X_INPUT_KEYSTROKE> keystroke) {
+  const auto entry = BeginInputObservation(api);
+  observe::Completion completion;
+  const auto result = observe::GetKeystroke(
+      user_index_ptr, flags, keystroke,
+      [] { return kernel_state()->xam_state()->IsUIActive(); },
+      [](auto&& operation) {
+        auto input_system = kernel_state()->emulator()->input_system();
+        auto lock = input_system->lock();
+        return operation(*input_system);
+      },
+      completion);
+  if (entry.enabled) {
+    observe::Snapshot(completion, keystroke);
+  }
+  EndInputObservation(entry, completion);
+  return result;
+}
+}  // namespace
 
 dword_result_t XAutomationpUnbindController_entry(dword_t user_index) {
   if (user_index >= XUserMaxUserCount) {
@@ -110,42 +217,29 @@ DECLARE_XAM_EXPORT1(XamInputGetCapabilities, kInput, kSketchy);
 // https://msdn.microsoft.com/en-us/library/windows/desktop/microsoft.directx_sdk.reference.xinputgetstate(v=vs.85).aspx
 dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
                                       pointer_t<X_INPUT_STATE> input_state) {
-  if (input_state) {
-    memset((void*)input_state.host_address(), 0, sizeof(X_INPUT_STATE));
-  }
-  if (user_index >= XUserMaxUserCount) {
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  }
+  const auto entry = BeginInputObservation(observe::Api::kState);
+  observe::Completion completion;
+  const auto result = observe::GetState(
+      user_index, flags, input_state,
+      [] { return kernel_state()->xam_state()->IsUIActive(); },
+      [](auto&& operation) {
+        auto input_system = kernel_state()->emulator()->input_system();
+        auto lock = input_system->lock();
+        return operation(*input_system);
+      },
+      completion);
 
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_SUCCESS;
-  }
-
-  // Games call this with a NULL state ptr, probably as a query.
-
-  uint32_t actual_user_index = user_index;
-  // chrispy: change this, logic is not right
-  if ((actual_user_index & XUserIndexAny) == XUserIndexAny ||
-      (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER)) {
-    // Always pin user to 0.
-    actual_user_index = 0;
-  }
-
-  X_RESULT result;
-  auto input_system = kernel_state()->emulator()->input_system();
-  {
-    auto lock = input_system->lock();
-    result = input_system->GetState(
-        user_index, !flags ? X_INPUT_FLAG::X_INPUT_FLAG_GAMEPAD : flags,
-        input_state);
-  }
-
-  if (input_state && result == X_ERROR_SUCCESS) {
+  if (completion.route == observe::Route::kDriver && input_state &&
+      result == X_ERROR_SUCCESS) {
     if (auto patch = kernel_state()->xmp_volume_patch()) {
       patch->OnInputPoll(input_state->packet_number);
     }
   }
 
+  if (entry.enabled) {
+    observe::Snapshot(completion, input_state);
+  }
+  EndInputObservation(entry, completion);
   return result;
 }
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);
@@ -173,56 +267,16 @@ DECLARE_XAM_EXPORT1(XamInputSetState, kInput, kImplemented);
 dword_result_t XamInputGetKeystrokeEx_entry(
     lpdword_t user_index_ptr, dword_t flags,
     pointer_t<X_INPUT_KEYSTROKE> keystroke) {
-  // user index = index or XUSER_INDEX_ANY
-  // flags = XINPUT_FLAG_GAMEPAD (| _ANYUSER | _ANYDEVICE)
-
-  if (!keystroke) {
-    return X_ERROR_BAD_ARGUMENTS;
-  }
-
-  keystroke.Zero();
-
-  if (kernel_state()->xam_state()->IsUIActive()) {
-    return X_ERROR_SUCCESS;
-  }
-
-  uint32_t user_index = *user_index_ptr;
-  auto input_system = kernel_state()->emulator()->input_system();
-  auto lock = input_system->lock();
-  if ((user_index & XUserIndexAny) == XUserIndexAny) {
-    // Always pin user to 0.
-    user_index = 0;
-  }
-
-  if (flags & X_INPUT_FLAG::X_INPUT_FLAG_ANY_USER) {
-    // That flag means we should iterate over every connected controller and
-    // check which one have pending request.
-    auto result = X_ERROR_DEVICE_NOT_CONNECTED;
-    for (uint32_t i = 0; i < XUserMaxUserCount; i++) {
-      auto result = input_system->GetKeystroke(i, flags, keystroke);
-
-      // Return result from first user that have pending request
-      if (result == X_ERROR_SUCCESS) {
-        *user_index_ptr = keystroke->user_index;
-        return result;
-      }
-    }
-    return result;
-  }
-
-  auto result = input_system->GetKeystroke(user_index, flags, keystroke);
-
-  if (XSUCCEEDED(result)) {
-    *user_index_ptr = keystroke->user_index;
-  }
-  return result;
+  return InputGetKeystroke(observe::Api::kKeystrokeEx, user_index_ptr, flags,
+                           keystroke);
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystrokeEx, kInput, kImplemented);
 
 dword_result_t XamInputGetKeystroke_entry(
     dword_t user_index, dword_t flags, pointer_t<X_INPUT_KEYSTROKE> keystroke) {
   uint32_t actual_user_index = user_index;
-  return XamInputGetKeystrokeEx_entry(&actual_user_index, flags, keystroke);
+  return InputGetKeystroke(observe::Api::kKeystroke, &actual_user_index, flags,
+                           keystroke);
 }
 DECLARE_XAM_EXPORT1(XamInputGetKeystroke, kInput, kImplemented);
 

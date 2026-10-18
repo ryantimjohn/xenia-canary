@@ -113,7 +113,9 @@ TEST_CASE("Ungated production dispatch preserves A and EMPTY with trace off/on",
     auto event = collector.End(entry, c, 101);
     CHECK_FALSE(event.row);
 
-    be<uint32_t> index = 0;
+    // Existing Win32/XSUCCEEDED quirk: EMPTY and DEVICE_NOT_CONNECTED
+    // satisfy XSUCCEEDED, so the zeroed output user_index is copied back.
+    be<uint32_t> index = 1;
     hid::X_INPUT_KEYSTROKE stroke{};
     c = {};
     CHECK(GetKeystroke(&index, 0, &stroke, ui, with_driver, c) ==
@@ -141,7 +143,7 @@ TEST_CASE("Ungated production dispatch preserves A and EMPTY with trace off/on",
           X_ERROR_DEVICE_NOT_CONNECTED);
     Snapshot(c, &stroke);
     CHECK_FALSE(c.output_valid);
-    CHECK(index == 1);
+    CHECK(index == 0);
   }
 }
 

@@ -24,6 +24,7 @@ enum class KeyboardMode { Disabled, Enabled, Passthrough };
 
 class KeyboardInputDriver final : public InputDriver {
  public:
+  // A null window permits headless event-queue use; GetState is then neutral.
   explicit KeyboardInputDriver(xe::ui::Window* window, size_t window_z_order);
   ~KeyboardInputDriver() override;
 
@@ -46,6 +47,8 @@ class KeyboardInputDriver final : public InputDriver {
   virtual InputType GetInputType() const override;
 
  protected:
+  friend struct KeyboardInputDriverTestAccess;
+
   class KeyboardWindowInputListener final : public ui::WindowInputListener {
    public:
     explicit KeyboardWindowInputListener(KeyboardInputDriver& driver)
@@ -61,6 +64,8 @@ class KeyboardInputDriver final : public InputDriver {
 
   struct KeyEvent {
     ui::VirtualKey virtual_key = ui::VirtualKey::kNone;
+    // Resolve controller bindings when the event arrives, not when it is read.
+    ui::VirtualKey controller_key = ui::VirtualKey::kNone;
     int repeat_count = 0;
     bool transition = false;  // going up(false) or going down(true)
     bool prev_state = false;  // down(true) or up(false)

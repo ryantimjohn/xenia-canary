@@ -1,0 +1,7 @@
+add_library(xenia-hid-replay STATIC)
+xe_platform_sources(xenia-hid-replay ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(xenia-hid-replay PUBLIC xenia-base xenia-hid xenia-ui)
+xe_target_defaults(xenia-hid-replay)
+if(XENIA_BUILD_TESTS)
+  add_subdirectory(testing)
+endif()

@@ -60,6 +60,7 @@
 #include "xenia/hid/keyboard/keyboard_hid.h"
 #endif  // XE_PLATFORM_LINUX
 #include "xenia/hid/nop/nop_hid.h"
+#include "xenia/hid/replay/replay_input_driver.h"
 #if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -78,23 +79,25 @@
 #if XE_PLATFORM_WIN32
 #define APU_OPTIONS "[any, nop, sdl, xaudio2]"
 #define GPU_OPTIONS "[any, d3d12, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl, keyboard, xinput]"
+#define HID_OPTIONS "[any, nop, sdl, keyboard, xinput, replay]"
 #define NUI_OPTIONS "[any, kinect, replay, nop]"
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[any, alsa, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl, keyboard]"
+#define HID_OPTIONS "[any, nop, sdl, keyboard, replay]"
 #define NUI_OPTIONS "[any, replay, nop]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl]"
+#define HID_OPTIONS "[any, nop, sdl, replay]"
 #define NUI_OPTIONS "[any, replay, nop]"
 #endif
 
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
+DEFINE_path(hid_replay, "", "Controller timeline file for exclusive --hid=replay.",
+            "HID");
 DEFINE_string(nui, "any", "NUI (Kinect) system. Use: " NUI_OPTIONS, "Kinect");
 
 DEFINE_path(
@@ -458,7 +461,17 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
-  if (cvars::hid.compare("nop") == 0) {
+  if (cvars::hid == "replay") {
+    // Explicit opt-in only; never register with the 'any' factory or fall back
+    // to physical input when a recording is invalid.
+    auto driver = std::make_unique<hid::replay::ReplayInputDriver>(
+        window, EmulatorWindow::kZOrderHidInput, cvars::hid_replay);
+    if (XSUCCEEDED(driver->Setup())) {
+      drivers.emplace_back(std::move(driver));
+    } else {
+      XELOGE("HID replay: setup failed; no input driver enabled");
+    }
+  } else if (cvars::hid.compare("nop") == 0) {
     drivers.emplace_back(
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
   } else {

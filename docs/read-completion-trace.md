@@ -61,3 +61,9 @@ matching; controls/UTF-8 path limits; zero-length and rejected-range unmatched
 destinations; and successful/EOF/error counts remaining identical with tracing
 disabled/enabled. No payload comparison or private recording is needed for
 these checks. Build/test/runtime execution remains separately authorized.
+## Checkpoint correlation
+
+Rows additionally include `steady_epoch_ms`, the host process's
+`std::chrono::steady_clock` epoch in milliseconds. This is comparable to guest
+GPR checkpoint rows in the same process, not to UTC or other runs. Existing
+delay and row-budget semantics are unchanged.

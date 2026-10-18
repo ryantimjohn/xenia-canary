@@ -166,6 +166,9 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
     // Stash instruction offset. It's either the SOURCE_OFFSET or the COMMENT.
     instr_offset_list_[offset] = first_instr;
+    // Keep label/source bookkeeping ahead of this call: forward branches must
+    // enter before the barrier and observe preinstruction context too.
+    frontend_->EmitGuestGPRCheckpoint(*this, address);
 
     if (opcode == PPCOpcode::kInvalid) {
       XELOGE("Invalid instruction {:08X} {:08X}", address, code);

@@ -51,6 +51,10 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
   const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               Clock::now() - start)
                               .count();
+  const auto steady_epoch_ms =
+      std::chrono::duration_cast<std::chrono::milliseconds>(
+          Clock::now().time_since_epoch())
+          .count();
   if (uint64_t(elapsed_ms) < cvars::trace_disc_read_delay_ms) return;
   const auto& relative_path = file.path();
   const auto& prefix = cvars::trace_disc_read_path_prefix;
@@ -86,11 +90,11 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
   const std::string destination = guest_buffer_translated
                                       ? fmt::format("{:08X}", guest_buffer)
                                       : "unmatched";
-  XELOGI("Disc read completion: seq={} elapsed_ms={} "
+  XELOGI("Disc read completion: seq={} elapsed_ms={} steady_epoch_ms={} "
          "guest_buffer={} requested={} resolved_offset={} actual={} "
          "completion_status={:08X} notify_completion={} path_truncated={} path={}",
-         ticket + 1, elapsed_ms, destination, requested, offset, actual, status,
-         notify_completion, path_truncated, path);
+         ticket + 1, elapsed_ms, steady_epoch_ms, destination, requested, offset,
+         actual, status, notify_completion, path_truncated, path);
   if (ticket == 63) {
     XELOGI("Disc read completion trace: 64 rows reserved; further matching "
            "completions suppressed for this process");

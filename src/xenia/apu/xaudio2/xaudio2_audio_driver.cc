@@ -38,6 +38,9 @@ uint64_t AudioTraceNowUs() {
 std::atomic<uint64_t> next_trace_driver_id{1};
 AudioQueueLogBudget trace_log_budget;
 AudioQueueCheckpointBudget trace_checkpoint_budget;
+// Observer-only rows, capped across all drivers. The ordinary audio path is
+// unchanged when audio_queue_trace is false.
+AudioQueueLogBudget transition_log_budget(512, 0);
 
 template <typename AudioInterface>
 void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
@@ -55,6 +58,10 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
   // The collector mutex is released. These clocks are read only for a due
   // checkpoint, before synchronous logging under the caller's existing lock.
   const uint64_t log_start_us = AudioTraceNowUs();
+  size_t transitions_emitted = 0;
+  while (transitions_emitted < checkpoint.transition_count &&
+         transition_log_budget.TakeRow())
+    ++transitions_emitted;
   const auto& total = checkpoint.total;
   const int64_t min_queue =
       total.min_queue_before == AudioQueueTrace::kNoQueueSample
@@ -67,7 +74,9 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
       "submit_errors={} ratio_errors={} min_queued_before={} "
       "queue_zero={} queue_one={} max_success_gap_us={} "
       "max_success_gap_bin={} buffer_ends_sampled={} voice_errors_sampled={} "
-      "engine_glitches_since_start={} engine_query_steady_us=[{},{}]",
+      "engine_glitches_since_start={} engine_query_steady_us=[{},{}] "
+      "transition_qpc_frequency={} transitions={} transition_rows={} "
+      "transition_overwritten={} transition_log_omitted={}",
       trace.driver_id(), trace.client_index(), checkpoint.ordinal,
       checkpoint.sample_us, checkpoint.sample_bin, log_start_us,
       trace.start_us(), total.last_us, total.attempts, total.submitted,
@@ -75,7 +84,25 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
       total.queue_one, total.max_success_gap_us,
       checkpoint.max_success_gap_bin, total.buffer_ends_sampled,
       total.voice_errors_sampled, performance.GlitchesSinceEngineStarted,
-      engine_query_start_us, engine_query_end_us);
+      engine_query_start_us, engine_query_end_us,
+      checkpoint.qpc_frequency, checkpoint.transition_count,
+      transitions_emitted, checkpoint.transitions_overwritten,
+      checkpoint.transition_count - transitions_emitted);
+  // Keep the newest events if the process-wide log budget is nearly exhausted.
+  for (size_t i = checkpoint.transition_count - transitions_emitted;
+       i < checkpoint.transition_count; ++i) {
+    const auto& event = checkpoint.transitions[i];
+    XELOGI(
+        "APU XAudio2 queue transition driver={} client={} "
+        "steady_us={} qpc_ticks={} became_empty={} depth=[{},{}] "
+        "last_success_gap_us={} buffer_ends_seen={} pause_epoch={} "
+        "submit_success={} ratio_error={}",
+        trace.driver_id(), trace.client_index(), event.steady_us,
+        event.qpc_ticks, event.became_empty, event.previous_depth,
+        event.current_depth, event.last_success_gap_us,
+        event.buffer_ends_seen, event.pause_epoch, event.submit_success,
+        event.ratio_error);
+  }
 }
 
 void LogQueueTraceBin(const AudioQueueTrace& trace, size_t index,
@@ -187,10 +214,13 @@ XAudio2AudioDriver::XAudio2AudioDriver(xe::threading::Semaphore* semaphore,
   assert_true(frame_size_ <= kFrameSizeMax);
   assert_true(!need_format_conversion_ || frame_channels_ == 6);
   if (AudioQueueTraceEnabled()) {
+    LARGE_INTEGER qpc_frequency{};
+    QueryPerformanceFrequency(&qpc_frequency);
     queue_trace_ = std::make_unique<AudioQueueTrace>(
         next_trace_driver_id.fetch_add(1, std::memory_order_relaxed),
         client_index, AudioTraceNowUs(),
-        AudioQueuePauseEpoch().load(std::memory_order_relaxed));
+        AudioQueuePauseEpoch().load(std::memory_order_relaxed),
+        static_cast<uint64_t>(qpc_frequency.QuadPart));
   }
 }
 
@@ -343,6 +373,12 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
   }
   assert_true(state.BuffersQueued < frame_count_);
   const uint64_t trace_now_us = queue_trace_ ? AudioTraceNowUs() : 0;
+  uint64_t trace_qpc_ticks = 0;
+  if (queue_trace_) {
+    LARGE_INTEGER qpc_now{};
+    if (QueryPerformanceCounter(&qpc_now))
+      trace_qpc_ticks = static_cast<uint64_t>(qpc_now.QuadPart);
+  }
 
   auto output_frame = reinterpret_cast<float*>(frames_[current_frame_]);
 
@@ -373,7 +409,8 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
     if (queue_trace_)
       queue_trace_->Submission(
           trace_now_us, state.BuffersQueued, false, false,
-          AudioQueuePauseEpoch().load(std::memory_order_relaxed));
+          AudioQueuePauseEpoch().load(std::memory_order_relaxed),
+          trace_qpc_ticks);
     XELOGE("SubmitSourceBuffer failed with 0x{:08X}", hr);
     if (queue_trace_) {
       if (api_minor_version_ >= 8) {
@@ -401,7 +438,8 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
   if (queue_trace_) {
     queue_trace_->Submission(
         trace_now_us, state.BuffersQueued, true, FAILED(ratio_hr),
-        AudioQueuePauseEpoch().load(std::memory_order_relaxed));
+        AudioQueuePauseEpoch().load(std::memory_order_relaxed),
+        trace_qpc_ticks);
     if (api_minor_version_ >= 8) {
       MaybeLogQueueCheckpoint(*queue_trace_, objects_.api_2_8.audio,
                               trace_now_us);

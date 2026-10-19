@@ -82,6 +82,7 @@ class AudioQueueTrace {
   static constexpr size_t kRowsPerShutdown = 8;
   static constexpr uint32_t kCheckpointsPerDriver = 12;
   static constexpr uint64_t kCheckpointPeriodUs = 30000000;
+  static constexpr size_t kTransitionRingSize = 64;
   static constexpr uint32_t kNoQueueSample =
       std::numeric_limits<uint32_t>::max();
 
@@ -108,20 +109,41 @@ class AudioQueueTrace {
     uint64_t max_success_gap_us = 0;
   };
 
+  // Private fork-only observer. A GetState observation is not proof that the
+  // audio endpoint emitted silence; this never changes queue scheduling.
+  // QPC is sampled beside the pre-conversion submit-thread steady clock.
+  struct Transition {
+    uint64_t steady_us = 0;
+    uint64_t qpc_ticks = 0;
+    uint64_t last_success_gap_us = 0;
+    uint64_t buffer_ends_seen = 0;
+    uint64_t pause_epoch = 0;
+    uint32_t previous_depth = 0;
+    uint32_t current_depth = 0;
+    bool became_empty = false;
+    bool submit_success = false;
+    bool ratio_error = false;
+  };
+
   struct Checkpoint {
     Bin total;
     uint64_t sample_us = 0;
     size_t sample_bin = 0;
     uint32_t ordinal = 0;
     int64_t max_success_gap_bin = -1;
+    uint64_t qpc_frequency = 0;
+    std::array<Transition, kTransitionRingSize> transitions{};
+    size_t transition_count = 0;
+    uint64_t transitions_overwritten = 0;
   };
 
   AudioQueueTrace(uint64_t driver_id, int32_t client_index, uint64_t start_us,
-                  uint64_t pause_epoch)
+                  uint64_t pause_epoch, uint64_t qpc_frequency = 0)
       : driver_id_(driver_id),
         client_index_(client_index),
         created_us_(start_us),
-        pause_epoch_(pause_epoch) {}
+        pause_epoch_(pause_epoch),
+        qpc_frequency_(qpc_frequency) {}
 
   uint64_t driver_id() const { return driver_id_; }
   int32_t client_index() const { return client_index_; }
@@ -137,25 +159,29 @@ class AudioQueueTrace {
     paused_ = true;
     primed_ = false;
     last_success_us_ = 0;
+    has_previous_queue_sample_ = false;
   }
   void Resume() {
     std::lock_guard<std::mutex> lock(mutex_);
     paused_ = false;
     primed_ = false;
     last_success_us_ = 0;
+    has_previous_queue_sample_ = false;
   }
 
   // now_us is sampled once before the existing conversion and API submit.
   // queued_before is the existing GetState value. A failure has no successful
   // submission gap; ratio_error is meaningful only on successful submits.
   void Submission(uint64_t now_us, uint32_t queued_before, bool success,
-                  bool ratio_error, uint64_t pause_epoch) {
+                  bool ratio_error, uint64_t pause_epoch,
+                  uint64_t qpc_ticks = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!bin_origin_us_) bin_origin_us_ = now_us ? now_us : 1;
     if (client_index_ >= 0 && pause_epoch != pause_epoch_) {
       pause_epoch_ = pause_epoch;
       primed_ = false;
       last_success_us_ = 0;
+      has_previous_queue_sample_ = false;
     }
     Bin& bin = bins_[BinIndex(now_us)];
     Touch(bin, now_us);
@@ -176,6 +202,29 @@ class AudioQueueTrace {
     };
     count(bin);
     count(total_);
+    if (primed_ && !paused_) {
+      const bool empty = queued_before == 0;
+      if (has_previous_queue_sample_ && empty != previous_queue_empty_) {
+        Transition event;
+        event.steady_us = now_us;
+        event.qpc_ticks = qpc_ticks;
+        event.last_success_gap_us =
+            last_success_us_ && now_us >= last_success_us_
+                ? now_us - last_success_us_
+                : 0;
+        event.buffer_ends_seen = buffer_ends_.load(std::memory_order_relaxed);
+        event.pause_epoch = pause_epoch_;
+        event.previous_depth = previous_queue_depth_;
+        event.current_depth = queued_before;
+        event.became_empty = empty;
+        event.submit_success = success;
+        event.ratio_error = ratio_error;
+        PushTransition(event);
+      }
+      previous_queue_depth_ = queued_before;
+      previous_queue_empty_ = empty;
+      has_previous_queue_sample_ = true;
+    }
     SampleCallbacks(bin, now_us);
     if (success && !paused_) {
       last_success_us_ = now_us;
@@ -222,6 +271,19 @@ class AudioQueueTrace {
     out->sample_bin = BinIndex(sample_us);
     out->total = total_;
     out->max_success_gap_bin = -1;
+    out->qpc_frequency = qpc_frequency_;
+    out->transition_count = transition_size_;
+    out->transitions_overwritten = transitions_overwritten_;
+    const size_t oldest =
+        (transition_next_ + kTransitionRingSize - transition_size_) %
+        kTransitionRingSize;
+    for (size_t i = 0; i < transition_size_; ++i) {
+      out->transitions[i] =
+          transitions_[(oldest + i) % kTransitionRingSize];
+    }
+    transition_next_ = 0;
+    transition_size_ = 0;
+    transitions_overwritten_ = 0;
     uint64_t largest_gap = 0;
     for (size_t i = 0; i < bins_.size(); ++i) {
       const uint64_t gap = bins_[i].max_success_gap_us;
@@ -265,6 +327,16 @@ class AudioQueueTrace {
   }
 
  private:
+  void PushTransition(const Transition& event) {
+    transitions_[transition_next_] = event;
+    transition_next_ = (transition_next_ + 1) % kTransitionRingSize;
+    if (transition_size_ < kTransitionRingSize) {
+      ++transition_size_;
+    } else {
+      ++transitions_overwritten_;
+    }
+  }
+
   static bool Occupied(const Bin& bin) {
     return bin.attempts || bin.buffer_ends_sampled ||
            bin.voice_errors_sampled;
@@ -329,6 +401,14 @@ class AudioQueueTrace {
   bool primed_ = false;
   uint64_t last_success_us_ = 0;
   uint64_t pause_epoch_ = 0;
+  const uint64_t qpc_frequency_;
+  bool has_previous_queue_sample_ = false;
+  bool previous_queue_empty_ = false;
+  uint32_t previous_queue_depth_ = 0;
+  std::array<Transition, kTransitionRingSize> transitions_{};
+  size_t transition_next_ = 0;
+  size_t transition_size_ = 0;
+  uint64_t transitions_overwritten_ = 0;
   uint64_t last_checkpoint_sample_us_ = 0;
   uint32_t checkpoint_count_ = 0;
   std::atomic<uint64_t> buffer_ends_{0};

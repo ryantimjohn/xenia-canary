@@ -248,4 +248,104 @@ TEST_CASE("Audio queue live checkpoint budgets bound driver and process",
   CHECK(checkpoint.ordinal == 1);
 }
 
+TEST_CASE("Audio queue transitions coalesce repeated depths and retain QPC",
+          "[audio-queue-trace][transition]") {
+  AudioQueueTrace trace(41, 0, 1000000, 0, 10000000);
+  trace.Submission(1000000, 0, true, false, 0, 10000);  // Priming.
+  trace.Submission(1005333, 2, true, false, 0, 15333);  // First valid sample.
+  trace.BufferEnded();
+  trace.Submission(1010666, 0, true, false, 0, 20666);
+  trace.Submission(1015999, 0, true, false, 0, 25999);
+  trace.Submission(1021332, 2, false, false, 0, 31332);
+  trace.Submission(31000000, 2, true, false, 0, 310000000);
+  AudioQueueCheckpointBudget budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  REQUIRE(trace.TakeCheckpoint(31000000, budget, &checkpoint));
+  REQUIRE(checkpoint.transition_count == 2);
+  CHECK(checkpoint.qpc_frequency == 10000000);
+  CHECK(checkpoint.transitions_overwritten == 0);
+  const auto& empty = checkpoint.transitions[0];
+  CHECK(empty.steady_us == 1010666);
+  CHECK(empty.qpc_ticks == 20666);
+  CHECK(empty.previous_depth == 2);
+  CHECK(empty.current_depth == 0);
+  CHECK(empty.became_empty);
+  CHECK(empty.last_success_gap_us == 5333);
+  CHECK(empty.buffer_ends_seen == 1);
+  CHECK(empty.submit_success);
+  const auto& recovery = checkpoint.transitions[1];
+  CHECK_FALSE(recovery.became_empty);
+  CHECK(recovery.previous_depth == 0);
+  CHECK(recovery.current_depth == 2);
+  CHECK_FALSE(recovery.submit_success);
+  CHECK(recovery.pause_epoch == 0);
+}
+
+TEST_CASE("Audio queue transitions reset at pause and epoch priming",
+          "[audio-queue-trace][transition]") {
+  AudioQueueTrace trace(42, 0, 1000000, 0, 10000000);
+  trace.Submission(1000000, 0, true, false, 0);
+  trace.Submission(1005333, 1, true, false, 0);
+  trace.Pause();
+  trace.Submission(1500000, 0, true, false, 0);
+  trace.Resume();
+  trace.Submission(2000000, 0, true, false, 0);  // Fresh priming.
+  trace.Submission(2005333, 1, true, false, 0);
+  trace.Submission(2010666, 0, true, false, 0);  // One actual transition.
+  trace.Submission(3000000, 0, true, false, 2);  // Epoch reset/priming.
+  trace.Submission(3005333, 1, true, false, 2);
+  trace.Submission(3010666, 0, true, false, 2);
+  trace.Submission(31000000, 0, true, false, 2);
+  AudioQueueCheckpointBudget budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  REQUIRE(trace.TakeCheckpoint(31000000, budget, &checkpoint));
+  REQUIRE(checkpoint.transition_count == 2);
+  CHECK(checkpoint.transitions[0].pause_epoch == 0);
+  CHECK(checkpoint.transitions[1].pause_epoch == 2);
+  CHECK(checkpoint.transitions[0].became_empty);
+  CHECK(checkpoint.transitions[1].became_empty);
+}
+
+TEST_CASE("Audio queue transition ring keeps newest events and counts overwrites",
+          "[audio-queue-trace][transition]") {
+  AudioQueueTrace trace(43, 0, 1000000, 0);
+  trace.Submission(1000000, 0, true, false, 0);
+  trace.Submission(1005333, 1, true, false, 0);
+  for (size_t i = 0; i < AudioQueueTrace::kTransitionRingSize + 4; ++i) {
+    trace.Submission(1010666 + i * 5333, i & 1 ? 1 : 0, true, false, 0,
+                     20000 + i);
+  }
+  trace.Submission(31000000, 1, true, false, 0);
+  AudioQueueCheckpointBudget budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  REQUIRE(trace.TakeCheckpoint(31000000, budget, &checkpoint));
+  CHECK(checkpoint.transition_count == AudioQueueTrace::kTransitionRingSize);
+  CHECK(checkpoint.transitions_overwritten == 4);
+  CHECK(checkpoint.transitions[0].steady_us == 1010666 + 4 * 5333);
+  CHECK(checkpoint.transitions[checkpoint.transition_count - 1].qpc_ticks ==
+        20000 + AudioQueueTrace::kTransitionRingSize + 3);
+}
+
+TEST_CASE("Audio queue live checkpoints drain the transition ring once",
+          "[audio-queue-trace][transition]") {
+  AudioQueueTrace trace(44, 0, 1000000, 0);
+  trace.Submission(1000000, 0, true, false, 0);
+  trace.Submission(1005333, 1, true, false, 0);
+  trace.Submission(1010666, 0, true, false, 0);
+  trace.Submission(31000000, 0, true, false, 0);
+  AudioQueueCheckpointBudget budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  REQUIRE(trace.TakeCheckpoint(31000000, budget, &checkpoint));
+  CHECK(checkpoint.transition_count == 1);
+  trace.Submission(61000000, 0, true, false, 0);
+  REQUIRE(trace.TakeCheckpoint(61000000, budget, &checkpoint));
+  CHECK(checkpoint.transition_count == 0);
+  CHECK(checkpoint.transitions_overwritten == 0);
+  trace.Submission(61005333, 2, true, false, 0);
+  trace.Submission(91000000, 2, true, false, 0);
+  REQUIRE(trace.TakeCheckpoint(91000000, budget, &checkpoint));
+  REQUIRE(checkpoint.transition_count == 1);
+  CHECK_FALSE(checkpoint.transitions[0].became_empty);
+}
+
 }  // namespace xe::apu::test

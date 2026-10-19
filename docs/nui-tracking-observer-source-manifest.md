@@ -11,5 +11,9 @@
 - Static/source review: `git diff --check` passed. Source inspection checked
   the observer's bounded storage, separate mutex, validated HUD read point,
   and feed-only aggregate logging after callback returns.
+- Focused Catch source contains eight cases under `[nui-tracking-observer]`:
+  extraction bounds, disabled path, delivery and HUD correlation, row cap and
+  ambiguity, concurrent collection, session reset, slot movement versus set
+  change, and delayed interval plus first-end snapshot cap.
 - Native compile, tests, game, and sensor run: intentionally deferred to the
   coordinator's separately granted execution stage.

@@ -44,18 +44,25 @@ uint64_t TrackingNowUs() {
           .count());
 }
 
-void LogTrackingStats(const NuiTrackingObserver::Stats& s,
+void LogTrackingStats(const NuiTrackingObserver::Snapshot& snapshot,
                       const char* scope) {
+  const auto& s = snapshot.stats;
+  const uint64_t elapsed_ms = snapshot.end_us >= snapshot.start_us
+                                  ? (snapshot.end_us - snapshot.start_us) / 1000
+                                  : 0;
   XELOGI(
-      "NUI tracking observer {}: sessions={} source={} seq=[{},{}] skipped={} "
+      "NUI tracking observer {}: row={} steady_us=[{},{}] elapsed_ms={} "
+      "sessions={} source={} seq=[{},{}] skipped={} "
       "seq_resets={} no_buffer={} "
       "invalid_buffer={} copied_stamped={} completion_called={} "
       "callback_returned={} host_age_unknown={} host_age_max_ms={} "
       "delivery_gap_max_ms={} hud={} slots=[{},{},{},{}] "
-      "joints=[{},{},{},{}] ids=[{},{},{}] engaged=[{},{},{}] "
+      "joints=[{},{},{},{}] ids=[{},{},{}] tracked_set_changed={} "
+      "same_set_slot_reassigned={} guide=[{},{},{},{}] "
       "timestamp=[{},{},{}] hud_lag_max_ms={} hud_lag_unknown={} "
       "quality_nonzero={} nonfinite={} zero={}",
-      scope, s.sessions, s.source_frames, s.source_first, s.source_last,
+      scope, snapshot.row_index, snapshot.start_us, snapshot.end_us,
+      elapsed_ms, s.sessions, s.source_frames, s.source_first, s.source_last,
       s.source_skipped, s.source_resets, s.no_buffer,
       s.invalid_buffer, s.copied_stamped, s.completion_called,
       s.callback_returned, s.host_age_unknown, s.host_age_max_ms,
@@ -63,7 +70,9 @@ void LogTrackingStats(const NuiTrackingObserver::Stats& s,
       s.slot_states[1], s.slot_states[2], s.slot_states[3],
       s.joint_states[0], s.joint_states[1], s.joint_states[2],
       s.joint_states[3], s.id_appeared, s.id_disappeared, s.id_replaced,
-      s.engaged_matched, s.engaged_unmatched, s.engaged_ambiguous,
+      s.tracked_set_changed, s.same_set_slot_reassigned,
+      s.guide_not_selected, s.guide_selected_matched,
+      s.guide_selected_unmatched, s.guide_selected_ambiguous,
       s.timestamp_exact, s.timestamp_ambiguous, s.timestamp_unmatched,
       s.hud_lag_max_ms, s.hud_lag_unknown, s.quality_nonzero,
       s.nonfinite_vectors, s.zero_vectors);
@@ -71,7 +80,7 @@ void LogTrackingStats(const NuiTrackingObserver::Stats& s,
 
 void FlushTrackingRow(uint64_t now_us) {
   auto row = GetNuiTrackingObserver().TakeRow(now_us);
-  if (row) LogTrackingStats(*row, "one-second row");
+  if (row) LogTrackingStats(*row, "interval");
 }
 
 // Switch (read off the texture the runtime binds over the depth ring: format
@@ -833,7 +842,10 @@ void NuiCamera::FeedThreadMain() {
   feed_running_.store(false, std::memory_order_release);
   if (GetNuiTrackingObserver().enabled()) {
     FlushTrackingRow(TrackingNowUs());
-    LogTrackingStats(GetNuiTrackingObserver().Summary(), "feed-end total");
+    auto first_end =
+        GetNuiTrackingObserver().TakeFirstFeedEnd(TrackingNowUs());
+    if (first_end)
+      LogTrackingStats(*first_end, "cumulative through first feed end");
   }
   XELOGW(
       "NUI: frame feed stopped, {}, after {} depth and {} colour frames, {} "

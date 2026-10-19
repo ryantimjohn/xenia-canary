@@ -18,7 +18,7 @@
 namespace xe::kernel::xam::test {
 
 TEST_CASE("HUD sample bounds confidence and checks tracked vectors",
-          "[nui][tracking]") {
+          "[nui-tracking-observer]") {
   NuiMsg2B002 guest{};
   guest.timestamp = 123;
   guest.skeletons[0].tracking_state = 2;
@@ -32,6 +32,7 @@ TEST_CASE("HUD sample bounds confidence and checks tracked vectors",
       std::numeric_limits<float>::quiet_NaN();
   guest.skeletons[1].tracking_state = 1;
   guest.skeletons[1].position_tracking_state[0] = 99;
+  guest.engaged_tracking_id[0] = 77;  // [out], not evidence of selection.
   const auto sample = NuiTrackingObserver::ReadHudSample(guest);
   CHECK(sample.guest_timestamp_ms == 123);
   CHECK(sample.joint_states[0] == 17);
@@ -41,9 +42,11 @@ TEST_CASE("HUD sample bounds confidence and checks tracked vectors",
   CHECK(sample.quality_nonzero == 1);
   CHECK(sample.nonfinite_vectors == 1);
   CHECK(sample.zero_vectors == 18);
+  CHECK_FALSE(sample.guide_took);
+  CHECK(sample.guide_selected_id == 0);
 }
 
-TEST_CASE("Disabled tracking observer does no collection", "[nui][tracking]") {
+TEST_CASE("Disabled tracking observer does no collection", "[nui-tracking-observer]") {
   NuiTrackingObserver observer(false);
   NuiTrackingObserver::HudSample hud;
   hud.states[0] = 2;
@@ -58,7 +61,7 @@ TEST_CASE("Disabled tracking observer does no collection", "[nui][tracking]") {
 }
 
 TEST_CASE("Tracking observer distinguishes delivery and HUD evidence",
-          "[nui][tracking]") {
+          "[nui-tracking-observer]") {
   NuiTrackingObserver observer(true);
   observer.SourceFrame(1, 1000000);
   observer.SourceFrame(4, 1100000);
@@ -69,7 +72,8 @@ TEST_CASE("Tracking observer distinguishes delivery and HUD evidence",
   hud.guest_timestamp_ms = 42;
   hud.states[0] = 2;
   hud.ids[0] = 91;
-  hud.engaged_ids[0] = 91;
+  hud.guide_took = true;
+  hud.guide_selected_id = 91;
   hud.joint_states = {1, 2, 17, 0};
   hud.quality_nonzero = 1;
   hud.nonfinite_vectors = 1;
@@ -78,31 +82,35 @@ TEST_CASE("Tracking observer distinguishes delivery and HUD evidence",
                          1200000);
   observer.DepthDelivery(NuiTrackingObserver::Delivery::kReturned, 1202000);
   hud.ids[0] = 92;
-  hud.engaged_ids[0] = 91;
+  hud.guide_selected_id = 91;
   hud.guest_timestamp_ms = 999;
   observer.Hud(hud, 1300000);
   const auto row = observer.TakeRow(2000000);
   REQUIRE(row);
-  CHECK(row->source_frames == 2);
-  CHECK(row->source_skipped == 2);
-  CHECK(row->no_buffer == 1);
-  CHECK(row->copied_stamped == 1);
-  CHECK(row->completion_called == 1);
-  CHECK(row->callback_returned == 1);
-  CHECK(row->host_age_max_ms == 100);
-  CHECK(row->timestamp_exact == 1);
-  CHECK(row->timestamp_unmatched == 1);
-  CHECK(row->id_appeared == 1);
-  CHECK(row->id_replaced == 1);
-  CHECK(row->engaged_matched == 1);
-  CHECK(row->engaged_unmatched == 1);
-  CHECK(row->joint_states[3] == 0);
-  CHECK(row->quality_nonzero == 2);
-  CHECK(row->nonfinite_vectors == 2);
+  const auto& s = row->stats;
+  CHECK(row->row_index == 1);
+  CHECK(row->start_us == 1000000);
+  CHECK(row->end_us == 2000000);
+  CHECK(s.source_frames == 2);
+  CHECK(s.source_skipped == 2);
+  CHECK(s.no_buffer == 1);
+  CHECK(s.copied_stamped == 1);
+  CHECK(s.completion_called == 1);
+  CHECK(s.callback_returned == 1);
+  CHECK(s.host_age_max_ms == 100);
+  CHECK(s.timestamp_exact == 1);
+  CHECK(s.timestamp_unmatched == 1);
+  CHECK(s.id_appeared == 1);
+  CHECK(s.id_replaced == 1);
+  CHECK(s.guide_selected_matched == 1);
+  CHECK(s.guide_selected_unmatched == 1);
+  CHECK(s.joint_states[3] == 0);
+  CHECK(s.quality_nonzero == 2);
+  CHECK(s.nonfinite_vectors == 2);
 }
 
 TEST_CASE("Tracking observer bounds rows and handles ambiguous stamps",
-          "[nui][tracking]") {
+          "[nui-tracking-observer]") {
   NuiTrackingObserver observer(true);
   observer.DepthDelivery(NuiTrackingObserver::Delivery::kCopied, 1000000,
                          0, 42);
@@ -127,7 +135,7 @@ TEST_CASE("Tracking observer bounds rows and handles ambiguous stamps",
 }
 
 TEST_CASE("Tracking observer shares bounded counters across threads",
-          "[nui][tracking]") {
+          "[nui-tracking-observer]") {
   NuiTrackingObserver observer(true);
   std::vector<std::thread> threads;
   for (unsigned i = 0; i < 4; ++i) {
@@ -141,7 +149,7 @@ TEST_CASE("Tracking observer shares bounded counters across threads",
 }
 
 TEST_CASE("Tracking observer clears matching history between feed sessions",
-          "[nui][tracking]") {
+          "[nui-tracking-observer]") {
   NuiTrackingObserver observer(true);
   observer.SessionStarted(1000000);
   observer.SourceFrame(100, 1000000);
@@ -162,6 +170,49 @@ TEST_CASE("Tracking observer clears matching history between feed sessions",
   CHECK(total.id_replaced == 0);
   CHECK(total.timestamp_exact == 1);
   CHECK(total.timestamp_unmatched == 1);
+}
+
+TEST_CASE("Tracking observer distinguishes slot moves from tracked set changes",
+          "[nui-tracking-observer]") {
+  NuiTrackingObserver observer(true);
+  NuiTrackingObserver::HudSample hud;
+  hud.states[0] = hud.states[1] = 2;
+  hud.ids[0] = 12;
+  hud.ids[1] = 13;
+  observer.Hud(hud, 1000000);
+  hud.ids[0] = 13;
+  hud.ids[1] = 12;
+  observer.Hud(hud, 1001000);
+  CHECK(observer.Summary().same_set_slot_reassigned == 1);
+  CHECK(observer.Summary().tracked_set_changed == 0);
+  hud.ids[1] = 14;
+  observer.Hud(hud, 1002000);
+  CHECK(observer.Summary().same_set_slot_reassigned == 1);
+  CHECK(observer.Summary().tracked_set_changed == 1);
+}
+
+TEST_CASE("Tracking observer labels delayed intervals and caps feed-end logs",
+          "[nui-tracking-observer]") {
+  NuiTrackingObserver observer(true);
+  observer.SessionStarted(1000000);
+  observer.SourceFrame(1, 1000000);
+  const auto delayed = observer.TakeRow(4500000);
+  REQUIRE(delayed);
+  CHECK(delayed->row_index == 1);
+  CHECK(delayed->start_us == 1000000);
+  CHECK(delayed->end_us == 4500000);
+  const auto first_end = observer.TakeFirstFeedEnd(5000000);
+  REQUIRE(first_end);
+  CHECK(first_end->row_index == 0);
+  CHECK(first_end->start_us == 1000000);
+  CHECK(first_end->end_us == 5000000);
+  CHECK(first_end->stats.sessions == 1);
+  observer.SessionStarted(6000000);
+  observer.SourceFrame(2, 6000000);
+  CHECK_FALSE(observer.TakeFirstFeedEnd(7000000));
+  CHECK(observer.Summary().sessions == 2);
+  CHECK(observer.Summary().source_frames == 2);
+  CHECK(first_end->stats.source_frames == 1);
 }
 
 }  // namespace xe::kernel::xam::test

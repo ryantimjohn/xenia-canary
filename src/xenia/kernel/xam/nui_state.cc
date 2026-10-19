@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <optional>
 
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -523,9 +524,9 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
       kernel_state_->memory()->TranslateVirtual<const NuiMsg2B002*>(buffer_ptr);
 
   auto& observer = GetNuiTrackingObserver();
-  if (observer.enabled()) {
-    observer.Hud(NuiTrackingObserver::ReadHudSample(*args), NowUs());
-  }
+  std::optional<NuiTrackingObserver::HudSample> observer_sample;
+  if (observer.enabled())
+    observer_sample.emplace(NuiTrackingObserver::ReadHudSample(*args));
 
   NuiHudSkeletonFrame frame;
   for (size_t i = 0; i < kNuiSkeletonCount; i++) {
@@ -579,6 +580,7 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
 
   uint32_t taken_id = 0;
   if (!UpdateGuideFromFrame(*args, frame.frames, &taken_id)) {
+    if (observer_sample) observer.Hud(*observer_sample, NowUs());
     return X_E_SUCCESS;
   }
   // Having answered 0x8301000B, the runtime reads the two engaged ids back out
@@ -595,6 +597,11 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
         kernel_state_->memory()->TranslateVirtual<uint8_t*>(engaged_ids_ptr);
     xe::store_and_swap<uint32_t>(engaged_ids, taken_id);
     xe::store_and_swap<uint32_t>(engaged_ids + sizeof(uint32_t), 0);
+  }
+  if (observer_sample) {
+    observer_sample->guide_took = true;
+    observer_sample->guide_selected_id = taken_id;
+    observer.Hud(*observer_sample, NowUs());
   }
   return kNuiHudTookSkeleton;
 }

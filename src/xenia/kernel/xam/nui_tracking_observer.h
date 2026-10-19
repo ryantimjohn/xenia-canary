@@ -31,7 +31,10 @@ class NuiTrackingObserver {
     uint64_t guest_timestamp_ms = 0;
     std::array<uint32_t, 6> states{};
     std::array<uint32_t, 6> ids{};
-    std::array<uint32_t, 2> engaged_ids{};
+    // Filled from the local Guide decision after the handler finishes its
+    // original output handling. The message's engaged ID fields are [out].
+    uint32_t guide_selected_id = 0;
+    bool guide_took = false;
     std::array<uint32_t, 4> joint_states{};  // 0, 1, 2, invalid
     uint32_t quality_nonzero = 0;
     uint32_t nonfinite_vectors = 0;
@@ -59,9 +62,12 @@ class NuiTrackingObserver {
     uint64_t id_appeared = 0;
     uint64_t id_disappeared = 0;
     uint64_t id_replaced = 0;
-    uint64_t engaged_matched = 0;
-    uint64_t engaged_unmatched = 0;
-    uint64_t engaged_ambiguous = 0;
+    uint64_t tracked_set_changed = 0;
+    uint64_t same_set_slot_reassigned = 0;
+    uint64_t guide_not_selected = 0;
+    uint64_t guide_selected_matched = 0;
+    uint64_t guide_selected_unmatched = 0;
+    uint64_t guide_selected_ambiguous = 0;
     uint64_t timestamp_exact = 0;
     uint64_t timestamp_ambiguous = 0;
     uint64_t timestamp_unmatched = 0;
@@ -70,6 +76,13 @@ class NuiTrackingObserver {
     uint64_t quality_nonzero = 0;
     uint64_t nonfinite_vectors = 0;
     uint64_t zero_vectors = 0;
+  };
+
+  struct Snapshot {
+    Stats stats{};
+    uint64_t start_us = 0;
+    uint64_t end_us = 0;
+    uint64_t row_index = 0;  // Zero identifies the first-feed-end total.
   };
 
   explicit NuiTrackingObserver(bool enabled) : enabled_(enabled) {}
@@ -85,6 +98,9 @@ class NuiTrackingObserver {
     stamps_ = {};
     next_stamp_ = 0;
     last_ids_ = {};
+    last_tracked_set_ = {};
+    last_tracked_slots_ = {};
+    have_tracked_set_ = false;
   }
 
   static HudSample ReadHudSample(const NuiMsg2B002& frame) {
@@ -106,8 +122,6 @@ class NuiTrackingObserver {
         sample.zero_vectors += x == 0 && y == 0 && z == 0;
       }
     }
-    sample.engaged_ids[0] = frame.engaged_tracking_id[0];
-    sample.engaged_ids[1] = frame.engaged_tracking_id[1];
     return sample;
   }
 
@@ -174,6 +188,24 @@ class NuiTrackingObserver {
         copied_us = stamp.copied_us;
       }
     }
+    std::array<uint32_t, 6> tracked_slots{};
+    std::array<uint32_t, 6> tracked_set{};
+    size_t tracked_count = 0;
+    for (size_t i = 0; i < sample.ids.size(); ++i) {
+      if (sample.states[i] != 2 || !sample.ids[i]) continue;
+      tracked_slots[i] = sample.ids[i];
+      tracked_set[tracked_count++] = sample.ids[i];
+    }
+    std::sort(tracked_set.begin(), tracked_set.begin() + tracked_count);
+    tracked_count = static_cast<size_t>(
+        std::unique(tracked_set.begin(), tracked_set.begin() + tracked_count) -
+        tracked_set.begin());
+    // Clear duplicates left by unique, so the fixed arrays can be compared.
+    std::fill(tracked_set.begin() + tracked_count, tracked_set.end(), 0);
+    const bool set_changed =
+        have_tracked_set_ && tracked_set != last_tracked_set_;
+    const bool slots_reassigned = have_tracked_set_ && !set_changed &&
+                                  tracked_slots != last_tracked_slots_;
     Count([&](Stats& s) {
       ++s.hud_frames;
       if (matches == 1) ++s.timestamp_exact;
@@ -193,38 +225,58 @@ class NuiTrackingObserver {
       }
       for (size_t i = 0; i < sample.joint_states.size(); ++i)
         s.joint_states[i] += sample.joint_states[i];
-      for (uint32_t engaged : sample.engaged_ids) {
-        if (!engaged) continue;
+      s.tracked_set_changed += set_changed;
+      s.same_set_slot_reassigned += slots_reassigned;
+      if (!sample.guide_took) {
+        ++s.guide_not_selected;
+      } else {
         uint32_t slot_matches = 0;
         for (size_t i = 0; i < sample.ids.size(); ++i)
-          if (sample.ids[i] == engaged && sample.states[i] == 2) ++slot_matches;
-        if (slot_matches == 1) ++s.engaged_matched;
-        else if (slot_matches > 1) ++s.engaged_ambiguous;
-        else ++s.engaged_unmatched;
+          if (sample.guide_selected_id &&
+              sample.ids[i] == sample.guide_selected_id &&
+              sample.states[i] == 2)
+            ++slot_matches;
+        if (slot_matches == 1) ++s.guide_selected_matched;
+        else if (slot_matches > 1) ++s.guide_selected_ambiguous;
+        else ++s.guide_selected_unmatched;
       }
       s.quality_nonzero += sample.quality_nonzero;
       s.nonfinite_vectors += sample.nonfinite_vectors;
       s.zero_vectors += sample.zero_vectors;
     });
     last_ids_ = sample.ids;
+    last_tracked_set_ = tracked_set;
+    last_tracked_slots_ = tracked_slots;
+    have_tracked_set_ = true;
   }
 
   // Called only by the feed thread, after any guest callback has returned.
   // The copy leaves the observer mutex before formatting or logging.
-  std::optional<Stats> TakeRow(uint64_t now_us) {
+  std::optional<Snapshot> TakeRow(uint64_t now_us) {
     if (!enabled_) return std::nullopt;
     std::lock_guard<std::mutex> lock(mutex_);
     if (!window_start_us_ || now_us < window_start_us_ + 1000000)
       return std::nullopt;
+    const uint64_t start_us = window_start_us_;
     window_start_us_ = now_us;
     if (rows_ >= 360) {
       row_ = {};
       return std::nullopt;
     }
     ++rows_;
-    Stats result = row_;
+    Snapshot result{row_, start_us, now_us, rows_};
     row_ = {};
     return result;
+  }
+
+  // Only the first feed end prints a cumulative snapshot. All later session
+  // counters remain available through Summary and the bounded periodic rows.
+  std::optional<Snapshot> TakeFirstFeedEnd(uint64_t now_us) {
+    if (!enabled_) return std::nullopt;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (first_end_logged_) return std::nullopt;
+    first_end_logged_ = true;
+    return Snapshot{total_, observer_start_us_, now_us, 0};
   }
 
   Stats Summary() const {
@@ -236,6 +288,7 @@ class NuiTrackingObserver {
   template <typename F> void Count(F&& f) { f(row_); f(total_); }
   void StartWindow(uint64_t now_us) {
     if (!window_start_us_) window_start_us_ = now_us ? now_us : 1;
+    if (!observer_start_us_) observer_start_us_ = window_start_us_;
   }
 
   const bool enabled_;
@@ -243,13 +296,18 @@ class NuiTrackingObserver {
   Stats row_{};
   Stats total_{};
   uint64_t window_start_us_ = 0;
+  uint64_t observer_start_us_ = 0;
   uint64_t rows_ = 0;
+  bool first_end_logged_ = false;
   uint64_t last_source_sequence_ = 0;
   uint64_t last_delivery_us_ = 0;
   struct Stamp { uint64_t guest_ms = 0; uint64_t copied_us = 0; };
   std::array<Stamp, 16> stamps_{};
   size_t next_stamp_ = 0;
   std::array<uint32_t, 6> last_ids_{};
+  std::array<uint32_t, 6> last_tracked_set_{};
+  std::array<uint32_t, 6> last_tracked_slots_{};
+  bool have_tracked_set_ = false;
 };
 
 // The switch is captured once for the process lifetime; no public object or

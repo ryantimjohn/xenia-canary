@@ -107,7 +107,7 @@ std::array<uint8_t, kRecordBytes> EncodeRecord(const Record& record) {
 }
 
 std::array<uint8_t, kFooterBytes> EncodeFooter(const Counts& counts,
-                                                uint64_t end_qpc) {
+                                                uint64_t cutoff_qpc) {
   std::array<uint8_t, kFooterBytes> bytes{};
   std::memcpy(bytes.data(), "XPAIREND", 8);
   Put64(bytes.data() + 8, counts.accepted);
@@ -116,7 +116,7 @@ std::array<uint8_t, kFooterBytes> EncodeFooter(const Counts& counts,
   Put64(bytes.data() + 32, counts.dropped_queue);
   Put64(bytes.data() + 40, counts.dropped_limit);
   Put64(bytes.data() + 48, counts.write_errors);
-  Put64(bytes.data() + 56, end_qpc);
+  Put64(bytes.data() + 56, cutoff_qpc);
   return bytes;
 }
 
@@ -127,10 +127,14 @@ uint32_t FloatBits(float value) {
   return bits;
 }
 
-bool ValidateFile(const std::filesystem::path& path, Counts* counts) {
+bool ValidateFileStructure(const std::filesystem::path& path,
+                           FileSummary* summary) {
   std::error_code error;
   const uint64_t size = std::filesystem::file_size(path, error);
-  if (error || size < kHeaderBytes + kFooterBytes) return false;
+  if (error || size < kHeaderBytes + kFooterBytes ||
+      size > kHeaderBytes + uint64_t(kHardRecordLimit) * kRecordBytes +
+                 kFooterBytes)
+    return false;
   std::ifstream file(path, std::ios::binary);
   if (!file) return false;
   std::array<uint8_t, kHeaderBytes> header{};
@@ -152,13 +156,41 @@ bool ValidateFile(const std::filesystem::path& path, Counts* counts) {
   Counts found{Get64(footer.data() + 8), Get64(footer.data() + 16),
                Get64(footer.data() + 24), Get64(footer.data() + 32),
                Get64(footer.data() + 40), Get64(footer.data() + 48)};
+  const uint64_t start_qpc = Get64(header.data() + 40);
+  const uint64_t cutoff_qpc = Get64(footer.data() + 56);
   if (found.dropped_queue || found.dropped_limit || found.write_errors ||
       found.accepted != found.written ||
       found.written > Get32(header.data() + 24) ||
+      cutoff_qpc < start_qpc ||
       size != kHeaderBytes + found.written * kRecordBytes + kFooterBytes)
     return false;
-  if (counts) *counts = found;
+  file.clear();
+  file.seekg(kHeaderBytes);
+  for (uint64_t i = 0; i < found.written; ++i) {
+    std::array<uint8_t, kRecordBytes> record{};
+    file.read(reinterpret_cast<char*>(record.data()), record.size());
+    if (!file || Get32(record.data()) < uint32_t(Kind::kInputState) ||
+        Get32(record.data()) > uint32_t(Kind::kDepthSource) ||
+        Get64(record.data() + 8) < start_qpc ||
+        Get64(record.data() + 8) > cutoff_qpc)
+      return false;
+  }
+  if (summary)
+    *summary = {Get64(header.data() + 32), start_qpc, cutoff_qpc, found};
   return true;
+}
+
+bool MatchesCloseAcknowledgement(const FileSummary& file,
+                                 const CloseAcknowledgement& acknowledgement) {
+  const Counts& a = file.counts;
+  const Counts& b = acknowledgement.counts;
+  return acknowledgement.complete &&
+         file.start_qpc == acknowledgement.start_qpc &&
+         file.cutoff_qpc == acknowledgement.cutoff_qpc &&
+         a.accepted == b.accepted && a.written == b.written &&
+         a.coalesced == b.coalesced && a.dropped_queue == b.dropped_queue &&
+         a.dropped_limit == b.dropped_limit &&
+         a.write_errors == b.write_errors;
 }
 
 PendingRing::PendingRing(uint32_t capacity)
@@ -177,23 +209,33 @@ bool PendingRing::Pop(Record* record) {
   return true;
 }
 
-Session::Session(FILE* file, uint64_t, Tick tick, Limits limits)
-    : file_(file), tick_(std::move(tick)), limits_(limits), queue_(limits.queue) {}
+Session::Session(FILE* file, uint64_t start_qpc, Tick tick, Limits limits,
+                 BeforeFooter before_footer)
+    : file_(file),
+      tick_(std::move(tick)),
+      before_footer_(std::move(before_footer)),
+      start_qpc_(start_qpc),
+      limits_(limits),
+      queue_(limits.queue) {}
 
 std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
                                           uint64_t qpf, Tick tick,
-                                          Limits limits) {
+                                          Limits limits,
+                                          BeforeFooter before_footer) {
   if (!qpf || !tick || !limits.queue || !limits.records ||
       limits.queue > kHardQueueLimit || limits.records > kHardRecordLimit)
     return nullptr;
   FILE* file = CreateNew(path);
   if (!file) return nullptr;
-  const auto header = EncodeHeader(qpf, tick(), limits.queue, limits.records);
+  const uint64_t start_qpc = tick();
+  const auto header = EncodeHeader(qpf, start_qpc, limits.queue,
+                                   limits.records);
   if (!Write(file, header) || fflush(file)) {
     fclose(file);  // Preserve the incomplete exclusive-create output.
     return nullptr;
   }
-  std::unique_ptr<Session> session(new Session(file, qpf, std::move(tick), limits));
+  std::unique_ptr<Session> session(new Session(
+      file, start_qpc, std::move(tick), limits, std::move(before_footer)));
   try {
     session->writer_ = std::thread(&Session::WriterMain, session.get());
   } catch (...) {
@@ -207,7 +249,10 @@ std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
 Session::~Session() {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    stopping_ = true;
+    if (!stopping_) {
+      cutoff_qpc_ = tick_();
+      stopping_ = true;
+    }
   }
   pending_.notify_one();
   if (writer_.joinable()) writer_.join();
@@ -271,14 +316,17 @@ void Session::WriterMain() {
   }
   Counts final_counts;
   bool timed_out;
+  uint64_t cutoff_qpc;
+  if (before_footer_) before_footer_();
   {
     std::lock_guard<std::mutex> lock(mutex_);
     final_counts = counts_;
     timed_out = timed_out_;
+    cutoff_qpc = cutoff_qpc_;
   }
   // On a write failure a footer could falsely bless a truncated event stream.
   bool clean = writable && !timed_out &&
-               Write(file_, EncodeFooter(final_counts, tick_())) &&
+               Write(file_, EncodeFooter(final_counts, cutoff_qpc)) &&
                fflush(file_) == 0;
   if (fclose(file_) != 0) clean = false;
   file_ = nullptr;
@@ -294,7 +342,12 @@ void Session::WriterMain() {
 bool Session::Close(std::chrono::milliseconds timeout) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    stopping_ = true;
+    if (!stopping_) {
+      // This lock is the admission boundary. Every accepted record got its
+      // timestamp while holding it; later producer calls are out of scope.
+      cutoff_qpc_ = tick_();
+      stopping_ = true;
+    }
   }
   pending_.notify_one();
   std::unique_lock<std::mutex> lock(mutex_);
@@ -313,6 +366,11 @@ bool Session::Close(std::chrono::milliseconds timeout) {
 Counts Session::counts() const {
   std::lock_guard<std::mutex> lock(mutex_);
   return counts_;
+}
+
+uint64_t Session::cutoff_qpc() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return cutoff_qpc_;
 }
 
 uint64_t RawQpc() {
@@ -355,12 +413,15 @@ bool CloseForExit(std::chrono::milliseconds timeout) {
   if (!session) return true;
   const bool clean = session->Close(timeout);
   const Counts counts = session->counts();
-  XELOGI("Paired capture close: complete={} accepted={} written={} "
+  XELOGI("Paired capture close: start_qpc={} cutoff_qpc={} complete={} "
+         "accepted={} written={} "
          "coalesced={} queue_drops={} limit_drops={} write_errors={}",
-         clean, counts.accepted, counts.written, counts.coalesced,
+         session->start_qpc(), session->cutoff_qpc(), clean,
+         counts.accepted, counts.written, counts.coalesced,
          counts.dropped_queue, counts.dropped_limit, counts.write_errors);
-  // The process quick_exits immediately. A timeout deliberately retains the
-  // object and leaves a missing footer rather than waiting indefinitely.
+  // The process quick_exits immediately. On timeout the object is retained;
+  // a structurally valid footer alone never qualifies without this positive
+  // close acknowledgement in the flushed log.
   return clean;
 }
 

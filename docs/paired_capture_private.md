@@ -12,18 +12,30 @@ caller should use a fresh output directory and retain the ordinary log, which
 reports the final counts. The normal GUI exit path gives the writer two seconds
 to drain before `quick_exit`. Abnormal process exit can leave an incomplete
 file. The producer hooks only enqueue scalar records under a short mutex; the
-writer thread performs all record file I/O.
+writer thread performs all record file I/O. Close takes a raw-QPC cutoff while
+holding that admission mutex. The writer drains the accepted queue before
+closing; calls attempted after the cutoff are outside the capture interval and
+are ignored. A write failure makes the capture ineligible.
 
 The little-endian v1 file has a 64-byte header (`XPAIR001`, version 1, header
 and record sizes, queue and record limits, raw QPF, start QPC), zero or more
 112-byte records, and a 64-byte footer (`XPAIREND`, accepted, written,
-coalesced, queue drops, record-cap drops, write errors, end QPC). Each record is
+coalesced, queue drops, record-cap drops, write errors, cutoff QPC). Each record is
 kind/u32, key/u32, raw QPC/u64, then 24 u32 words. Floats are IEEE-754 bit
 patterns, and signed integers use their u32 two's-complement bits. The hard
 limits are 2048 queued and 131072 accepted records. Every overflow is counted.
-`ValidateFile` rejects a missing footer, bad sizes/magic, any drops or write
-errors, or unequal accepted/written counts. A timeout is also reported as an
-unclean close in the ordinary log; retain that log with the file.
+`ValidateFileStructure` rejects a missing footer, bad sizes/magic, any drops
+or write errors, unequal accepted/written counts, or a record QPC outside the
+start-to-cutoff interval. It establishes only structural integrity. Final
+qualification also requires the *flushed Xenia log from the same owned
+process* to contain one positive `Paired capture close` acknowledgment with
+matching start QPC, cutoff QPC, and all six counts. The session's
+`complete=false` makes it ineligible even if the file later gains a valid
+footer (for example, during a late flush). A final flush or close error can
+occur after the footer was formed, so file structure alone cannot prove a
+clean close. `MatchesCloseAcknowledgement` checks the bound scalar fields;
+the run validator must also establish log/process ownership. Keep the log and
+file together.
 
 Kinds and used words (remaining words are zero):
 

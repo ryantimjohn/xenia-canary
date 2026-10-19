@@ -57,20 +57,34 @@ struct Counts {
 
 // Header: magic[8], version/u32, sizes and limits/u32, zero/u32,
 // QPF/u64, start QPC/u64, reserved zeroes. Record: kind/u32, key/u32,
-// QPC/u64, 24 scalar words/u32. Footer: magic[8], six counts/u64, end QPC/u64.
-// A missing footer, count mismatch, drop or write error makes a capture
-// incomplete. Float values use their IEEE-754 bit pattern in one scalar word.
+// QPC/u64, 24 scalar words/u32. Footer: magic[8], six counts/u64, admission
+// cutoff QPC/u64. Float values use their IEEE-754 bit pattern in one word.
 std::array<uint8_t, kHeaderBytes> EncodeHeader(uint64_t qpf,
                                                 uint64_t start_qpc,
                                                 uint32_t queue_limit,
                                                 uint32_t record_limit);
 std::array<uint8_t, kRecordBytes> EncodeRecord(const Record& record);
 std::array<uint8_t, kFooterBytes> EncodeFooter(const Counts& counts,
-                                                uint64_t end_qpc);
+                                                uint64_t cutoff_qpc);
 uint32_t FloatBits(float value);
-// Offline qualification. Rejects absent/truncated footers, overflow, writer
-// errors, or counts inconsistent with the exact fixed-record file length.
-bool ValidateFile(const std::filesystem::path& path, Counts* counts = nullptr);
+struct FileSummary {
+  uint64_t qpf = 0;
+  uint64_t start_qpc = 0;
+  uint64_t cutoff_qpc = 0;
+  Counts counts{};
+};
+struct CloseAcknowledgement {
+  bool complete = false;
+  uint64_t start_qpc = 0;
+  uint64_t cutoff_qpc = 0;
+  Counts counts{};
+};
+// Structural validation alone does not qualify a capture. A positive close
+// acknowledgement from the flushed log of the same owned process is required.
+bool ValidateFileStructure(const std::filesystem::path& path,
+                           FileSummary* summary = nullptr);
+bool MatchesCloseAcknowledgement(const FileSummary& file,
+                                 const CloseAcknowledgement& acknowledgement);
 
 // Fixed ring, separated so full-queue behavior can be tested without racing
 // a writer thread. The caller holds the session mutex in production.
@@ -91,6 +105,8 @@ class PendingRing {
 class Session {
  public:
   using Tick = std::function<uint64_t()>;
+  // Test-only writer gate; production never supplies it.
+  using BeforeFooter = std::function<void()>;
   struct Limits {
     uint32_t queue = kHardQueueLimit;
     uint32_t records = kHardRecordLimit;
@@ -98,7 +114,8 @@ class Session {
   // Exclusive create-new output. No directory creation or overwrite.
   static std::unique_ptr<Session> Create(const std::filesystem::path& path,
                                           uint64_t qpf, Tick tick,
-                                          Limits limits);
+                                          Limits limits,
+                                          BeforeFooter before_footer = {});
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
@@ -109,6 +126,8 @@ class Session {
                    bool coalesce = false);
   bool Close(std::chrono::milliseconds timeout);
   Counts counts() const;
+  uint64_t start_qpc() const { return start_qpc_; }
+  uint64_t cutoff_qpc() const;
   uint64_t TickNow() const { return tick_(); }
 
  private:
@@ -118,10 +137,14 @@ class Session {
     uint32_t key = 0;
     Words words{};
   };
-  Session(FILE* file, uint64_t qpf, Tick tick, Limits limits);
+  Session(FILE* file, uint64_t start_qpc, Tick tick, Limits limits,
+          BeforeFooter before_footer);
   void WriterMain();
   FILE* file_ = nullptr;
   Tick tick_;
+  BeforeFooter before_footer_;
+  uint64_t start_qpc_ = 0;
+  uint64_t cutoff_qpc_ = 0;
   Limits limits_;
   PendingRing queue_;
   mutable std::mutex mutex_;

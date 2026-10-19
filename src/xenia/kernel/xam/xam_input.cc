@@ -8,6 +8,7 @@
  */
 
 #include <chrono>
+#include <optional>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -131,13 +132,12 @@ uint32_t InputGetKeystroke(observe::Api api, lpdword_t user_index_ptr,
         return operation(*input_system);
       },
       completion);
-  if (entry.enabled) {
-    observe::Snapshot(completion, keystroke);
-  }
-  EndInputObservation(entry, completion);
-  if (auto* capture = paired_capture::Active(); capture &&
-      result == X_ERROR_SUCCESS && keystroke && keystroke->virtual_key) {
-    paired_capture::Words words{};
+  auto* paired = paired_capture::Active();
+  std::optional<paired_capture::Words> paired_words;
+  uint32_t paired_user = 0;
+  if (paired && result == X_ERROR_SUCCESS && keystroke &&
+      keystroke->virtual_key) {
+    auto& words = paired_words.emplace();
     words[0] = result;
     words[1] = uint32_t(completion.route);
     words[2] = completion.user;
@@ -147,9 +147,15 @@ uint32_t InputGetKeystroke(observe::Api api, lpdword_t user_index_ptr,
     words[6] = keystroke->flags;
     words[7] = keystroke->user_index;
     words[8] = keystroke->hid_code;
-    capture->RecordEvent(paired_capture::Kind::kKeystroke,
-                         keystroke->user_index, words);
+    paired_user = keystroke->user_index;
   }
+  if (paired_words)
+    paired->RecordEvent(paired_capture::Kind::kKeystroke, paired_user,
+                        *paired_words);
+  if (entry.enabled) {
+    observe::Snapshot(completion, keystroke);
+  }
+  EndInputObservation(entry, completion);
   return result;
 }
 }  // namespace
@@ -245,19 +251,10 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
       },
       completion);
 
-  if (completion.route == observe::Route::kDriver && input_state &&
-      result == X_ERROR_SUCCESS) {
-    if (auto patch = kernel_state()->xmp_volume_patch()) {
-      patch->OnInputPoll(input_state->packet_number);
-    }
-  }
-
-  if (entry.enabled) {
-    observe::Snapshot(completion, input_state);
-  }
-  EndInputObservation(entry, completion);
-  if (auto* capture = paired_capture::Active()) {
-    paired_capture::Words words{};
+  auto* paired = paired_capture::Active();
+  std::optional<paired_capture::Words> paired_words;
+  if (paired) {
+    auto& words = paired_words.emplace();
     words[0] = result;
     words[1] = uint32_t(completion.route);
     words[2] = user_index;
@@ -273,9 +270,22 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
       words[11] = uint32_t(int32_t(input_state->gamepad.thumb_rx));
       words[12] = uint32_t(int32_t(input_state->gamepad.thumb_ry));
     }
-    capture->RecordEvent(paired_capture::Kind::kInputState, user_index,
-                         words, true);
   }
+  if (paired_words)
+    paired->RecordEvent(paired_capture::Kind::kInputState, user_index,
+                        *paired_words, true);
+
+  if (completion.route == observe::Route::kDriver && input_state &&
+      result == X_ERROR_SUCCESS) {
+    if (auto patch = kernel_state()->xmp_volume_patch()) {
+      patch->OnInputPoll(input_state->packet_number);
+    }
+  }
+
+  if (entry.enabled) {
+    observe::Snapshot(completion, input_state);
+  }
+  EndInputObservation(entry, completion);
   return result;
 }
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);

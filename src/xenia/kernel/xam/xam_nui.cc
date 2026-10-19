@@ -299,8 +299,8 @@ dword_result_t XamNuiCameraTiltGetStatus_entry(
   // can aim from; otherwise it stays as the fill cleared it.
   FillNuiTiltStatusLegs(block_ptr, legs, nui_state()->IsTiltMotorMoving());
   FillNuiTiltStatusFloor(nui_state()->remembered_floor(), block_ptr);
-  LogNuiTiltStatus(degrees, block_ptr->accel_y, block_ptr->accel_z);
   CaptureTiltStatus(X_ERROR_SUCCESS, block_ptr.operator->(), degrees);
+  LogNuiTiltStatus(degrees, block_ptr->accel_y, block_ptr->accel_z);
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamNuiCameraTiltGetStatus, kNone, kImplemented);

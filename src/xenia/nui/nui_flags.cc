@@ -54,6 +54,11 @@ DEFINE_string(nui_replay, "",
               "when it ends.",
               "Kinect");
 
+DEFINE_bool(nui_replay_deadline_timing, false,
+            "Pace --nui=replay to cumulative microsecond deadlines rather "
+            "than adding read and processing time to each frame gap.",
+            "Kinect");
+
 DEFINE_bool(nui_guide_gesture, true,
             "Watch the skeletons a Kinect title hands xam for the Kinect Guide "
             "gesture, the left arm held still out to the side and down at "

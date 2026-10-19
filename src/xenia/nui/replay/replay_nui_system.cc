@@ -18,6 +18,7 @@
 #include "xenia/base/logging.h"
 #include "xenia/nui/depth_recording.h"
 #include "xenia/nui/nui_flags.h"
+#include "xenia/nui/replay/replay_deadline.h"
 
 namespace xe {
 namespace nui {
@@ -221,7 +222,10 @@ void ReplayNuiSystem::WorkerThreadMain() {
 
   bool have_previous_frame = false;
   uint64_t previous_timestamp_us = 0;
+  const bool deadline_timing = cvars::nui_replay_deadline_timing;
+  ReplayDeadline deadline;
   const bool observe_timing = cvars::replay_timing_observe;
+  const bool track_record_index = observe_timing || deadline_timing;
   uint64_t next_record_index = 0;
   uint32_t eof_wraps_logged = 0;
   bool first_rewind_logged = false;
@@ -241,8 +245,9 @@ void ReplayNuiSystem::WorkerThreadMain() {
       // The next frame is the first of the recording again, and there is
       // nothing left to pace it against, so it goes out as soon as it is read.
       have_previous_frame = false;
+      if (deadline_timing) deadline.Reset();
+      if (track_record_index) next_record_index = 0;
       if (observe_timing) {
-        next_record_index = 0;
         if (first_post_rewind_pending) {
           // A second rewind superseded the first before it published a frame.
           // Keep only the first acknowledgement; the missing publication is
@@ -274,13 +279,25 @@ void ReplayNuiSystem::WorkerThreadMain() {
       break;
     }
 
-    const bool eof_wrap =
-        observe_timing && next_record_index >= frame_count_;
-    const uint64_t record_index = eof_wrap ? 0 : next_record_index;
-    if (observe_timing) next_record_index = record_index + 1;
+    const bool pacing_eof_wrap =
+        track_record_index && next_record_index >= frame_count_;
+    const bool eof_wrap = observe_timing && pacing_eof_wrap;
+    const uint64_t record_index = pacing_eof_wrap ? 0 : next_record_index;
+    if (track_record_index) next_record_index = record_index + 1;
     const uint64_t before_wrap_recorded_us = previous_timestamp_us;
 
-    if (have_previous_frame) {
+    const bool first_frame_of_phase = !have_previous_frame;
+    if (have_previous_frame && deadline_timing) {
+      // Compare the microsecond deadline with the host clock after the read.
+      // Read/processing time and prior rounded waits are already spent, so
+      // only the remaining time is waited here. A late frame is published as
+      // soon as possible; no frame is skipped or reordered to catch up.
+      if (!SleepWhileRunning(deadline.WaitForNext(
+              previous_timestamp_us, timestamp_us, pacing_eof_wrap,
+              std::chrono::steady_clock::now()))) {
+        break;
+      }
+    } else if (have_previous_frame) {
       // Hand the frames over at the speed they were captured at. A pair with
       // no usable gap between them - two frames of one burst, or the wrap back
       // to the start of the file - falls back to the sensor's frame rate.
@@ -305,6 +322,9 @@ void ReplayNuiSystem::WorkerThreadMain() {
     if (observe_timing &&
         (first_post_rewind_pending || (eof_wrap && eof_wraps_logged < 2))) {
       observed_frame = frame;
+    }
+    if (deadline_timing && first_frame_of_phase) {
+      deadline.Anchor(std::chrono::steady_clock::now());
     }
     PublishFrame(std::move(frame));
     if (observed_frame) {

@@ -23,6 +23,7 @@ DECLARE_bool(nui_accelerometer);
 DECLARE_bool(nui_show_depth_preview);
 DECLARE_string(nui_record);
 DECLARE_string(nui_replay);
+DECLARE_bool(nui_replay_deadline_timing);
 DECLARE_bool(nui_guide_gesture);
 DECLARE_int32(nui_guide_angle_min);
 DECLARE_int32(nui_guide_angle_max);

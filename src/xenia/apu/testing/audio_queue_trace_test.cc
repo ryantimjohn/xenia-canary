@@ -8,13 +8,42 @@
  */
 
 #include "xenia/apu/audio_queue_trace.h"
+#include "xenia/apu/xaudio2/xaudio2_api.h"
 
+#include <xaudio2.h>
+
+#include <cstddef>
 #include <thread>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
 
 namespace xe::apu::test {
+
+// The local 2.7/2.8 interface wrapper must pass the complete structure
+// expected by the platform API, not a prefix containing only the glitch field.
+static_assert(sizeof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA) ==
+              sizeof(::XAUDIO2_PERFORMANCE_DATA));
+static_assert(alignof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA) ==
+              alignof(::XAUDIO2_PERFORMANCE_DATA));
+#define XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(field)                         \
+  static_assert(offsetof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA, field) == \
+                offsetof(::XAUDIO2_PERFORMANCE_DATA, field))
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(AudioCyclesSinceLastQuery);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(TotalCyclesSinceLastQuery);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(MinimumCyclesPerQuantum);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(MaximumCyclesPerQuantum);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(MemoryUsageInBytes);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(CurrentLatencyInSamples);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(GlitchesSinceEngineStarted);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveSourceVoiceCount);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(TotalSourceVoiceCount);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveSubmixVoiceCount);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveResamplerCount);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveMatrixMixCount);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveXmaSourceVoices);
+XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(ActiveXmaStreams);
+#undef XE_CHECK_XAUDIO2_PERFORMANCE_FIELD
 
 TEST_CASE("Audio queue trace excludes startup priming and exposes a later gap",
           "[audio-queue-trace]") {

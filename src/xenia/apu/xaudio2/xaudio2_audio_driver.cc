@@ -39,11 +39,20 @@ std::atomic<uint64_t> next_trace_driver_id{1};
 AudioQueueLogBudget trace_log_budget;
 AudioQueueCheckpointBudget trace_checkpoint_budget;
 
-void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, uint64_t sample_us) {
+template <typename AudioInterface>
+void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
+                             uint64_t sample_us) {
   AudioQueueTrace::Checkpoint checkpoint;
   if (!trace.TakeCheckpoint(sample_us, trace_checkpoint_budget, &checkpoint))
     return;
-  // The collector mutex is released. This clock is read only for a due
+  // Each driver owns one XAudio2 engine. Query only on an already-due
+  // checkpoint, after the original submit path, through the selected 2.7 or
+  // 2.8+ interface. This is engine-wide, not a source-voice glitch count.
+  api::XAUDIO2_PERFORMANCE_DATA performance{};
+  const uint64_t engine_query_start_us = AudioTraceNowUs();
+  audio->GetPerformanceData(&performance);
+  const uint64_t engine_query_end_us = AudioTraceNowUs();
+  // The collector mutex is released. These clocks are read only for a due
   // checkpoint, before synchronous logging under the caller's existing lock.
   const uint64_t log_start_us = AudioTraceNowUs();
   const auto& total = checkpoint.total;
@@ -57,14 +66,16 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, uint64_t sample_us) {
       "cumulative_steady_us=[{},{}] attempts={} submitted={} "
       "submit_errors={} ratio_errors={} min_queued_before={} "
       "queue_zero={} queue_one={} max_success_gap_us={} "
-      "max_success_gap_bin={} buffer_ends_sampled={} voice_errors_sampled={}",
+      "max_success_gap_bin={} buffer_ends_sampled={} voice_errors_sampled={} "
+      "engine_glitches_since_start={} engine_query_steady_us=[{},{}]",
       trace.driver_id(), trace.client_index(), checkpoint.ordinal,
       checkpoint.sample_us, checkpoint.sample_bin, log_start_us,
       trace.start_us(), total.last_us, total.attempts, total.submitted,
       total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
       total.queue_one, total.max_success_gap_us,
       checkpoint.max_success_gap_bin, total.buffer_ends_sampled,
-      total.voice_errors_sampled);
+      total.voice_errors_sampled, performance.GlitchesSinceEngineStarted,
+      engine_query_start_us, engine_query_end_us);
 }
 
 void LogQueueTraceBin(const AudioQueueTrace& trace, size_t index,
@@ -364,7 +375,15 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
           trace_now_us, state.BuffersQueued, false, false,
           AudioQueuePauseEpoch().load(std::memory_order_relaxed));
     XELOGE("SubmitSourceBuffer failed with 0x{:08X}", hr);
-    if (queue_trace_) MaybeLogQueueCheckpoint(*queue_trace_, trace_now_us);
+    if (queue_trace_) {
+      if (api_minor_version_ >= 8) {
+        MaybeLogQueueCheckpoint(*queue_trace_, objects_.api_2_8.audio,
+                                trace_now_us);
+      } else {
+        MaybeLogQueueCheckpoint(*queue_trace_, objects_.api_2_7.audio,
+                                trace_now_us);
+      }
+    }
     return;
   }
 
@@ -383,7 +402,13 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
     queue_trace_->Submission(
         trace_now_us, state.BuffersQueued, true, FAILED(ratio_hr),
         AudioQueuePauseEpoch().load(std::memory_order_relaxed));
-    MaybeLogQueueCheckpoint(*queue_trace_, trace_now_us);
+    if (api_minor_version_ >= 8) {
+      MaybeLogQueueCheckpoint(*queue_trace_, objects_.api_2_8.audio,
+                              trace_now_us);
+    } else {
+      MaybeLogQueueCheckpoint(*queue_trace_, objects_.api_2_7.audio,
+                              trace_now_us);
+    }
   }
 }
 

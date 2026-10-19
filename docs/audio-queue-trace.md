@@ -40,6 +40,27 @@ through its last `Submission`, and need not include callbacks occurring before
 the log line finishes. A normal GUI quick exit may skip shutdown entirely, so
 the final interval shorter than 30 seconds may have no checkpoint or summary.
 
+Each due checkpoint also calls `IXAudio2::GetPerformanceData` once on that
+driver's selected 2.7 or 2.8+ engine interface. The same INFO line appends
+`engine_glitches_since_start`, the engine's cumulative dropout counter, and
+`engine_query_steady_us=[start,end]` so the extra synchronous query cost is
+visible. No query occurs on non-due submissions or when this default-off trace
+is disabled. The engine belongs to a driver lifetime; a new driver, including
+one reusing a client slot, has a new engine and counter origin. The counter is
+engine-wide and 32-bit, not a voice, guest stream, song, or audible-stutter
+count. It can be compared only within that driver's checkpoint sequence,
+accounting for possible 32-bit wrap. On an early GUI
+exit, its final change after the last checkpoint is unavailable.
+
+The performance query runs after the original submit/ratio calls and before
+the checkpoint log, still under the registered client's existing AudioSystem
+submit lock. It may delay following submissions. XAudio2 also reports CPU
+cycle fields "since last query," so this read advances their reference point;
+the trace neither logs nor interprets those fields and there are no other
+`GetPerformanceData` callers in this source tree. Treat queue bins near each
+query and log as observer-adjacent. The extra fields change the checkpoint
+format; parsers for the prior source commit must not silently consume it.
+
 The 30-second gate uses steady wall time, excluding no pause duration. A
 paused driver emits no checkpoint while paused; its first post-resume
 submission may emit immediately if the gate elapsed during the pause.

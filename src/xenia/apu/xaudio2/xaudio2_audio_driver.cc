@@ -86,13 +86,15 @@ void FlushQueueTrace(const AudioQueueTrace& trace,
       "flush_steady_us=[{},{}] occupied_bins={} emitted_bins={} "
       "omitted_bins={} attempts={} submitted={} submit_errors={} "
       "ratio_errors={} min_queued_before={} queue_zero={} queue_one={} "
-      "max_success_gap_us={} buffer_ends_sampled={} voice_errors_sampled={}",
+      "max_success_gap_us={} max_success_gap_bin={} "
+      "buffer_ends_sampled={} voice_errors_sampled={}",
       trace.driver_id(), trace.client_index(), trace.start_us(),
       total.last_us, teardown_start_us, before_summary_us, flush_start_us,
       before_summary_us, selection.occupied, emitted,
       selection.occupied - emitted, total.attempts, total.submitted,
       total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
       total.queue_one, total.max_success_gap_us,
+      selection.max_success_gap_bin,
       total.buffer_ends_sampled, total.voice_errors_sampled);
 }
 

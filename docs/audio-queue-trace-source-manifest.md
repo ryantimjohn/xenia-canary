@@ -11,8 +11,9 @@
   every translation unit including that header (`xaudio2_audio_driver.cc`,
   `xaudio2_audio_system.cc`) and all linked consumers of the XAudio2 driver;
   no guest ABI or `AudioSystem` layout changes.
-- Six focused Catch cases use `[audio-queue-trace]` and cover priming/gap,
+- Seven focused Catch cases use `[audio-queue-trace]` and cover priming/gap,
   submit errors, pause epochs, callback atomics/overflow, a shared budget,
-  and late severe-bin selection over early healthy bins.
+  late severe-bin selection over early healthy bins, and localization of a
+  largest gap omitted by the selected-row cap.
 - Native compile, tests, emulator, game, and sensor execution are deferred to
   the coordinator's separately authorized stage.

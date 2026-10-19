@@ -122,4 +122,28 @@ TEST_CASE("Audio queue selection keeps a late severe bin over early healthy bins
   CHECK(selected.occupied - selected.count == 3);
 }
 
+TEST_CASE("Audio queue summary locates the largest gap omitted from top eight",
+          "[audio-queue-trace]") {
+  AudioQueueTrace trace(15, 0, 1000000, 0);
+  for (uint64_t i = 0; i < 9; ++i) {
+    trace.Resume();
+    const uint64_t at = 1000000 + i * 1000000;
+    trace.Submission(at, 0, true, false, 0);
+    trace.Submission(at + 1, 0, true, false, 0);
+  }
+  trace.Resume();
+  trace.Submission(21000000, 1, true, false, 0);
+  trace.Submission(21050000, 1, true, false, 0);
+  const auto selected = trace.SelectWorstBins();
+  CHECK(selected.occupied == 10);
+  CHECK(selected.count == AudioQueueTrace::kRowsPerShutdown);
+  CHECK(selected.max_success_gap_us == 50000);
+  CHECK(selected.max_success_gap_bin == 20);
+  bool gap_bin_selected = false;
+  for (size_t i = 0; i < selected.count; ++i)
+    gap_bin_selected |= selected.indexes[i] == 20;
+  CHECK_FALSE(gap_bin_selected);
+  CHECK(trace.GetTotal().max_success_gap_us == 50000);
+}
+
 }  // namespace xe::apu::test

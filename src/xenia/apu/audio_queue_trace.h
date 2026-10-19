@@ -84,6 +84,8 @@ class AudioQueueTrace {
     std::array<size_t, kRowsPerShutdown> indexes{};
     size_t count = 0;
     size_t occupied = 0;
+    int64_t max_success_gap_bin = -1;
+    uint64_t max_success_gap_us = 0;
   };
 
   AudioQueueTrace(uint64_t driver_id, int32_t client_index, uint64_t start_us,
@@ -179,6 +181,13 @@ class AudioQueueTrace {
     for (size_t i = 0; i < bins_.size(); ++i) {
       if (!Occupied(bins_[i])) continue;
       ++selection.occupied;
+      if (bins_[i].max_success_gap_us &&
+          (bins_[i].max_success_gap_us > selection.max_success_gap_us ||
+           (bins_[i].max_success_gap_us == selection.max_success_gap_us &&
+            i > static_cast<size_t>(selection.max_success_gap_bin)))) {
+        selection.max_success_gap_us = bins_[i].max_success_gap_us;
+        selection.max_success_gap_bin = static_cast<int64_t>(i);
+      }
       size_t position = 0;
       while (position < selection.count &&
              !Worse(bins_[i], i, bins_[selection.indexes[position]],

@@ -14,7 +14,10 @@ seconds since the first submit attempt plus one overflow bin. It prints at
 most **eight selected bins per driver**, ranking queue-zero samples, API
 errors, voice errors, and long gaps ahead of healthy bins. Ties prefer later
 bins. The cumulative summary includes occupied, emitted, and omitted bin
-counts; omitted bins still contribute to that summary. A process-wide budget
+counts; omitted bins still contribute to that summary. It also reports
+`max_success_gap_bin` for the largest successful-attempt gap, even when that
+bin is omitted from the eight selected rows. A value of `-1` means there was
+no measured successful-attempt gap. A process-wide budget
 limits **all drivers combined** to 600 selected rows and 16 cumulative
 driver-shutdown summaries. A depleted budget suppresses later lines without
 changing the counters while a driver exists. A driver emits selected rows
@@ -33,7 +36,8 @@ exclude paused submissions and the first successful submission after an
 explicit driver pause/resume or system pause/resume. `max_success_gap_us`
 compares **pre-conversion, pre-API timestamps** of successful submit attempts
 in the same unpaused priming period; it is not the gap between API completion
-times. A failed
+times. The reported gap bin is based on the later successful attempt's
+pre-conversion timestamp; the overflow bin may span many seconds. A failed
 submit cannot start a new gap. The XAudio2 callback only increments atomic
 `buffer_ends` and `voice_errors` counters. Those are sampled at the next
 submit or shutdown and assigned to that sample's bin, so their bin time is

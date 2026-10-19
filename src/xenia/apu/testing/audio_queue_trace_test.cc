@@ -144,6 +144,79 @@ TEST_CASE("Audio queue summary locates the largest gap omitted from top eight",
     gap_bin_selected |= selected.indexes[i] == 20;
   CHECK_FALSE(gap_bin_selected);
   CHECK(trace.GetTotal().max_success_gap_us == 50000);
+  trace.Resume();
+  trace.Submission(31000000, 1, true, false, 0);
+  AudioQueueCheckpointBudget checkpoint_budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  CHECK(trace.TakeCheckpoint(31000000, checkpoint_budget, &checkpoint));
+  CHECK(checkpoint.max_success_gap_bin == 20);
+  CHECK(checkpoint.total.max_success_gap_us == 50000);
+  // The live checkpoint is available without Finish or driver Shutdown.
+  CHECK(checkpoint.total.attempts == 21);
+}
+
+TEST_CASE("Audio queue checkpoints start at first submit and exact 30 seconds",
+          "[audio-queue-trace]") {
+  AudioQueueTrace trace(16, 0, 1000000, 0);
+  AudioQueueCheckpointBudget budget;
+  AudioQueueTrace::Checkpoint checkpoint;
+  trace.Submission(5000000, 0, true, false, 0);
+  CHECK_FALSE(trace.TakeCheckpoint(5000000, budget, &checkpoint));
+  trace.Submission(34999999, 1, true, false, 0);
+  CHECK_FALSE(trace.TakeCheckpoint(34999999, budget, &checkpoint));
+  trace.Submission(35000000, 1, true, false, 0);
+  CHECK(trace.TakeCheckpoint(35000000, budget, &checkpoint));
+  CHECK(checkpoint.ordinal == 1);
+  CHECK(checkpoint.sample_us == 35000000);
+  CHECK(checkpoint.total.attempts == 3);
+  trace.Submission(64999999, 1, true, false, 0);
+  CHECK_FALSE(trace.TakeCheckpoint(64999999, budget, &checkpoint));
+  trace.Submission(65000000, 1, true, false, 0);
+  CHECK(trace.TakeCheckpoint(65000000, budget, &checkpoint));
+  CHECK(checkpoint.ordinal == 2);
+  CHECK(checkpoint.total.attempts == 5);
+  AudioQueueTrace paused(17, 0, 1000000, 0);
+  AudioQueueCheckpointBudget paused_budget;
+  paused.Submission(1000000, 0, true, false, 0);
+  paused.Pause();
+  paused.Submission(31000000, 1, true, false, 0);
+  CHECK_FALSE(paused.TakeCheckpoint(31000000, paused_budget, &checkpoint));
+  paused.Resume();
+  paused.Submission(31000001, 1, true, false, 0);
+  CHECK(paused.TakeCheckpoint(31000001, paused_budget, &checkpoint));
+  CHECK(checkpoint.ordinal == 1);
+}
+
+TEST_CASE("Audio queue live checkpoint budgets bound driver and process",
+          "[audio-queue-trace]") {
+  AudioQueueCheckpointBudget process_budget;
+  uint32_t emitted = 0;
+  for (uint64_t driver = 0; driver < 9; ++driver) {
+    AudioQueueTrace trace(20 + driver, 0, 1000000, 0);
+    AudioQueueTrace::Checkpoint checkpoint;
+    trace.Submission(1000000, 0, true, false, 0);
+    for (uint64_t ordinal = 1; ordinal <= 13; ++ordinal) {
+      const uint64_t at = 1000000 +
+                          ordinal * AudioQueueTrace::kCheckpointPeriodUs;
+      trace.Submission(at, 1, true, false, 0);
+      const bool took = trace.TakeCheckpoint(at, process_budget, &checkpoint);
+      CHECK(took == (driver < 8 && ordinal <= 12));
+      if (took) {
+        ++emitted;
+        CHECK(checkpoint.ordinal == ordinal);
+      }
+    }
+  }
+  CHECK(emitted == 96);
+  AudioQueueTrace late(40, 0, 1000000, 0);
+  AudioQueueCheckpointBudget empty_budget(0);
+  AudioQueueTrace::Checkpoint checkpoint;
+  late.Submission(1000000, 0, true, false, 0);
+  late.Submission(31000000, 1, true, false, 0);
+  CHECK_FALSE(late.TakeCheckpoint(31000000, empty_budget, &checkpoint));
+  AudioQueueCheckpointBudget one_token(1);
+  CHECK(late.TakeCheckpoint(31000000, one_token, &checkpoint));
+  CHECK(checkpoint.ordinal == 1);
 }
 
 }  // namespace xe::apu::test

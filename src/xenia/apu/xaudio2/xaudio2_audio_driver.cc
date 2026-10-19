@@ -37,6 +37,35 @@ uint64_t AudioTraceNowUs() {
 
 std::atomic<uint64_t> next_trace_driver_id{1};
 AudioQueueLogBudget trace_log_budget;
+AudioQueueCheckpointBudget trace_checkpoint_budget;
+
+void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, uint64_t sample_us) {
+  AudioQueueTrace::Checkpoint checkpoint;
+  if (!trace.TakeCheckpoint(sample_us, trace_checkpoint_budget, &checkpoint))
+    return;
+  // The collector mutex is released. This clock is read only for a due
+  // checkpoint, before synchronous logging under the caller's existing lock.
+  const uint64_t log_start_us = AudioTraceNowUs();
+  const auto& total = checkpoint.total;
+  const int64_t min_queue =
+      total.min_queue_before == AudioQueueTrace::kNoQueueSample
+          ? -1
+          : static_cast<int64_t>(total.min_queue_before);
+  XELOGI(
+      "APU XAudio2 queue live-checkpoint driver={} client={} ordinal={} "
+      "sample_steady_us={} sample_bin={} log_start_steady_us={} "
+      "cumulative_steady_us=[{},{}] attempts={} submitted={} "
+      "submit_errors={} ratio_errors={} min_queued_before={} "
+      "queue_zero={} queue_one={} max_success_gap_us={} "
+      "max_success_gap_bin={} buffer_ends_sampled={} voice_errors_sampled={}",
+      trace.driver_id(), trace.client_index(), checkpoint.ordinal,
+      checkpoint.sample_us, checkpoint.sample_bin, log_start_us,
+      trace.start_us(), total.last_us, total.attempts, total.submitted,
+      total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
+      total.queue_one, total.max_success_gap_us,
+      checkpoint.max_success_gap_bin, total.buffer_ends_sampled,
+      total.voice_errors_sampled);
+}
 
 void LogQueueTraceBin(const AudioQueueTrace& trace, size_t index,
                       const AudioQueueTrace::Bin& bin) {
@@ -335,6 +364,7 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
           trace_now_us, state.BuffersQueued, false, false,
           AudioQueuePauseEpoch().load(std::memory_order_relaxed));
     XELOGE("SubmitSourceBuffer failed with 0x{:08X}", hr);
+    if (queue_trace_) MaybeLogQueueCheckpoint(*queue_trace_, trace_now_us);
     return;
   }
 
@@ -349,10 +379,12 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
   } else {
     ratio_hr = objects_.api_2_7.pcm_voice->SetFrequencyRatio(frequency_ratio);
   }
-  if (queue_trace_)
+  if (queue_trace_) {
     queue_trace_->Submission(
         trace_now_us, state.BuffersQueued, true, FAILED(ratio_hr),
         AudioQueuePauseEpoch().load(std::memory_order_relaxed));
+    MaybeLogQueueCheckpoint(*queue_trace_, trace_now_us);
+  }
 }
 
 void XAudio2AudioDriver::Pause() {

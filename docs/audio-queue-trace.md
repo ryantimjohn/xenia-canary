@@ -26,6 +26,32 @@ first and last observed steady-clock microseconds, its index, and submission
 counts. The overflow bin may cover longer than one second. `min_queued_before=-1`
 means no post-priming queue sample was taken in that bin.
 
+While a driver is active, one cumulative `live-checkpoint` INFO line is
+eligible 30 seconds after its first recorded submission and at least 30
+seconds after each emitted checkpoint. Each driver emits at most 12, and all
+drivers together emit at most 96. The snapshot retains all cumulative anomaly
+counters without requiring driver shutdown; `ordinal` and `sample_steady_us`
+identify the checkpoint, while `sample_bin` identifies the bin of that last
+pre-conversion submission timestamp. `log_start_steady_us` is sampled after
+the XAudio2 calls and collector snapshot, just before logging. The summary's
+`max_success_gap_bin` locates the largest measured gap even if the eight
+shutdown rows omit it. Callback counts in a live checkpoint are sampled
+through its last `Submission`, and need not include callbacks occurring before
+the log line finishes. A normal GUI quick exit may skip shutdown entirely, so
+the final interval shorter than 30 seconds may have no checkpoint or summary.
+
+The 30-second gate uses steady wall time, excluding no pause duration. A
+paused driver emits no checkpoint while paused; its first post-resume
+submission may emit immediately if the gate elapsed during the pause.
+Checkpoint logging runs after the original XAudio2 calls but within the
+registered client's existing AudioSystem submit lock. Its output can delay
+the next submission; treat the checkpoint's sample bin and the following
+successful-submission gap as potentially perturbed. A later cumulative
+maximum gap may include a previous checkpoint's logging time. The counters
+retain those samples without subtracting estimated observer time.
+Process-wide and per-driver
+budgets limit this effect.
+
 `attempts` counts `SubmitFrame` calls reaching the existing XAudio2 `GetState`
 and submit path. `submitted` and `submit_errors` classify the result of
 `SubmitSourceBuffer`. `ratio_errors` counts failed `SetFrequencyRatio` calls

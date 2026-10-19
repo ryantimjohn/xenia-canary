@@ -55,6 +55,24 @@ class AudioQueueLogBudget {
   std::atomic<uint32_t> summaries_left_;
 };
 
+class AudioQueueCheckpointBudget {
+ public:
+  explicit AudioQueueCheckpointBudget(uint32_t checkpoints = 96)
+      : left_(checkpoints) {}
+  bool Take() {
+    uint32_t value = left_.load(std::memory_order_relaxed);
+    while (value) {
+      if (left_.compare_exchange_weak(value, value - 1,
+                                      std::memory_order_relaxed))
+        return true;
+    }
+    return false;
+  }
+
+ private:
+  std::atomic<uint32_t> left_;
+};
+
 // Per-driver collector. Only the submit/pause thread takes the mutex. XAudio2
 // callbacks increment atomics and never timestamp, allocate, or log.
 class AudioQueueTrace {
@@ -62,6 +80,8 @@ class AudioQueueTrace {
   static constexpr size_t kSeconds = 600;
   static constexpr size_t kBinCount = kSeconds + 1;  // Last bin is overflow.
   static constexpr size_t kRowsPerShutdown = 8;
+  static constexpr uint32_t kCheckpointsPerDriver = 12;
+  static constexpr uint64_t kCheckpointPeriodUs = 30000000;
   static constexpr uint32_t kNoQueueSample =
       std::numeric_limits<uint32_t>::max();
 
@@ -86,6 +106,14 @@ class AudioQueueTrace {
     size_t occupied = 0;
     int64_t max_success_gap_bin = -1;
     uint64_t max_success_gap_us = 0;
+  };
+
+  struct Checkpoint {
+    Bin total;
+    uint64_t sample_us = 0;
+    size_t sample_bin = 0;
+    uint32_t ordinal = 0;
+    int64_t max_success_gap_bin = -1;
   };
 
   AudioQueueTrace(uint64_t driver_id, int32_t client_index, uint64_t start_us,
@@ -171,6 +199,40 @@ class AudioQueueTrace {
   Bin GetTotal() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return total_;
+  }
+
+  // Called after the original submit path has finished. The supplied time is
+  // the same pre-conversion sample used by Submission, so non-due calls need
+  // no second clock read. No logging occurs while the collector mutex is held.
+  bool TakeCheckpoint(uint64_t sample_us, AudioQueueCheckpointBudget& budget,
+                      Checkpoint* out) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!out || !bin_origin_us_ || paused_ ||
+        checkpoint_count_ >= kCheckpointsPerDriver)
+      return false;
+    const uint64_t since = last_checkpoint_sample_us_
+                               ? last_checkpoint_sample_us_
+                               : bin_origin_us_;
+    if (sample_us < since || sample_us - since < kCheckpointPeriodUs ||
+        !budget.Take())
+      return false;
+    last_checkpoint_sample_us_ = sample_us;
+    out->ordinal = ++checkpoint_count_;
+    out->sample_us = sample_us;
+    out->sample_bin = BinIndex(sample_us);
+    out->total = total_;
+    out->max_success_gap_bin = -1;
+    uint64_t largest_gap = 0;
+    for (size_t i = 0; i < bins_.size(); ++i) {
+      const uint64_t gap = bins_[i].max_success_gap_us;
+      if (gap && (gap > largest_gap ||
+                  (gap == largest_gap &&
+                   i > static_cast<size_t>(out->max_success_gap_bin)))) {
+        largest_gap = gap;
+        out->max_success_gap_bin = static_cast<int64_t>(i);
+      }
+    }
+    return true;
   }
 
   // Fixed-size top-eight selection across the entire lifetime, rather than
@@ -267,6 +329,8 @@ class AudioQueueTrace {
   bool primed_ = false;
   uint64_t last_success_us_ = 0;
   uint64_t pause_epoch_ = 0;
+  uint64_t last_checkpoint_sample_us_ = 0;
+  uint32_t checkpoint_count_ = 0;
   std::atomic<uint64_t> buffer_ends_{0};
   std::atomic<uint64_t> voice_errors_{0};
   uint64_t last_buffer_ends_ = 0;

@@ -861,6 +861,14 @@ void NuiCamera::FeedThreadMain() {
     if (!frame || frame->sequence <= last_sequence) {
       continue;
     }
+    if (auto* capture = paired_capture::Active()) {
+      paired_capture::Words words{};
+      words[0] = uint32_t(frame->sequence);
+      words[1] = uint32_t(frame->sequence >> 32);
+      words[2] = uint32_t(frame->timestamp_us);
+      words[3] = uint32_t(frame->timestamp_us >> 32);
+      capture->RecordEvent(paired_capture::Kind::kDepthSource, 0, words);
+    }
     if (GetNuiTrackingObserver().enabled())
       GetNuiTrackingObserver().SourceFrame(frame->sequence, TrackingNowUs());
     last_sequence = frame->sequence;

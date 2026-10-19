@@ -36,6 +36,7 @@ enum class Kind : uint32_t {
   kElevationGet = 6,
   kElevationSet = 7,
   kRememberFloor = 8,
+  kDepthSource = 9,
 };
 
 using Words = std::array<uint32_t, 24>;

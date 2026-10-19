@@ -88,16 +88,18 @@ TEST_CASE("Paired sidecar closes cleanly and requires its footer",
   CHECK_FALSE(Session::Create(file.path(), 10000000, clock, {2, 4}));
   Words words{};
   words[0] = 69;
+  words[2] = 123456;
+  session->RecordEvent(Kind::kDepthSource, 0, words);
   session->RecordEvent(Kind::kDepthReturn, 0, words);
   REQUIRE(session->Close(2s));
   Counts counts;
   REQUIRE(ValidateFile(file.path(), &counts));
-  CHECK(counts.accepted == 1);
-  CHECK(counts.written == 1);
+  CHECK(counts.accepted == 2);
+  CHECK(counts.written == 2);
   CHECK(std::filesystem::file_size(file.path()) ==
-        kHeaderBytes + kRecordBytes + kFooterBytes);
+        kHeaderBytes + 2 * kRecordBytes + kFooterBytes);
   std::filesystem::resize_file(file.path(),
-                               kHeaderBytes + kRecordBytes);
+                               kHeaderBytes + 2 * kRecordBytes);
   CHECK_FALSE(ValidateFile(file.path()));
 }
 

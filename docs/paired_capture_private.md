@@ -37,11 +37,15 @@ Kinds and used words (remaining words are zero):
 | 6 ElevationGet | 0 | result, degrees, status, angle written, status written |
 | 7 ElevationSet | 0 | result, requested degrees |
 | 8 RememberFloor | 0 | result, floor plane float bits A/B/C/D, flag |
+| 9 DepthSource | 0 | acquired published sequence low/high, published steady-clock microseconds low/high |
 
 The record QPC is taken when the event is enqueued. `DepthReturn` also carries
 copy QPC sampled after the guest buffer/result write, and its record QPC is
 taken after successful request completion. The published sequence and
-steady-clock timestamp join the existing `.xdepth` frame header. These clocks
+steady-clock timestamp join the existing `.xdepth` frame header. `DepthSource`
+records when the camera feed acquired that published frame, after the actual
+publication; it does not claim to timestamp the earlier publish instant.
+These clocks
 do not establish exact guest perception or audible song onset. A returned
 frame may be an older published sequence. InputState, tilt, elevation and
 floor observations emit first/on-change records. InputState packet number and

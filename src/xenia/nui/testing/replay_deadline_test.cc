@@ -99,9 +99,9 @@ TEST_CASE("Replay deadline retains the deliberate 200 ms cap",
   CHECK(pace.WaitForNext(530000, 0, true, AtUs(400000)) == 33ms);
   // The resulting first-frame-to-wrap target is 433 ms, not the uncapped
   // source span plus fallback (563 ms). This policy difference is intentional.
-  // For the live10 fixture the same 130 ms policy loss means a requested
-  // first-publication-to-first-EOF timeline of 302,598,662 us:
-  // 302,695,662 us source span - 130,000 us caps + 33,000 us EOF fallback.
+  // A recording's precise target must be calculated from raw microsecond
+  // gaps. A millisecond-floor summary can include sub-ms remainders in its
+  // reported cap loss, so it is not an exact deadline-mode reference.
 }
 
 }  // namespace test

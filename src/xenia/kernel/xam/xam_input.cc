@@ -17,6 +17,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/input_observe.h"
+#include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
@@ -134,6 +135,21 @@ uint32_t InputGetKeystroke(observe::Api api, lpdword_t user_index_ptr,
     observe::Snapshot(completion, keystroke);
   }
   EndInputObservation(entry, completion);
+  if (auto* capture = paired_capture::Active(); capture &&
+      result == X_ERROR_SUCCESS && keystroke && keystroke->virtual_key) {
+    paired_capture::Words words{};
+    words[0] = result;
+    words[1] = uint32_t(completion.route);
+    words[2] = completion.user;
+    words[3] = completion.flags;
+    words[4] = keystroke->virtual_key;
+    words[5] = keystroke->unicode;
+    words[6] = keystroke->flags;
+    words[7] = keystroke->user_index;
+    words[8] = keystroke->hid_code;
+    capture->RecordEvent(paired_capture::Kind::kKeystroke,
+                         keystroke->user_index, words);
+  }
   return result;
 }
 }  // namespace
@@ -240,6 +256,26 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
     observe::Snapshot(completion, input_state);
   }
   EndInputObservation(entry, completion);
+  if (auto* capture = paired_capture::Active()) {
+    paired_capture::Words words{};
+    words[0] = result;
+    words[1] = uint32_t(completion.route);
+    words[2] = user_index;
+    words[3] = flags;
+    words[4] = input_state && result == X_ERROR_SUCCESS ? 1 : 0;
+    if (words[4]) {
+      words[5] = input_state->packet_number;
+      words[6] = input_state->gamepad.buttons;
+      words[7] = input_state->gamepad.left_trigger;
+      words[8] = input_state->gamepad.right_trigger;
+      words[9] = uint32_t(int32_t(input_state->gamepad.thumb_lx));
+      words[10] = uint32_t(int32_t(input_state->gamepad.thumb_ly));
+      words[11] = uint32_t(int32_t(input_state->gamepad.thumb_rx));
+      words[12] = uint32_t(int32_t(input_state->gamepad.thumb_ry));
+    }
+    capture->RecordEvent(paired_capture::Kind::kInputState, user_index,
+                         words, true);
+  }
   return result;
 }
 DECLARE_XAM_EXPORT2(XamInputGetState, kInput, kImplemented, kHighFrequency);

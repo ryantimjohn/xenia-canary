@@ -24,6 +24,7 @@
 #include "xenia/kernel/xam/nui_messages.h"
 #include "xenia/kernel/xam/nui_state.h"
 #include "xenia/kernel/xam/nui_tilt_status.h"
+#include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xam/xam_state.h"
 #include "xenia/nui/nui_flags.h"
@@ -39,6 +40,42 @@ namespace {
 // Shorthand for the guest-visible Kinect state, which every export below reads
 // or writes. X_NUI_DEVICE_STATUS lives alongside it in nui_state.h.
 NuiState* nui_state() { return kernel_state()->xam_state()->nui_state(); }
+
+void CaptureTiltStatus(X_RESULT result, const X_NUI_TILT_STATUS* block = nullptr,
+                       int32_t degrees = 0) {
+  auto* capture = paired_capture::Active();
+  if (!capture) return;
+  paired_capture::Words words{};
+  words[0] = result;
+  words[1] = uint32_t(degrees);
+  words[2] = block ? 1 : 0;
+  if (block) {
+    words[3] = uint32_t(int32_t(block->accel_x));
+    words[4] = uint32_t(int32_t(block->accel_y));
+    words[5] = uint32_t(int32_t(block->accel_z));
+    words[6] = block->status_flags;
+    for (size_t i = 0; i < 4; ++i)
+      words[7 + i] = paired_capture::FloatBits(block->floor_plane[i]);
+    words[11] = block->floor_flags;
+    words[12] = uint32_t(int32_t(block->floor_accel_x));
+    words[13] = uint32_t(int32_t(block->floor_accel_y));
+    words[14] = uint32_t(int32_t(block->floor_accel_z));
+  }
+  capture->RecordEvent(paired_capture::Kind::kTiltStatus, 0, words, true);
+}
+
+void CaptureElevationGet(X_RESULT result, int32_t degrees, uint32_t status,
+                         bool angle_written, bool status_written) {
+  auto* capture = paired_capture::Active();
+  if (!capture) return;
+  paired_capture::Words words{};
+  words[0] = result;
+  words[1] = uint32_t(degrees);
+  words[2] = status;
+  words[3] = angle_written ? 1 : 0;
+  words[4] = status_written ? 1 : 0;
+  capture->RecordEvent(paired_capture::Kind::kElevationGet, 0, words, true);
+}
 
 // Reports what went into the tilt-status block. The title polls it about fifty
 // times a second - 7,759 calls in a 150 s run - so a line per call would bury
@@ -236,9 +273,11 @@ dword_result_t XamNuiCameraTiltGetStatus_entry(
       !nui_state()->IsGuestRangeWritable(block_ptr.guest_address(),
                                          sizeof(X_NUI_TILT_STATUS)) ||
       !IsValidNuiTiltStatus(block_ptr)) {
+    CaptureTiltStatus(X_E_FAIL);
     return X_E_FAIL;
   }
   if (!nui_state()->IsDevicePresent()) {
+    CaptureTiltStatus(X_E_DEVICE_NOT_CONNECTED);
     return X_E_DEVICE_NOT_CONNECTED;
   }
   int32_t degrees = 0;
@@ -247,6 +286,7 @@ dword_result_t XamNuiCameraTiltGetStatus_entry(
     // A sensor whose angle xenia cannot read is, as far as the block goes, a
     // sensor that is not there: nothing is written and the caller keeps what
     // it put in the block itself.
+    CaptureTiltStatus(X_E_DEVICE_NOT_CONNECTED);
     return X_E_DEVICE_NOT_CONNECTED;
   }
   // The range, size and signature were validated above. A sensor whose
@@ -260,6 +300,7 @@ dword_result_t XamNuiCameraTiltGetStatus_entry(
   FillNuiTiltStatusLegs(block_ptr, legs, nui_state()->IsTiltMotorMoving());
   FillNuiTiltStatusFloor(nui_state()->remembered_floor(), block_ptr);
   LogNuiTiltStatus(degrees, block_ptr->accel_y, block_ptr->accel_z);
+  CaptureTiltStatus(X_ERROR_SUCCESS, block_ptr.operator->(), degrees);
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamNuiCameraTiltGetStatus, kNone, kImplemented);
@@ -280,6 +321,7 @@ dword_result_t XamNuiCameraElevationGetAngle_entry(lpdword_t angle_ptr,
                         angle_ptr.guest_address(), sizeof(uint32_t))) ||
       (status_ptr && !nui_state()->IsGuestRangeWritable(
                          status_ptr.guest_address(), sizeof(uint32_t)))) {
+    CaptureElevationGet(X_E_INVALIDARG, 0, 0, false, false);
     return X_E_INVALIDARG;
   }
   int32_t degrees = 0;
@@ -306,6 +348,9 @@ dword_result_t XamNuiCameraElevationGetAngle_entry(lpdword_t angle_ptr,
         "written",
         angle_ptr.guest_address(), status_ptr.guest_address(), result);
   }
+  CaptureElevationGet(result, degrees, status,
+                      XSUCCEEDED(result) && bool(angle_ptr),
+                      XSUCCEEDED(result) && bool(status_ptr));
   return result;
 }
 DECLARE_XAM_EXPORT1(XamNuiCameraElevationGetAngle, kNone, kImplemented);
@@ -313,7 +358,15 @@ DECLARE_XAM_EXPORT1(XamNuiCameraElevationGetAngle, kNone, kImplemented);
 dword_result_t XamNuiCameraElevationSetAngle_entry(dword_t degrees) {
   LogNuiCall("NUI: XamNuiCameraElevationSetAngle({})",
              static_cast<int32_t>(degrees.value()));
-  return nui_state()->SetTiltDegrees(static_cast<int32_t>(degrees.value()));
+  const X_RESULT result =
+      nui_state()->SetTiltDegrees(static_cast<int32_t>(degrees.value()));
+  if (auto* capture = paired_capture::Active()) {
+    paired_capture::Words words{};
+    words[0] = result;
+    words[1] = degrees.value();
+    capture->RecordEvent(paired_capture::Kind::kElevationSet, 0, words, true);
+  }
+  return result;
 }
 DECLARE_XAM_EXPORT1(XamNuiCameraElevationSetAngle, kNone, kImplemented);
 
@@ -368,9 +421,27 @@ dword_result_t XamNuiCameraRememberFloor_entry(qword_t plane_ab,
       plane[0], plane[1], plane[2], plane[3], flag.value());
 
   if (!nui_state()->IsDevicePresent()) {
+    if (auto* capture = paired_capture::Active()) {
+      paired_capture::Words words{};
+      words[0] = X_E_DEVICE_NOT_CONNECTED;
+      for (size_t i = 0; i < 4; ++i)
+        words[1 + i] = paired_capture::FloatBits(plane[i]);
+      words[5] = flag.value();
+      capture->RecordEvent(paired_capture::Kind::kRememberFloor, 0, words,
+                           true);
+    }
     return X_E_DEVICE_NOT_CONNECTED;
   }
   nui_state()->RememberFloor(plane, flag);
+  if (auto* capture = paired_capture::Active()) {
+    paired_capture::Words words{};
+    words[0] = X_ERROR_SUCCESS;
+    for (size_t i = 0; i < 4; ++i)
+      words[1 + i] = paired_capture::FloatBits(plane[i]);
+    words[5] = flag.value();
+    capture->RecordEvent(paired_capture::Kind::kRememberFloor, 0, words,
+                         true);
+  }
   return X_ERROR_SUCCESS;
 }
 DECLARE_XAM_EXPORT1(XamNuiCameraRememberFloor, kNone, kStub);

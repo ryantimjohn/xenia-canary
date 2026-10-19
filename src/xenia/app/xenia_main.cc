@@ -27,6 +27,7 @@
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
 #include "xenia/kernel/xam/xam_module.h"
+#include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
@@ -546,6 +547,10 @@ bool EmulatorApp::OnInitialize() {
 
   config::SetupConfig(storage_root);
 
+  // Open the private scalar sidecar before guest threads can produce events.
+  // Empty (the default) performs no file or thread work.
+  if (!kernel::xam::paired_capture::StartFromFlag()) return false;
+
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();
 #elif XE_ARCH_ARM64 == 1
@@ -623,6 +628,10 @@ void EmulatorApp::OnDestroy() {
 
   // TODO(DrChat): Remove this code and do a proper exit.
   XELOGI("Cheap-skate exit!");
+
+  // Normal GUI close quick_exits and skips static destructors. Bound the
+  // writer drain here; a missing footer identifies an incomplete sidecar.
+  kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
 
   xe::FlushLog();
 

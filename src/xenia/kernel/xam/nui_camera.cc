@@ -27,6 +27,7 @@
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/nui_state.h"
 #include "xenia/kernel/xam/nui_tracking_observer.h"
+#include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/nui/depth_frame.h"
 #include "xenia/nui/nui_depth_convert.h"
 #include "xenia/nui/nui_flags.h"
@@ -549,6 +550,11 @@ X_STATUS NuiCamera::HandleQueueBuffer(uint32_t request_ptr) {
     if (system) {
       system->OnGuestStreamStarted();
     }
+    if (auto* capture = paired_capture::Active()) {
+      paired_capture::Words words{};
+      words[0] = is_depth ? 1 : 2;
+      capture->RecordEvent(paired_capture::Kind::kStreamStart, 0, words);
+    }
   }
   if (log_trigger) {
     XELOGI("Replay timing NUI first_stream_trigger host_us={} image={}",
@@ -951,6 +957,8 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
   WriteNuiCameraFrameResult(
       memory->TranslateVirtual<uint8_t*>(request.request), sequence,
       guest_stamp_ms);
+  auto* paired = paired_capture::Active();
+  const uint64_t paired_copy_qpc = paired ? paired->TickNow() : 0;
   const bool log_first_copy =
       cvars::replay_timing_observe &&
       !timing_first_copy_logged.exchange(true, std::memory_order_relaxed);
@@ -967,6 +975,19 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kCompletionCalled, TrackingNowUs());
   CompleteRequest(request, X_STATUS_SUCCESS, request.length);
+  if (paired) {
+    paired_capture::Words words{};
+    words[0] = uint32_t(frame.sequence);
+    words[1] = uint32_t(frame.sequence >> 32);
+    words[2] = uint32_t(frame.timestamp_us);
+    words[3] = uint32_t(frame.timestamp_us >> 32);
+    words[4] = sequence;
+    words[5] = uint32_t(guest_stamp_ms);
+    words[6] = uint32_t(guest_stamp_ms >> 32);
+    words[7] = uint32_t(paired_copy_qpc);
+    words[8] = uint32_t(paired_copy_qpc >> 32);
+    paired->RecordEvent(paired_capture::Kind::kDepthReturn, 0, words);
+  }
   const uint64_t return_us = log_first_copy ? TrackingNowUs() : 0;
   if (GetNuiTrackingObserver().enabled())
     GetNuiTrackingObserver().DepthDelivery(

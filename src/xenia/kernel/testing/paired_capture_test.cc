@@ -243,7 +243,8 @@ TEST_CASE("Paired footer gate timeout is an unacknowledged close",
     release = true;
   }
   gate_cv.notify_all();
-  session.reset();  // Joins the previously blocked writer.
+  CHECK_FALSE(session->Close(2s));  // A late drain cannot reverse the timeout.
+  session.reset();
   CHECK(saw_gate);
   CHECK_FALSE(clean);
   CHECK_FALSE(ValidateFileStructure(file.path()));

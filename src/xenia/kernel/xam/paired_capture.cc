@@ -355,7 +355,7 @@ bool Session::Close(std::chrono::milliseconds timeout) {
     timed_out_ = true;
     return false;
   }
-  const bool clean = clean_close_ && !counts_.dropped_queue &&
+  const bool clean = clean_close_ && !timed_out_ && !counts_.dropped_queue &&
                      !counts_.dropped_limit && !counts_.write_errors &&
                      counts_.accepted == counts_.written;
   lock.unlock();
@@ -409,9 +409,13 @@ bool StartFromFlag() {
 Session* Active() { return active.load(std::memory_order_acquire); }
 
 bool CloseForExit(std::chrono::milliseconds timeout) {
-  Session* session = active.exchange(nullptr, std::memory_order_acq_rel);
+  // Keep the pointer published until Close takes the admission mutex and
+  // establishes the cutoff. An in-flight producer can still safely reach the
+  // leaked session; calls after cutoff see stopping_ and are ignored.
+  Session* session = active.load(std::memory_order_acquire);
   if (!session) return true;
   const bool clean = session->Close(timeout);
+  active.store(nullptr, std::memory_order_release);
   const Counts counts = session->counts();
   XELOGI("Paired capture close: start_qpc={} cutoff_qpc={} complete={} "
          "accepted={} written={} "

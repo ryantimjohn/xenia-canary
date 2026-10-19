@@ -87,10 +87,10 @@ TEST_CASE("Audio queue trace samples callback atomics and caps time bins",
 TEST_CASE("Audio queue log budget bounds rows and summaries across drivers",
           "[audio-queue-trace]") {
   AudioQueueLogBudget budget(2, 1);
+  CHECK(budget.TakeSummary());  // Reserve before emitting this driver's rows.
   CHECK(budget.TakeRow());
   CHECK(budget.TakeRow());
   CHECK_FALSE(budget.TakeRow());
-  CHECK(budget.TakeSummary());
   CHECK_FALSE(budget.TakeSummary());
   AudioQueueTrace first(12, 0, 1000000, 0);
   AudioQueueTrace reused_slot(13, 0, 2000000, 0);
@@ -99,6 +99,27 @@ TEST_CASE("Audio queue log budget bounds rows and summaries across drivers",
   reused_slot.Submission(700000000, 0, true, false, 0);
   CHECK(reused_slot.GetBin(0).attempts == 1);
   CHECK(reused_slot.start_us() == 700000000);
+}
+
+TEST_CASE("Audio queue selection keeps a late severe bin over early healthy bins",
+          "[audio-queue-trace]") {
+  AudioQueueTrace trace(14, 0, 1000000, 0);
+  for (uint64_t i = 0; i < 10; ++i) {
+    trace.Resume();  // Each interval starts with a fresh priming submission.
+    trace.Submission(1000000 + i * 1000000, 0, true, false, 0);
+  }
+  trace.Resume();
+  trace.Submission(600000000, 0, true, false, 0);
+  trace.Submission(600030000, 0, true, false, 0);
+  const auto selected = trace.SelectWorstBins();
+  CHECK(selected.occupied == 11);
+  CHECK(selected.count == AudioQueueTrace::kRowsPerShutdown);
+  bool found_late = false;
+  for (size_t i = 0; i < selected.count; ++i)
+    found_late |= selected.indexes[i] == 599;
+  CHECK(found_late);
+  CHECK(selected.indexes[0] == 599);
+  CHECK(selected.occupied - selected.count == 3);
 }
 
 }  // namespace xe::apu::test

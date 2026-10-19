@@ -61,6 +61,7 @@ class AudioQueueTrace {
  public:
   static constexpr size_t kSeconds = 600;
   static constexpr size_t kBinCount = kSeconds + 1;  // Last bin is overflow.
+  static constexpr size_t kRowsPerShutdown = 8;
   static constexpr uint32_t kNoQueueSample =
       std::numeric_limits<uint32_t>::max();
 
@@ -77,6 +78,12 @@ class AudioQueueTrace {
     uint64_t max_success_gap_us = 0;
     uint64_t buffer_ends_sampled = 0;
     uint64_t voice_errors_sampled = 0;
+  };
+
+  struct Selection {
+    std::array<size_t, kRowsPerShutdown> indexes{};
+    size_t count = 0;
+    size_t occupied = 0;
   };
 
   AudioQueueTrace(uint64_t driver_id, int32_t client_index, uint64_t start_us,
@@ -164,7 +171,56 @@ class AudioQueueTrace {
     return total_;
   }
 
+  // Fixed-size top-eight selection across the entire lifetime, rather than
+  // eight early healthy bins. Ties prefer the later bin. Call after Finish.
+  Selection SelectWorstBins() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Selection selection;
+    for (size_t i = 0; i < bins_.size(); ++i) {
+      if (!Occupied(bins_[i])) continue;
+      ++selection.occupied;
+      size_t position = 0;
+      while (position < selection.count &&
+             !Worse(bins_[i], i, bins_[selection.indexes[position]],
+                    selection.indexes[position]))
+        ++position;
+      if (position >= kRowsPerShutdown) continue;
+      if (selection.count < kRowsPerShutdown) ++selection.count;
+      for (size_t j = selection.count - 1; j > position; --j)
+        selection.indexes[j] = selection.indexes[j - 1];
+      selection.indexes[position] = i;
+    }
+    return selection;
+  }
+
  private:
+  static bool Occupied(const Bin& bin) {
+    return bin.attempts || bin.buffer_ends_sampled ||
+           bin.voice_errors_sampled;
+  }
+  static bool Worse(const Bin& a, size_t a_index, const Bin& b,
+                    size_t b_index) {
+    // Queue empty after priming and API errors are direct risk signals. A
+    // >2-pump gap is also anomalous; smaller gaps rank within healthy bins.
+    const bool a_anomaly = a.queue_zero || a.submit_errors || a.ratio_errors ||
+                           a.voice_errors_sampled ||
+                           a.max_success_gap_us > 10666;
+    const bool b_anomaly = b.queue_zero || b.submit_errors || b.ratio_errors ||
+                           b.voice_errors_sampled ||
+                           b.max_success_gap_us > 10666;
+    if (a_anomaly != b_anomaly) return a_anomaly;
+    if (a.queue_zero != b.queue_zero) return a.queue_zero > b.queue_zero;
+    if (a.submit_errors != b.submit_errors)
+      return a.submit_errors > b.submit_errors;
+    if (a.voice_errors_sampled != b.voice_errors_sampled)
+      return a.voice_errors_sampled > b.voice_errors_sampled;
+    if (a.max_success_gap_us != b.max_success_gap_us)
+      return a.max_success_gap_us > b.max_success_gap_us;
+    if (a.ratio_errors != b.ratio_errors)
+      return a.ratio_errors > b.ratio_errors;
+    if (a.queue_one != b.queue_one) return a.queue_one > b.queue_one;
+    return a_index > b_index;
+  }
   size_t BinIndex(uint64_t now_us) const {
     return now_us >= bin_origin_us_
                ? std::min<uint64_t>((now_us - bin_origin_us_) / 1000000, kSeconds)

@@ -39,40 +39,61 @@ std::atomic<uint64_t> next_trace_driver_id{1};
 AudioQueueLogBudget trace_log_budget;
 
 void LogQueueTraceBin(const AudioQueueTrace& trace, size_t index,
-                      const AudioQueueTrace::Bin& bin, bool summary) {
+                      const AudioQueueTrace::Bin& bin) {
   const int64_t min_queue =
       bin.min_queue_before == AudioQueueTrace::kNoQueueSample
           ? -1
           : static_cast<int64_t>(bin.min_queue_before);
   XELOGI(
-      "APU XAudio2 queue {} driver={} client={} bin={} steady_us=[{},{}] "
-      "attempts={} submitted={} submit_errors={} ratio_errors={} "
+      "APU XAudio2 queue selected interval driver={} client={} bin={} "
+      "steady_us=[{},{}] attempts={} submitted={} submit_errors={} ratio_errors={} "
       "min_queued_before={} queue_zero={} queue_one={} "
       "max_success_gap_us={} buffer_ends_sampled={} voice_errors_sampled={}",
-      summary ? "cumulative-through-shutdown" : "interval",
-      trace.driver_id(), trace.client_index(),
-      summary ? -1 : static_cast<int64_t>(index),
-      summary ? trace.start_us() : bin.first_us, bin.last_us, bin.attempts,
-      bin.submitted, bin.submit_errors, bin.ratio_errors, min_queue,
+      trace.driver_id(), trace.client_index(), index, bin.first_us,
+      bin.last_us, bin.attempts, bin.submitted, bin.submit_errors,
+      bin.ratio_errors, min_queue,
       bin.queue_zero, bin.queue_one, bin.max_success_gap_us,
       bin.buffer_ends_sampled, bin.voice_errors_sampled);
 }
 
-void FlushQueueTrace(const AudioQueueTrace& trace) {
+void FlushQueueTrace(const AudioQueueTrace& trace,
+                     uint64_t teardown_start_us) {
   const auto total = trace.GetTotal();
   if (!total.attempts && !total.buffer_ends_sampled &&
       !total.voice_errors_sampled)
     return;
-  for (size_t i = 0; i < AudioQueueTrace::kBinCount; ++i) {
-    const auto bin = trace.GetBin(i);
-    if (!bin.attempts && !bin.buffer_ends_sampled &&
-        !bin.voice_errors_sampled)
-      continue;
+  // A selected row always needs its companion summary with teardown bounds.
+  if (!trace_log_budget.TakeSummary()) return;
+  const auto selection = trace.SelectWorstBins();
+  const uint64_t flush_start_us = AudioTraceNowUs();
+  size_t emitted = 0;
+  for (size_t i = 0; i < selection.count; ++i) {
     if (!trace_log_budget.TakeRow()) break;
-    LogQueueTraceBin(trace, i, bin, false);
+    const size_t bin_index = selection.indexes[i];
+    LogQueueTraceBin(trace, bin_index, trace.GetBin(bin_index));
+    ++emitted;
   }
-  if (trace_log_budget.TakeSummary())
-    LogQueueTraceBin(trace, 0, total, true);
+  // This lower bound ends just before the final log call returns. Use the
+  // whole teardown-adjacent range cautiously in cross-driver comparisons.
+  const uint64_t before_summary_us = AudioTraceNowUs();
+  const int64_t min_queue =
+      total.min_queue_before == AudioQueueTrace::kNoQueueSample
+          ? -1
+          : static_cast<int64_t>(total.min_queue_before);
+  XELOGI(
+      "APU XAudio2 queue cumulative-through-shutdown driver={} client={} "
+      "steady_us=[{},{}] teardown_steady_us=[{},{}] "
+      "flush_steady_us=[{},{}] occupied_bins={} emitted_bins={} "
+      "omitted_bins={} attempts={} submitted={} submit_errors={} "
+      "ratio_errors={} min_queued_before={} queue_zero={} queue_one={} "
+      "max_success_gap_us={} buffer_ends_sampled={} voice_errors_sampled={}",
+      trace.driver_id(), trace.client_index(), trace.start_us(),
+      total.last_us, teardown_start_us, before_summary_us, flush_start_us,
+      before_summary_us, selection.occupied, emitted,
+      selection.occupied - emitted, total.attempts, total.submitted,
+      total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
+      total.queue_one, total.max_success_gap_us,
+      total.buffer_ends_sampled, total.voice_errors_sampled);
 }
 
 }  // namespace
@@ -363,6 +384,7 @@ void XAudio2AudioDriver::SetVolume(float volume) {
 }
 
 void XAudio2AudioDriver::Shutdown() {
+  const uint64_t teardown_start_us = queue_trace_ ? AudioTraceNowUs() : 0;
   // XAudio2 lifecycle is managed by the MTA thread.
   if (mta_thread_.joinable()) {
     {
@@ -386,7 +408,7 @@ void XAudio2AudioDriver::Shutdown() {
   }
   if (queue_trace_) {
     queue_trace_->Finish(AudioTraceNowUs());
-    FlushQueueTrace(*queue_trace_);
+    FlushQueueTrace(*queue_trace_, teardown_start_us);
     queue_trace_.reset();
   }
 }

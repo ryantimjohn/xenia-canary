@@ -25,6 +25,7 @@
 #include "xenia/kernel/xam/nui_guide_frame.h"
 #include "xenia/kernel/xam/nui_messages.h"
 #include "xenia/kernel/xam/nui_player_mask.h"
+#include "xenia/kernel/xam/nui_tracking_observer.h"
 #include "xenia/kernel/xconfig.h"
 #include "xenia/nui/nui_flags.h"
 #include "xenia/nui/nui_gpu_readback.h"
@@ -32,6 +33,11 @@
 namespace xe {
 namespace kernel {
 namespace xam {
+
+NuiTrackingObserver& GetNuiTrackingObserver() {
+  static NuiTrackingObserver observer(cvars::nui_observe_tracking);
+  return observer;
+}
 
 namespace {
 
@@ -515,6 +521,11 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
 
   const auto* args =
       kernel_state_->memory()->TranslateVirtual<const NuiMsg2B002*>(buffer_ptr);
+
+  auto& observer = GetNuiTrackingObserver();
+  if (observer.enabled()) {
+    observer.Hud(NuiTrackingObserver::ReadHudSample(*args), NowUs());
+  }
 
   NuiHudSkeletonFrame frame;
   for (size_t i = 0; i < kNuiSkeletonCount; i++) {

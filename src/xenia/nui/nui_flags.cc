@@ -19,6 +19,11 @@ DEFINE_bool(nui_log_messages, false,
             "dump of its buffer.",
             "Kinect");
 
+DEFINE_bool(nui_observe_tracking, false,
+            "Log bounded aggregate depth delivery and title-produced skeleton "
+            "metadata, without coordinates or tracking IDs.",
+            "Kinect");
+
 DEFINE_int32(nui_log_play_frames, 0,
              "Every N-th NUI skeleton frame, log each tracked skeleton's "
              "position and key joints, the floor plane, and a summary of the "

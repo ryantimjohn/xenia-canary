@@ -25,6 +25,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/nui_state.h"
+#include "xenia/kernel/xam/nui_tracking_observer.h"
 #include "xenia/nui/depth_frame.h"
 #include "xenia/nui/nui_depth_convert.h"
 #include "xenia/nui/nui_flags.h"
@@ -35,6 +36,43 @@ namespace kernel {
 namespace xam {
 
 namespace {
+
+uint64_t TrackingNowUs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+void LogTrackingStats(const NuiTrackingObserver::Stats& s,
+                      const char* scope) {
+  XELOGI(
+      "NUI tracking observer {}: sessions={} source={} seq=[{},{}] skipped={} "
+      "seq_resets={} no_buffer={} "
+      "invalid_buffer={} copied_stamped={} completion_called={} "
+      "callback_returned={} host_age_unknown={} host_age_max_ms={} "
+      "delivery_gap_max_ms={} hud={} slots=[{},{},{},{}] "
+      "joints=[{},{},{},{}] ids=[{},{},{}] engaged=[{},{},{}] "
+      "timestamp=[{},{},{}] hud_lag_max_ms={} hud_lag_unknown={} "
+      "quality_nonzero={} nonfinite={} zero={}",
+      scope, s.sessions, s.source_frames, s.source_first, s.source_last,
+      s.source_skipped, s.source_resets, s.no_buffer,
+      s.invalid_buffer, s.copied_stamped, s.completion_called,
+      s.callback_returned, s.host_age_unknown, s.host_age_max_ms,
+      s.delivery_gap_max_ms, s.hud_frames, s.slot_states[0],
+      s.slot_states[1], s.slot_states[2], s.slot_states[3],
+      s.joint_states[0], s.joint_states[1], s.joint_states[2],
+      s.joint_states[3], s.id_appeared, s.id_disappeared, s.id_replaced,
+      s.engaged_matched, s.engaged_unmatched, s.engaged_ambiguous,
+      s.timestamp_exact, s.timestamp_ambiguous, s.timestamp_unmatched,
+      s.hud_lag_max_ms, s.hud_lag_unknown, s.quality_nonzero,
+      s.nonfinite_vectors, s.zero_vectors);
+}
+
+void FlushTrackingRow(uint64_t now_us) {
+  auto row = GetNuiTrackingObserver().TakeRow(now_us);
+  if (row) LogTrackingStats(*row, "one-second row");
+}
 
 // Switch (read off the texture the runtime binds over the depth ring: format
 // word 0x1A22005A, whose endianness field is 1 = 8-in-16, so the GPU swaps
@@ -749,6 +787,8 @@ NuiCameraStats NuiCamera::GetStats() const {
 }
 
 void NuiCamera::FeedThreadMain() {
+  if (GetNuiTrackingObserver().enabled())
+    GetNuiTrackingObserver().SessionStarted(TrackingNowUs());
   uint64_t last_sequence = 0;
   const char* stop_reason = "the camera was shut down";
   while (feed_running_.load(std::memory_order_acquire)) {
@@ -764,6 +804,7 @@ void NuiCamera::FeedThreadMain() {
       break;
     }
     CompletePendingRequests();
+    if (GetNuiTrackingObserver().enabled()) FlushTrackingRow(TrackingNowUs());
     if (!have_frame) {
       if (std::chrono::steady_clock::now() - wait_started <
           kFrameWaitTimeout / 2) {
@@ -779,14 +820,21 @@ void NuiCamera::FeedThreadMain() {
     if (!frame || frame->sequence <= last_sequence) {
       continue;
     }
+    if (GetNuiTrackingObserver().enabled())
+      GetNuiTrackingObserver().SourceFrame(frame->sequence, TrackingNowUs());
     last_sequence = frame->sequence;
     FeedDepthFrame(*frame);
     FeedColourFrame();
+    if (GetNuiTrackingObserver().enabled()) FlushTrackingRow(TrackingNowUs());
   }
   // Whatever brought the loop here, the feed is over: say so where a stage
   // diagnosis will see it, and stop claiming to be streaming. Anything queued
   // from here on is refused rather than left for a thread that is gone.
   feed_running_.store(false, std::memory_order_release);
+  if (GetNuiTrackingObserver().enabled()) {
+    FlushTrackingRow(TrackingNowUs());
+    LogTrackingStats(GetNuiTrackingObserver().Summary(), "feed-end total");
+  }
   XELOGW(
       "NUI: frame feed stopped, {}, after {} depth and {} colour frames, {} "
       "dropped",
@@ -801,6 +849,9 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     // The runtime only ever wants the newest frame, so one that arrives with
     // no buffer waiting for it is dropped rather than queued up.
     depth_frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+    if (GetNuiTrackingObserver().enabled())
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kNoBuffer, TrackingNowUs());
     return;
   }
 
@@ -810,11 +861,17 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     XELOGW("NUI: a {}x{} depth frame does not fit the guest's {} byte buffer",
            frame.width, frame.height, request.length);
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
+    if (GetNuiTrackingObserver().enabled())
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
     return;
   }
 
   if (!IsRequestStillWritable(request)) {
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
+    if (GetNuiTrackingObserver().enabled())
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
     return;
   }
 
@@ -851,14 +908,26 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
   // title's avatar poser feeds its avateering engine only a frame whose stamp
   // has changed: without one, the avatar's limbs never move (docs/nui.md,
   // "The avatar").
+  const uint64_t guest_stamp_ms =
+      NuiCameraFrameTimestampMillis(Clock::QueryGuestUptimeMillis());
   WriteNuiCameraFrameResult(
       memory->TranslateVirtual<uint8_t*>(request.request), sequence,
-      NuiCameraFrameTimestampMillis(Clock::QueryGuestUptimeMillis()));
+      guest_stamp_ms);
+  if (GetNuiTrackingObserver().enabled())
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kCopied, TrackingNowUs(),
+        frame.timestamp_us, guest_stamp_ms);
   if (cvars::nui_log_messages) {
     XELOGD("NUI: depth frame {} (host {}) fed to request {:08X}", sequence,
            frame.sequence, request.request);
   }
+  if (GetNuiTrackingObserver().enabled())
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kCompletionCalled, TrackingNowUs());
   CompleteRequest(request, X_STATUS_SUCCESS, request.length);
+  if (GetNuiTrackingObserver().enabled())
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kReturned, TrackingNowUs());
 }
 
 void NuiCamera::FeedColourFrame() {

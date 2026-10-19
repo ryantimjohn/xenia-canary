@@ -16,6 +16,7 @@
 
 DECLARE_bool(nui_allow_tilt);
 DECLARE_bool(nui_log_messages);
+DECLARE_bool(nui_observe_tracking);
 DECLARE_int32(nui_log_play_frames);
 DECLARE_int32(nui_tilt_override);
 DECLARE_bool(nui_accelerometer);

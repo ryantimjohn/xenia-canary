@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 
 namespace xe::hid::replay {
@@ -94,6 +95,7 @@ ReplayInputDriver::ReplayInputDriver(ui::Window* window, size_t z_order,
 X_STATUS ReplayInputDriver::Setup() {
   std::lock_guard<std::mutex> lock(mutex_);
   loaded_ = started_ = completed_ = false;
+  timing_first_positive_seen_ = false;
   next_ = 0;
   states_ = {};
   recording_ = {};
@@ -121,11 +123,12 @@ X_STATUS ReplayInputDriver::Setup() {
   return X_STATUS_SUCCESS;
 }
 
-void ReplayInputDriver::Advance(bool start) {
+void ReplayInputDriver::Advance(bool start, TimingEvents* timing) {
   if (!loaded_ || completed_) return;
   if (start && !started_) {
     start_us_ = clock_();
     started_ = true;
+    if (timing) timing->Add(TimingKind::kStart, start_us_);
   }
   uint64_t now = started_ ? clock_() : 0;
   uint64_t elapsed = started_ && now >= start_us_ ? now - start_us_ : 0;
@@ -133,6 +136,11 @@ void ReplayInputDriver::Advance(bool start) {
          recording_.events[next_].time_us <= elapsed) {
     const auto& e = recording_.events[next_++];
     states_[e.port] = e;
+    if (!timing_first_positive_seen_ && e.time_us > 0) {
+      timing_first_positive_seen_ = true;
+      if (timing)
+        timing->Add(TimingKind::kFirstPositiveEvent, clock_(), e.time_us);
+    }
   }
   if (elapsed >= recording_.duration_us) {
     for (auto& e : states_) {
@@ -143,57 +151,111 @@ void ReplayInputDriver::Advance(bool start) {
       }
     }
     completed_ = true;
+    if (timing) timing->Add(TimingKind::kCompletion, clock_());
     XELOGI("HID replay: completed; connected ports neutral, no loop");
+  }
+}
+
+void ReplayInputDriver::LogTimingEvents(const TimingEvents& events) {
+  for (size_t i = 0; i < events.count; ++i) {
+    const auto& event = events.entries[i];
+    switch (event.kind) {
+      case TimingKind::kStart:
+        XELOGI("Replay timing HID start host_us={}", event.host_us);
+        break;
+      case TimingKind::kFirstPositiveEvent:
+        XELOGI("Replay timing HID first_positive_event host_us={} "
+               "recorded_relative_us={}",
+               event.host_us, event.recorded_relative_us);
+        break;
+      case TimingKind::kCompletion:
+        XELOGI("Replay timing HID completion host_us={}", event.host_us);
+        break;
+    }
   }
 }
 
 X_RESULT ReplayInputDriver::GetCapabilities(uint32_t user_index, uint32_t,
                                             X_INPUT_CAPABILITIES* out_caps) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  Advance(false);
-  if (!loaded_ || user_index >= 4 || states_[user_index].status != X_ERROR_SUCCESS)
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  if (!out_caps) return X_ERROR_INVALID_PARAMETER;
-  *out_caps = {};
-  out_caps->type = XINPUT_DEVTYPE_GAMEPAD;
-  out_caps->sub_type = XINPUT_DEVSUBTYPE_GAMEPAD;
-  out_caps->gamepad.buttons = 0xF7FF;
-  out_caps->gamepad.left_trigger = out_caps->gamepad.right_trigger = 255;
-  out_caps->gamepad.thumb_lx = out_caps->gamepad.thumb_ly = 32767;
-  out_caps->gamepad.thumb_rx = out_caps->gamepad.thumb_ry = 32767;
-  return X_ERROR_SUCCESS;
+  TimingEvents timing;
+  X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Advance(false, cvars::replay_timing_observe ? &timing : nullptr);
+    if (loaded_ && user_index < 4 &&
+        states_[user_index].status == X_ERROR_SUCCESS) {
+      if (!out_caps) {
+        result = X_ERROR_INVALID_PARAMETER;
+      } else {
+        *out_caps = {};
+        out_caps->type = XINPUT_DEVTYPE_GAMEPAD;
+        out_caps->sub_type = XINPUT_DEVSUBTYPE_GAMEPAD;
+        out_caps->gamepad.buttons = 0xF7FF;
+        out_caps->gamepad.left_trigger = out_caps->gamepad.right_trigger = 255;
+        out_caps->gamepad.thumb_lx = out_caps->gamepad.thumb_ly = 32767;
+        out_caps->gamepad.thumb_rx = out_caps->gamepad.thumb_ry = 32767;
+        result = X_ERROR_SUCCESS;
+      }
+    }
+  }
+  if (timing.count) LogTimingEvents(timing);
+  return result;
 }
 X_RESULT ReplayInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (user_index >= 4) return X_ERROR_DEVICE_NOT_CONNECTED;
-  if (!out_state) return X_ERROR_INVALID_PARAMETER;
-  Advance(true);
-  if (!loaded_ || states_[user_index].status != X_ERROR_SUCCESS)
-    return X_ERROR_DEVICE_NOT_CONNECTED;
-  *out_state = states_[user_index].state;
-  return X_ERROR_SUCCESS;
+  TimingEvents timing;
+  X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (user_index < 4) {
+      if (!out_state) {
+        result = X_ERROR_INVALID_PARAMETER;
+      } else {
+        Advance(true, cvars::replay_timing_observe ? &timing : nullptr);
+        if (loaded_ && states_[user_index].status == X_ERROR_SUCCESS) {
+          *out_state = states_[user_index].state;
+          result = X_ERROR_SUCCESS;
+        }
+      }
+    }
+  }
+  if (timing.count) LogTimingEvents(timing);
+  return result;
 }
 X_RESULT ReplayInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION*) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  Advance(false);
-  // Virtual controller: acknowledge and discard vibration, never touch hardware.
-  return loaded_ && user_index < 4 &&
-                 states_[user_index].status == X_ERROR_SUCCESS
-             ? X_ERROR_SUCCESS
-             : X_ERROR_DEVICE_NOT_CONNECTED;
+  TimingEvents timing;
+  X_RESULT result;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Advance(false, cvars::replay_timing_observe ? &timing : nullptr);
+    // Virtual controller: acknowledge and discard vibration, never touch hardware.
+    result = loaded_ && user_index < 4 &&
+                     states_[user_index].status == X_ERROR_SUCCESS
+                 ? X_ERROR_SUCCESS
+                 : X_ERROR_DEVICE_NOT_CONNECTED;
+  }
+  if (timing.count) LogTimingEvents(timing);
+  return result;
 }
 X_RESULT ReplayInputDriver::GetKeystroke(uint32_t user_index, uint32_t,
                                          X_INPUT_KEYSTROKE*) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  Advance(false);
-  if (loaded_ && user_index == XUserIndexAny) {
-    for (const auto& e : states_) {
-      if (e.status == X_ERROR_SUCCESS) return X_ERROR_EMPTY;
+  TimingEvents timing;
+  X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    Advance(false, cvars::replay_timing_observe ? &timing : nullptr);
+    if (loaded_ && user_index == XUserIndexAny) {
+      for (const auto& e : states_) {
+        if (e.status == X_ERROR_SUCCESS) {
+          result = X_ERROR_EMPTY;
+          break;
+        }
+      }
+    } else if (loaded_ && user_index < 4 &&
+               states_[user_index].status == X_ERROR_SUCCESS) {
+      result = X_ERROR_EMPTY;  // No keystroke history exists in this format.
     }
-  } else if (loaded_ && user_index < 4 &&
-             states_[user_index].status == X_ERROR_SUCCESS) {
-    return X_ERROR_EMPTY;  // No keystroke history exists in this recording format.
   }
-  return X_ERROR_DEVICE_NOT_CONNECTED;
+  if (timing.count) LogTimingEvents(timing);
+  return result;
 }
 }  // namespace xe::hid::replay

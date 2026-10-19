@@ -42,8 +42,26 @@ class ReplayInputDriver final : public InputDriver {
   InputType GetInputType() const override { return InputType::Controller; }
 
  private:
+  enum class TimingKind { kStart, kFirstPositiveEvent, kCompletion };
+  struct TimingEvent {
+    TimingKind kind;
+    uint64_t host_us;
+    uint64_t recorded_relative_us;
+  };
+  struct TimingEvents {
+    // Entries are written by Add before count makes them visible. Polls with
+    // observation off initialize only count, not the three unused slots.
+    std::array<TimingEvent, 3> entries;
+    size_t count = 0;
+    void Add(TimingKind kind, uint64_t host_us, uint64_t relative_us = 0) {
+      if (count < entries.size()) {
+        entries[count++] = {kind, host_us, relative_us};
+      }
+    }
+  };
+  static void LogTimingEvents(const TimingEvents& events);
   // All public polling paths share this lock, including first-poll clock arming.
-  void Advance(bool start);
+  void Advance(bool start, TimingEvents* timing = nullptr);
   std::filesystem::path path_;
   Clock clock_;
   std::mutex mutex_;
@@ -54,6 +72,7 @@ class ReplayInputDriver final : public InputDriver {
   bool loaded_ = false;
   bool started_ = false;
   bool completed_ = false;
+  bool timing_first_positive_seen_ = false;
 };
 
 }  // namespace xe::hid::replay

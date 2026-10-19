@@ -13,6 +13,7 @@
 #include <cstring>
 #include <system_error>
 
+#include "xenia/base/clock.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/logging.h"
 #include "xenia/nui/depth_recording.h"
@@ -39,6 +40,13 @@ static constexpr int64_t kRecordedFrameBytes =
         sizeof(uint16_t);
 
 namespace {
+
+uint64_t ReplayTimingNowUs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
 
 // The path as the filesystem sees it, so that two spellings of one file can be
 // told apart from two files. Falls back to the path as written when it cannot
@@ -213,6 +221,13 @@ void ReplayNuiSystem::WorkerThreadMain() {
 
   bool have_previous_frame = false;
   uint64_t previous_timestamp_us = 0;
+  const bool observe_timing = cvars::replay_timing_observe;
+  uint64_t next_record_index = 0;
+  uint32_t eof_wraps_logged = 0;
+  bool first_rewind_logged = false;
+  bool first_post_rewind_pending = false;
+  uint64_t first_rewind_ack_us = 0;
+  uint64_t first_rewind_published_count = 0;
   while (worker_running_.load(std::memory_order_acquire)) {
     if (restart_requested_.exchange(false, std::memory_order_acq_rel)) {
       // The title has started consuming frames, so it gets the recording from
@@ -226,6 +241,24 @@ void ReplayNuiSystem::WorkerThreadMain() {
       // The next frame is the first of the recording again, and there is
       // nothing left to pace it against, so it goes out as soon as it is read.
       have_previous_frame = false;
+      if (observe_timing) {
+        next_record_index = 0;
+        if (first_post_rewind_pending) {
+          // A second rewind superseded the first before it published a frame.
+          // Keep only the first acknowledgement; the missing publication is
+          // explicitly inconclusive for that phase pair.
+          XELOGI("Replay timing NUI rewind_ack host_us={} "
+                 "published_count={}",
+                 first_rewind_ack_us, first_rewind_published_count);
+          first_post_rewind_pending = false;
+        }
+        if (!first_rewind_logged) {
+          first_rewind_logged = true;
+          first_post_rewind_pending = true;
+          first_rewind_ack_us = ReplayTimingNowUs();
+          first_rewind_published_count = published_frame_count_;
+        }
+      }
       XELOGI(
           "NUI: the title has started streaming; {} restarts at its first "
           "frame, {} frames in",
@@ -240,6 +273,12 @@ void ReplayNuiSystem::WorkerThreadMain() {
       SetDeviceStatus(DeviceStatus::kError);
       break;
     }
+
+    const bool eof_wrap =
+        observe_timing && next_record_index >= frame_count_;
+    const uint64_t record_index = eof_wrap ? 0 : next_record_index;
+    if (observe_timing) next_record_index = record_index + 1;
+    const uint64_t before_wrap_recorded_us = previous_timestamp_us;
 
     if (have_previous_frame) {
       // Hand the frames over at the speed they were captured at. A pair with
@@ -260,11 +299,45 @@ void ReplayNuiSystem::WorkerThreadMain() {
     have_previous_frame = true;
     previous_timestamp_us = timestamp_us;
 
+    // Retain only the few frames whose publication stamp is observed. The
+    // base publisher assigns its host stamp and sequence before returning.
+    std::shared_ptr<DepthFrame> observed_frame;
+    if (observe_timing &&
+        (first_post_rewind_pending || (eof_wrap && eof_wraps_logged < 2))) {
+      observed_frame = frame;
+    }
     PublishFrame(std::move(frame));
+    if (observed_frame) {
+      if (first_post_rewind_pending) {
+        // Emit the saved acknowledgement after publication so this new log
+        // does not delay the very first frame whose phase it measures.
+        XELOGI("Replay timing NUI rewind_ack host_us={} "
+               "published_count={}",
+               first_rewind_ack_us, first_rewind_published_count);
+        XELOGI("Replay timing NUI first_post_rewind_publish host_us={} "
+               "host_sequence={} record_index={} recorded_us={}",
+               observed_frame->timestamp_us, observed_frame->sequence,
+               record_index, timestamp_us);
+        first_post_rewind_pending = false;
+      }
+      if (eof_wrap && eof_wraps_logged < 2) {
+        XELOGI("Replay timing NUI eof_wrap_publish host_us={} "
+               "host_sequence={} previous_record_index={} record_index={} "
+               "previous_recorded_us={} recorded_us={}",
+               observed_frame->timestamp_us, observed_frame->sequence,
+               frame_count_ - 1, record_index, before_wrap_recorded_us,
+               timestamp_us);
+        ++eof_wraps_logged;
+      }
+    }
     ++published_frame_count_;
     if ((published_frame_count_ % kFrameLogInterval) == 0) {
       XELOGI("NUI: {} depth frames replayed", published_frame_count_);
     }
+  }
+  if (first_post_rewind_pending) {
+    XELOGI("Replay timing NUI rewind_ack host_us={} published_count={}",
+           first_rewind_ack_us, first_rewind_published_count);
   }
 }
 

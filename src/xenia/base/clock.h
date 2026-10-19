@@ -22,6 +22,7 @@
 
 DECLARE_bool(clock_no_scaling);
 DECLARE_bool(clock_source_raw);
+DECLARE_bool(replay_timing_observe);
 
 namespace xe {
 

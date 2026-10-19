@@ -10,6 +10,7 @@
 #include "xenia/kernel/xam/nui_camera.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -36,6 +37,12 @@ namespace kernel {
 namespace xam {
 
 namespace {
+
+// Process-wide, fixed telemetry budget. These are never reset by a stream
+// reconfiguration, so enabling observation cannot produce per-frame logs.
+std::atomic<bool> timing_trigger_logged{false};
+std::atomic<bool> timing_first_depth_logged{false};
+std::atomic<bool> timing_first_copy_logged{false};
 
 uint64_t TrackingNowUs() {
   return static_cast<uint64_t>(
@@ -516,6 +523,11 @@ X_STATUS NuiCamera::HandleQueueBuffer(uint32_t request_ptr) {
     return X_STATUS_DEVICE_NOT_READY;
   }
 
+  const bool observe_timing = cvars::replay_timing_observe;
+  const bool log_first_depth =
+      observe_timing && is_depth &&
+      !timing_first_depth_logged.exchange(true, std::memory_order_relaxed);
+
   // This is where the title's stream begins: the camera has been configured,
   // the feed is running, and this is the first buffer the title has offered
   // for a frame to be written into, so the next frame the host publishes is
@@ -525,11 +537,25 @@ X_STATUS NuiCamera::HandleQueueBuffer(uint32_t request_ptr) {
   // A backend that replays a recording starts it over on this, so that the
   // recording's first frames are the title's first frames; a stop (code 2)
   // followed by a reconfiguration arms it again.
-  if (!stream_start_announced_.exchange(true, std::memory_order_acq_rel)) {
+  const bool announces_stream =
+      !stream_start_announced_.exchange(true, std::memory_order_acq_rel);
+  const bool log_trigger =
+      observe_timing && announces_stream &&
+      !timing_trigger_logged.exchange(true, std::memory_order_relaxed);
+  const uint64_t accepted_us =
+      (log_first_depth || log_trigger) ? TrackingNowUs() : 0;
+  if (announces_stream) {
     auto* system = nui_system();
     if (system) {
       system->OnGuestStreamStarted();
     }
+  }
+  if (log_trigger) {
+    XELOGI("Replay timing NUI first_stream_trigger host_us={} image={}",
+           accepted_us, is_depth ? "depth" : "colour");
+  }
+  if (log_first_depth) {
+    XELOGI("Replay timing NUI first_depth_accepted host_us={}", accepted_us);
   }
   return X_STATUS_PENDING;
 }
@@ -925,6 +951,10 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
   WriteNuiCameraFrameResult(
       memory->TranslateVirtual<uint8_t*>(request.request), sequence,
       guest_stamp_ms);
+  const bool log_first_copy =
+      cvars::replay_timing_observe &&
+      !timing_first_copy_logged.exchange(true, std::memory_order_relaxed);
+  const uint64_t copy_us = log_first_copy ? TrackingNowUs() : 0;
   if (GetNuiTrackingObserver().enabled())
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kCopied, TrackingNowUs(),
@@ -937,9 +967,20 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kCompletionCalled, TrackingNowUs());
   CompleteRequest(request, X_STATUS_SUCCESS, request.length);
+  const uint64_t return_us = log_first_copy ? TrackingNowUs() : 0;
   if (GetNuiTrackingObserver().enabled())
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kReturned, TrackingNowUs());
+  if (log_first_copy) {
+    // This copy may precede the worker's rewind. Offline consumers must
+    // compare host_sequence with first_post_rewind_publish before using it
+    // as a post-rewind delivery anchor.
+    XELOGI("Replay timing NUI first_depth_copy_return copy_us={} "
+           "return_us={} host_publish_us={} host_sequence={} "
+           "guest_stamp_ms={} guest_sequence={}",
+           copy_us, return_us, frame.timestamp_us, frame.sequence,
+           guest_stamp_ms, sequence);
+  }
 }
 
 void NuiCamera::FeedColourFrame() {

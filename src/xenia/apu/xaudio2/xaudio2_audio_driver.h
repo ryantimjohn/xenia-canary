@@ -11,6 +11,7 @@
 #define XENIA_APU_XAUDIO2_XAUDIO2_AUDIO_DRIVER_H_
 
 #include <condition_variable>
+#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -25,6 +26,7 @@ struct IXAudio2SourceVoice;
 
 namespace xe {
 namespace apu {
+class AudioQueueTrace;
 namespace xaudio2 {
 
 class XAudio2AudioDriver : public AudioDriver {
@@ -32,7 +34,8 @@ class XAudio2AudioDriver : public AudioDriver {
   XAudio2AudioDriver(xe::threading::Semaphore* semaphore,
                      uint32_t frequency = kFrameFrequencyDefault,
                      uint32_t channels = kFrameChannelsDefault,
-                     bool need_format_conversion = true);
+                     bool need_format_conversion = true,
+                     int32_t client_index = -1);
   ~XAudio2AudioDriver() override;
 
   bool Initialize() override;
@@ -110,6 +113,7 @@ class XAudio2AudioDriver : public AudioDriver {
 
   float frames_[frame_count_][kFrameSamplesMax];
   uint32_t current_frame_ = 0;
+  std::unique_ptr<AudioQueueTrace> queue_trace_;
 };
 
 }  // namespace xaudio2

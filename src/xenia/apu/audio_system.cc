@@ -13,6 +13,7 @@
 
 #include "xenia/apu/apu_flags.h"
 #include "xenia/apu/audio_driver.h"
+#include "xenia/apu/audio_queue_trace.h"
 #include "xenia/apu/nop_audio_driver.h"
 #include "xenia/apu/xma_decoder.h"
 #include "xenia/base/assert.h"
@@ -413,6 +414,8 @@ void AudioSystem::Pause() {
 
   pending_work_event_->Set();
   pause_fence_.Wait();
+  if (AudioQueueTraceEnabled())
+    AudioQueuePauseEpoch().fetch_add(1, std::memory_order_relaxed);
 
   xma_decoder_->Pause();
 }
@@ -422,6 +425,8 @@ void AudioSystem::Resume() {
     return;
   }
   paused_ = false;
+  if (AudioQueueTraceEnabled())
+    AudioQueuePauseEpoch().fetch_add(1, std::memory_order_relaxed);
 
   resume_event_->Set();
 

@@ -10,3 +10,6 @@
 #include "xenia/apu/apu_flags.h"
 
 DEFINE_bool(mute, false, "Mutes all audio output.", "APU")
+DEFINE_bool(audio_queue_trace, false,
+            "Log bounded XAudio2 queue and submission timing aggregates.",
+            "APU")

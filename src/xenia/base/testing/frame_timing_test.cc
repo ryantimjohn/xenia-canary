@@ -249,9 +249,9 @@ TEST_CASE("Frame timing close excludes concurrent producer tail",
     REQUIRE(counts.written == counts.accepted);
     REQUIRE(ValidateFileStructure(output.path));
   } else {
-    REQUIRE(counts.contention_drops || counts.closing_exclusions ||
-            counts.queue_drops || counts.limit_drops || counts.write_errors ||
-            timed_out);
+    REQUIRE((counts.contention_drops || counts.closing_exclusions ||
+             counts.queue_drops || counts.limit_drops || counts.write_errors ||
+             timed_out));
   }
 }
 #endif  // XE_PLATFORM_WIN32

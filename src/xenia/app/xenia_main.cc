@@ -19,6 +19,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
+#include "xenia/base/frame_timing.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
@@ -550,6 +551,10 @@ bool EmulatorApp::OnInitialize() {
   // Open the private scalar sidecar before guest threads can produce events.
   // Empty (the default) performs no file or thread work.
   if (!kernel::xam::paired_capture::StartFromFlag()) return false;
+  if (!frame_timing::StartFromFlag()) {
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
 
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();
@@ -631,6 +636,7 @@ void EmulatorApp::OnDestroy() {
 
   // Normal GUI close quick_exits and skips static destructors. Bound the
   // writer drain here; a missing footer identifies an incomplete sidecar.
+  frame_timing::CloseForExit(std::chrono::seconds(2));
   kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
 
   xe::FlushLog();

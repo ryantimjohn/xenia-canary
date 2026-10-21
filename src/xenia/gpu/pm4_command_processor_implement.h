@@ -1,5 +1,7 @@
 #pragma once
 
+#include "xenia/base/frame_timing.h"
+
 #if !defined(NDEBUG)
 #define XE_ENABLE_PM4_DISASM 1
 #endif
@@ -676,6 +678,7 @@ bool COMMAND_PROCESSOR::ExecutePacketType3_XE_SWAP(uint32_t packet,
   // 63 words here, but only the first has any data.
   uint32_t magic = reader_.ReadAndSwap<fourcc_t>();
   assert_true(magic == kSwapSignature);
+  xe::frame_timing::GuestSwap();
 
   // TODO(benvanik): only swap frontbuffer ptr.
   uint32_t frontbuffer_ptr = reader_.ReadAndSwap<uint32_t>();

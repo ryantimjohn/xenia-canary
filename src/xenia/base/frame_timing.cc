@@ -229,14 +229,17 @@ bool MatchesCloseAcknowledgement(const FileSummary& file,
          a.write_errors == b.write_errors;
 }
 
-Session::Session(FILE* file, uint64_t start_qpc, BeforeFooter before_footer)
+Session::Session(FILE* file, uint64_t start_qpc, BeforeFooter before_footer,
+                 BeforeFirstWait before_first_wait)
     : file_(file),
       before_footer_(std::move(before_footer)),
+      before_first_wait_(std::move(before_first_wait)),
       start_qpc_(start_qpc) {}
 
 std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
                                          uint64_t qpf, uint64_t start_qpc,
-                                         BeforeFooter before_footer) {
+                                         BeforeFooter before_footer,
+                                         BeforeFirstWait before_first_wait) {
   if (!qpf || !start_qpc) {
     return nullptr;
   }
@@ -248,8 +251,8 @@ std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
     fclose(file);  // Keep the incomplete, exclusively created file.
     return nullptr;
   }
-  std::unique_ptr<Session> session(
-      new Session(file, start_qpc, std::move(before_footer)));
+  std::unique_ptr<Session> session(new Session(
+      file, start_qpc, std::move(before_footer), std::move(before_first_wait)));
   try {
     session->writer_ = std::thread(&Session::WriterMain, session.get());
   } catch (...) {
@@ -308,6 +311,9 @@ void Session::RecordEvent(const Record& record) {
 }
 
 void Session::WriterMain() {
+  if (before_first_wait_) {
+    before_first_wait_();
+  }
   bool writable = true;
   for (;;) {
     Record record{};

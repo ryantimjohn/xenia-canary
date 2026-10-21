@@ -57,13 +57,38 @@ TEST_CASE("Frame timing validates ownership, intervals, and sequence",
   LARGE_INTEGER frequency;
   REQUIRE(QueryPerformanceFrequency(&frequency));
   const uint64_t live_start = RawQpc();
-  auto session =
-      Session::Create(lifecycle.path, uint64_t(frequency.QuadPart), live_start);
+  std::mutex first_wait_gate;
+  std::condition_variable first_wait_changed;
+  bool writer_parked = false;
+  bool release_writer = false;
+  auto before_first_wait = [&] {
+    std::unique_lock<std::mutex> lock(first_wait_gate);
+    writer_parked = true;
+    first_wait_changed.notify_all();
+    first_wait_changed.wait(lock, [&] { return release_writer; });
+  };
+  auto session = Session::Create(lifecycle.path, uint64_t(frequency.QuadPart),
+                                 live_start, {}, before_first_wait);
   REQUIRE(session != nullptr);
-  REQUIRE(Session::Create(lifecycle.path, uint64_t(frequency.QuadPart),
-                          RawQpc()) == nullptr);
+  auto duplicate =
+      Session::Create(lifecycle.path, uint64_t(frequency.QuadPart), RawQpc());
+  bool parked;
+  {
+    std::unique_lock<std::mutex> lock(first_wait_gate);
+    parked =
+        first_wait_changed.wait_for(lock, 2s, [&] { return writer_parked; });
+  }
   const uint64_t live_event = RawQpc();
-  session->RecordEvent({Kind::kGuestSwap, 0, 0, live_event, live_event});
+  if (parked) {
+    session->RecordEvent({Kind::kGuestSwap, 0, 0, live_event, live_event});
+  }
+  {
+    std::lock_guard<std::mutex> lock(first_wait_gate);
+    release_writer = true;
+  }
+  first_wait_changed.notify_all();
+  REQUIRE(duplicate == nullptr);
+  REQUIRE(parked);
   REQUIRE(session->Close(2s));
   session.reset();
   FileSummary live_summary;

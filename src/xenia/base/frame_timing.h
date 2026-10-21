@@ -76,11 +76,12 @@ bool MatchesCloseAcknowledgement(const FileSummary& file,
 
 class Session {
  public:
-  using BeforeFooter = std::function<void()>;  // Test-only writer gate.
+  using BeforeFirstWait = std::function<void()>;  // Test-only writer gate.
+  using BeforeFooter = std::function<void()>;     // Test-only writer gate.
   // Exclusive fresh absolute path. The parent directory must already exist.
-  static std::unique_ptr<Session> Create(const std::filesystem::path& path,
-                                         uint64_t qpf, uint64_t start_qpc,
-                                         BeforeFooter before_footer = {});
+  static std::unique_ptr<Session> Create(
+      const std::filesystem::path& path, uint64_t qpf, uint64_t start_qpc,
+      BeforeFooter before_footer = {}, BeforeFirstWait before_first_wait = {});
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
@@ -95,10 +96,12 @@ class Session {
   bool timed_out() const { return timed_out_.load(std::memory_order_acquire); }
 
  private:
-  Session(FILE* file, uint64_t start_qpc, BeforeFooter before_footer);
+  Session(FILE* file, uint64_t start_qpc, BeforeFooter before_footer,
+          BeforeFirstWait before_first_wait);
   void WriterMain();
   FILE* file_ = nullptr;
   BeforeFooter before_footer_;
+  BeforeFirstWait before_first_wait_;
   uint64_t start_qpc_ = 0;
   uint64_t cutoff_qpc_ = 0;
   std::array<Record, kQueueLimit> ring_{};

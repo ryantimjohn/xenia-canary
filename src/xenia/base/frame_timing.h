@@ -4,11 +4,13 @@
 #define XENIA_BASE_FRAME_TIMING_H_
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -19,7 +21,7 @@ constexpr uint32_t kQueueLimit = 4096;
 constexpr uint32_t kRecordLimit = 524288;
 constexpr uint32_t kHeaderBytes = 64;
 constexpr uint32_t kRecordBytes = 32;
-constexpr uint32_t kFooterBytes = 64;
+constexpr uint32_t kFooterBytes = 72;
 
 enum class Kind : uint32_t { kGuestSwap = 1, kD3D12Present = 2 };
 
@@ -38,6 +40,8 @@ struct Counts {
   uint64_t written = 0;
   uint64_t queue_drops = 0;
   uint64_t limit_drops = 0;
+  uint64_t contention_drops = 0;
+  uint64_t closing_exclusions = 0;
   uint64_t write_errors = 0;
 };
 
@@ -54,10 +58,10 @@ struct CloseAcknowledgement {
   Counts counts{};
 };
 
-// The file format is independent of XPAIR001 and capped at 16,777,344 bytes:
-// 64-byte header, at most 524288 32-byte records, 64-byte footer. All fields
+// The file format is independent of XPAIR001 and capped at 16,777,352 bytes:
+// 64-byte header, at most 524288 32-byte records, 72-byte footer. All fields
 // are little endian. Header: XFRAM001, version=1, byte sizes, limits, QPF,
-// start QPC, reserved zeros. Footer: XFRAME01, five counts and cutoff QPC.
+// start QPC, reserved zeros. Footer: XFRAME01, seven counts and cutoff QPC.
 std::array<uint8_t, kHeaderBytes> EncodeHeader(uint64_t qpf,
                                                uint64_t start_qpc);
 std::array<uint8_t, kRecordBytes> EncodeRecord(const Record& record);
@@ -72,25 +76,29 @@ bool MatchesCloseAcknowledgement(const FileSummary& file,
 
 class Session {
  public:
+  using BeforeFooter = std::function<void()>;  // Test-only writer gate.
   // Exclusive fresh absolute path. The parent directory must already exist.
   static std::unique_ptr<Session> Create(const std::filesystem::path& path,
-                                         uint64_t qpf, uint64_t start_qpc);
+                                         uint64_t qpf, uint64_t start_qpc,
+                                         BeforeFooter before_footer = {});
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  // Only a short queue mutex is taken; producer threads never write or wait
-  // for the file. Every rejected event is counted in the footer.
+  // Try-lock admission never waits for the writer or another producer. Every
+  // event rejected while the gate is open is counted in the footer.
   void RecordEvent(const Record& record);
   bool Close(std::chrono::milliseconds timeout);
   Counts counts() const;
   uint64_t start_qpc() const { return start_qpc_; }
   uint64_t cutoff_qpc() const;
+  bool timed_out() const { return timed_out_.load(std::memory_order_acquire); }
 
  private:
-  Session(FILE* file, uint64_t start_qpc);
+  Session(FILE* file, uint64_t start_qpc, BeforeFooter before_footer);
   void WriterMain();
   FILE* file_ = nullptr;
+  BeforeFooter before_footer_;
   uint64_t start_qpc_ = 0;
   uint64_t cutoff_qpc_ = 0;
   std::array<Record, kQueueLimit> ring_{};
@@ -101,10 +109,15 @@ class Session {
   std::condition_variable finished_;
   std::thread writer_;
   Counts counts_{};
+  uint64_t kind_sequences_[2] = {};
+  // High bit closes admission; low bits count producers admitted before close.
+  std::atomic<uint32_t> admission_state_{0};
+  std::atomic<uint64_t> contention_drops_{0};
+  std::atomic<uint64_t> closing_exclusions_{0};
   bool stopping_ = false;
   bool done_ = false;
   bool clean_close_ = false;
-  bool timed_out_ = false;
+  std::atomic<bool> timed_out_{false};
 };
 
 // Defaults off. The process-lifetime session is intentionally retained across

@@ -550,7 +550,9 @@ bool EmulatorApp::OnInitialize() {
 
   // Open the private scalar sidecar before guest threads can produce events.
   // Empty (the default) performs no file or thread work.
-  if (!kernel::xam::paired_capture::StartFromFlag()) return false;
+  if (!kernel::xam::paired_capture::StartFromFlag()) {
+    return false;
+  }
   if (!frame_timing::StartFromFlag()) {
     kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
     return false;

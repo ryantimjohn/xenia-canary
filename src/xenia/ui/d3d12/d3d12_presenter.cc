@@ -1089,8 +1089,7 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
       0, DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
                                      ? DXGI_PRESENT_ALLOW_TEARING
                                      : 0));
-  frame_timing::EndD3D12Present(present_begin_qpc,
-                                uint32_t(present_result));
+  frame_timing::EndD3D12Present(present_begin_qpc, uint32_t(present_result));
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.

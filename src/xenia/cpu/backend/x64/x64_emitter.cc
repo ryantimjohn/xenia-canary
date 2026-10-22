@@ -23,6 +23,7 @@
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/threading.h"
 #include "xenia/base/vec128.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
@@ -35,15 +36,23 @@
 #include "xenia/cpu/hir/instr.h"
 #include "xenia/cpu/hir/opcodes.h"
 #include "xenia/cpu/hir/value.h"
+#include "xenia/cpu/ppc/native_timer_trace.h"
 #include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
 
+#if XE_PLATFORM_WIN32
+#include "xenia/base/platform_win.h"
+#endif
+
 DEFINE_bool(debugprint_trap_log, false,
             "Log debugprint traps to the active debugger", "CPU");
 DEFINE_bool(ignore_undefined_externs, true,
             "Don't exit when an undefined extern is called.", "CPU");
+DEFINE_bool(native_timer_undefined_trace, false,
+            "Private Windows x64 raw-register trace for three undefined "
+            "xboxkrnl timer exports; 16 records each, ABI uninterpreted.", "CPU");
 DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
@@ -906,8 +915,53 @@ void X64Emitter::CallIndirect(const hir::Instr* instr,
   }
 }
 
+#if XE_PLATFORM_WIN32
+namespace {
+ppc::native_timer_trace::Budget native_timer_trace_budget;
+
+void ObserveUndefinedNativeTimer(const Function* function, const void* raw_context) {
+  if (function->behavior() != Function::Behavior::kExtern) return;
+  const auto* guest = static_cast<const GuestFunction*>(function);
+  const auto* entry = guest->export_data();
+  if (!entry || guest->extern_handler()) return;
+  const auto index = ppc::native_timer_trace::Select(
+      entry->ordinal, entry->name, entry->get_type() == Export::Type::kFunction,
+      entry->is_implemented());
+  // Exhausted exports return before context/register/thread/QPC inspection.
+  if (!native_timer_trace_budget.HasCapacity(index)) return;
+  const auto* context = static_cast<const ppc::PPCContext*>(raw_context);
+  if (!context || !context->processor || !context->processor->export_resolver())
+    return;
+  // Exact registered library identity, not merely a matching ordinal/name.
+  if (context->processor->export_resolver()->GetExportByOrdinal(
+          "xboxkrnl.exe", entry->ordinal) != entry) return;
+  const uint32_t sequence = native_timer_trace_budget.TryClaim(index);
+  if (!sequence) return;
+  const auto registers = ppc::native_timer_trace::Capture(context->r, context->lr);
+  const bool thread_read = context->thread_state != nullptr;
+  const uint32_t guest_id = thread_read ? context->thread_state->thread_id() : 0;
+  const uint32_t native_id = xe::threading::current_thread_system_id();
+  LARGE_INTEGER tick;
+  const uint64_t qpc = QueryPerformanceCounter(&tick) ? uint64_t(tick.QuadPart) : 0;
+  XELOGW("Native timer raw-register trace: library=xboxkrnl.exe ordinal={:04X} "
+         "name={} import={:08X} seq={} limit_per_export=16 "
+         "abi_uninterpreted=true guest_thread_read={} guest_thread={} "
+         "native_tid={} caller_lr={:016X} qpc={} "
+         "r3={:016X} r4={:016X} r5={:016X} r6={:016X} r7={:016X} r8={:016X}",
+         entry->ordinal, entry->name, function->address(), sequence,
+         thread_read, guest_id, native_id, registers.lr, qpc,
+         registers.r3_to_r8[0], registers.r3_to_r8[1], registers.r3_to_r8[2],
+         registers.r3_to_r8[3], registers.r3_to_r8[4], registers.r3_to_r8[5]);
+}
+}  // namespace
+#endif
+
 uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
   auto function = reinterpret_cast<Function*>(function_ptr);
+#if XE_PLATFORM_WIN32
+  if (cvars::native_timer_undefined_trace)
+    ObserveUndefinedNativeTimer(function, raw_context);
+#endif
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",
                                function->address(), function->name().c_str()));

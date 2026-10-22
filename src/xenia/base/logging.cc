@@ -10,6 +10,7 @@
 #include "xenia/base/logging.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 
@@ -24,6 +25,7 @@
 #include "xenia/base/debugging.h"
 #include "xenia/base/filesystem.h"
 #include "xenia/base/literals.h"
+#include "xenia/base/logging_test_access.h"
 #include "xenia/base/math.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/platform.h"
@@ -70,16 +72,19 @@ using namespace std::chrono_literals;
 namespace xe {
 
 class Logger;
+thread_local Logger* current_log_writer_ = nullptr;
 
 Logger* logger_ = nullptr;
 
 struct LogLine {
   size_t buffer_length;
   uint32_t thread_id;
-  uint16_t _pad_0;  // (2b) padding
+  bool flush;
+  uint8_t _pad_0;
   bool terminate;
   char prefix_char;
 };
+static_assert(sizeof(LogLine) == sizeof(size_t) + 8);
 
 thread_local char thread_log_buffer_[64_KiB];
 
@@ -233,12 +238,79 @@ class Logger {
   }
 
   ~Logger() {
-    AppendLine(0, '\0', nullptr, 0, true);  // append a terminator
+    Stop();
+  }
+
+  void Stop() {
+    if (!writer_stopped_.load(std::memory_order_acquire)) {
+      AppendLine(0, '\0', nullptr, 0, true);  // append a terminator
+    }
     xe::threading::Wait(write_thread_.get(), true);
+  }
+
+  LogDrainResult Drain(std::chrono::milliseconds timeout) {
+    if (current_log_writer_ == this) {
+      return LogDrainResult::kWriterThread;
+    }
+    if (writer_stopped_.load(std::memory_order_acquire)) {
+      return LogDrainResult::kUnavailable;
+    }
+    timeout = std::clamp(timeout, 0ms, std::chrono::milliseconds(2000));
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    dp::sequence_range range;
+    // Private dependency seam attempts one strong CAS and returns on contention
+    // or full ring. Never use vendor try_claim's internal contention retry here.
+    while (true) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return LogDrainResult::kTimedOut;
+      }
+      if (writer_stopped_.load(std::memory_order_acquire)) {
+        return LogDrainResult::kUnavailable;
+      }
+      if (claim_strategy_.try_claim_once(1, range)) {
+        break;
+      }
+      xe::threading::Sleep(1ms);
+    }
+    LogLine marker = {};
+    marker.flush = true;
+    RingBuffer rb(buffer_, kBufferSize);
+    rb.set_write_offset(BlockOffset(range.first()));
+    rb.set_read_offset(BlockOffset(range.end()));
+    rb.Write(&marker, sizeof(marker));
+    claim_strategy_.publish(range);
+    // A timed-out marker is self-contained and may be processed later. No
+    // caller stack, callback or other borrowed state is queued.
+    while (true) {
+      if (std::chrono::steady_clock::now() >= deadline) {
+        return LogDrainResult::kTimedOut;
+      }
+      if (dp::difference(flushed_marker_.load(std::memory_order_acquire),
+                         range.last()) >= 0) {
+        return LogDrainResult::kComplete;
+      }
+      if (writer_stopped_.load(std::memory_order_acquire)) {
+        return LogDrainResult::kUnavailable;
+      }
+      xe::threading::Sleep(1ms);
+    }
   }
 
   void AddLogSink(std::unique_ptr<LogSink>&& sink) {
     sinks_.push_back(std::move(sink));
+  }
+
+  uint64_t ReserveUnpublishedLineForTesting() {
+    auto range = claim_strategy_.claim(1);
+    LogLine line = {};
+    RingBuffer rb(buffer_, kBufferSize);
+    rb.set_write_offset(BlockOffset(range.first()));
+    rb.set_read_offset(BlockOffset(range.end()));
+    rb.Write(&line, sizeof(line));
+    return range.first();
+  }
+  void PublishReservedLineForTesting(uint64_t sequence) {
+    claim_strategy_.publish(sequence);
   }
 
   void FlushAllSinks() {
@@ -273,6 +345,8 @@ class Logger {
   std::vector<std::unique_ptr<LogSink>> sinks_;
 
   std::unique_ptr<xe::threading::Thread> write_thread_;
+  std::atomic<dp::sequence_t> flushed_marker_{dp::sequence_t(-1)};
+  std::atomic<bool> writer_stopped_{false};
 
   void Write(const char* buf, size_t size) {
     for (const auto& sink : sinks_) {
@@ -281,6 +355,7 @@ class Logger {
   }
 
   void WriteThread() {
+    current_log_writer_ = this;
     RingBuffer rb(buffer_, kBufferSize);
 
     size_t idle_loops = 0;
@@ -318,6 +393,13 @@ class Logger {
           // Enough blocks to read this log line, advance by that many.
           read_count += needed_count;
           i += needed_count;
+
+          if (line.flush) {
+            FlushAllSinks();
+            flushed_marker_.store(dp::sequence_t(i - 1),
+                                  std::memory_order_release);
+            continue;
+          }
 
           if (line.prefix_char) {
             char prefix[] = {
@@ -402,6 +484,8 @@ class Logger {
         }
       }
     }
+    writer_stopped_.store(true, std::memory_order_release);
+    current_log_writer_ = nullptr;
   }
 
  public:
@@ -481,6 +565,31 @@ void FlushLog() {
   xe::threading::Sleep(10ms);
   logger_->FlushAllSinks();
 }
+
+LogDrainResult DrainLogForCaptureExit(std::chrono::milliseconds timeout) {
+  return logger_ ? logger_->Drain(timeout) : LogDrainResult::kUnavailable;
+}
+
+namespace logging::testing {
+LoggerFixture::LoggerFixture(std::unique_ptr<LogSink> sink)
+    : logger_(new Logger("capture-drain-test")) {
+  logger_->AddLogSink(std::move(sink));
+}
+LoggerFixture::~LoggerFixture() { delete logger_; }
+void LoggerFixture::Append(std::string_view line) {
+  logger_->AppendLine(0, '\0', line.data(), line.size());
+}
+LogDrainResult LoggerFixture::Drain(std::chrono::milliseconds timeout) {
+  return logger_->Drain(timeout);
+}
+uint64_t LoggerFixture::ReserveUnpublishedLine() {
+  return logger_->ReserveUnpublishedLineForTesting();
+}
+void LoggerFixture::PublishReservedLine(uint64_t sequence) {
+  logger_->PublishReservedLineForTesting(sequence);
+}
+void LoggerFixture::Stop() { logger_->Stop(); }
+}  // namespace logging::testing
 
 static int g_saved_loglevel = static_cast<int>(LogLevel::Disabled);
 void logging::ToggleLogLevel() {

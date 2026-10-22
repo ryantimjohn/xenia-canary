@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -147,6 +148,8 @@ DEFINE_transient_bool(portable, true,
 #endif
 
 DECLARE_bool(debug);
+DECLARE_path(frame_timing);
+DECLARE_path(poll_counters);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
 
@@ -648,7 +651,17 @@ void EmulatorApp::OnDestroy() {
   frame_timing::CloseForExit(std::chrono::seconds(2));
   kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
 
-  xe::FlushLog();
+  if (!cvars::frame_timing.empty() || !cvars::poll_counters.empty()) {
+    if (xe::DrainLogForCaptureExit(std::chrono::seconds(2)) !=
+        xe::LogDrainResult::kComplete) {
+      // Fixed-size direct indication; never queue a failure behind the drain.
+      // Like sink I/O itself, an OS stderr write has no hard wall-time guarantee.
+      std::fputs("Capture log drain failed before quick_exit\n", stderr);
+      std::quick_exit(EXIT_FAILURE);
+    }
+  } else {
+    xe::FlushLog();
+  }
 
   std::quick_exit(EXIT_SUCCESS);
 }

@@ -148,8 +148,8 @@ DEFINE_transient_bool(portable, true,
 #endif
 
 DECLARE_bool(debug);
-DECLARE_path(frame_timing);
-DECLARE_path(poll_counters);
+DECLARE_string(frame_timing);
+DECLARE_string(poll_counters);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
 

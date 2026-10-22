@@ -21,6 +21,7 @@ namespace xe::cpu::testing {
 namespace {
 
 using backend::x64::delay_source_map::DescribeMatch;
+using backend::x64::delay_source_map::DescribeRun;
 using backend::x64::delay_source_map::FindPauseRun;
 using backend::x64::delay_source_map::Mapping;
 using backend::x64::delay_source_map::Admission;
@@ -81,6 +82,35 @@ TEST_CASE("Invalid source map cannot qualify a host byte match",
   REQUIRE(DescribeMatch(80, 80, {}).mapping == Mapping::kUnmapped);
   std::vector<SourceMapEntry> excessive(65537, {0x82000000, 0, 0});
   REQUIRE(DescribeMatch(0, 80, excessive).mapping == Mapping::kTruncated);
+}
+
+TEST_CASE("PAUSE run maps later sampled bytes across marker changes",
+          "[delay_source_map]") {
+  std::vector<SourceMapEntry> map = {
+      {0x82000000, 1, 20}, {0x82000004, 2, 22},
+      {0x82000008, 3, 30}, {0x8200000C, 4, 30},
+      {0x82000010, 5, 36},
+  };
+  const auto run = DescribeRun(20, 80, map);
+  REQUIRE(run[0].mapping == Mapping::kPreceding);
+  REQUIRE(run[0].guest_address == 0x82000000);
+  REQUIRE(run[0].next_marker_offset == 22);
+  REQUIRE(run[4].guest_address == 0x82000004);
+  REQUIRE(run[4].marker_offset == 22);
+  REQUIRE(run[10].guest_address == 0x8200000C);
+  REQUIRE(run[10].marker_offset == 30);  // Last duplicate wins.
+  REQUIRE(run[14].guest_address == 0x8200000C);
+  REQUIRE(run[15].next_marker_offset == 36);
+
+  const auto fallback = DescribeRun(10, 80, map);
+  REQUIRE(fallback[0].mapping == Mapping::kFallback);
+  REQUIRE(fallback[0].next_marker_offset == 20);
+  REQUIRE(fallback[10].guest_address == 0x82000000);
+
+  map = {{0x82000000, 1, 4}};
+  const auto tail = DescribeRun(20, 80, map);
+  REQUIRE(tail[15].mapping == Mapping::kPreceding);
+  REQUIRE(tail[15].next_marker_offset == 80);  // Code-length sentinel.
 }
 
 TEST_CASE("Compiler diagnostic budget rejects over-cap work and records",

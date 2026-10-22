@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <vector>
 
 #include "xenia/cpu/function.h"
@@ -69,6 +70,11 @@ bool FindPauseRun(const uint8_t* code, size_t code_length, size_t start,
                   size_t* offset);
 Match DescribeMatch(size_t code_offset, size_t code_length,
                     const std::vector<SourceMapEntry>& source_map);
+// Covers every byte in the 16-byte candidate. Entry i describes host offset
+// run_offset + i, including marker changes within an F3 90 byte pair.
+std::array<Match, kPauseRunBytes> DescribeRun(
+    size_t run_offset, size_t code_length,
+    const std::vector<SourceMapEntry>& source_map);
 
 // Compiler-owned call only, after successful emission, source-map finalization,
 // and X64Function::Setup. The disabled path does no scan, allocation, or log.

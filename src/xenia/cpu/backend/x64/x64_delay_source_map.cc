@@ -9,8 +9,11 @@
 
 #include "xenia/cpu/backend/x64/x64_delay_source_map.h"
 
+#include <array>
+#include <cstdio>
 #include <limits>
 #include <mutex>
+#include <string_view>
 
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
@@ -109,6 +112,58 @@ Match DescribeMatch(size_t code_offset, size_t code_length,
   return result;
 }
 
+std::array<Match, kPauseRunBytes> DescribeRun(
+    size_t run_offset, size_t code_length,
+    const std::vector<SourceMapEntry>& source_map) {
+  std::array<Match, kPauseRunBytes> result{};
+  for (size_t i = 0; i < result.size(); ++i) {
+    result[i].code_offset = run_offset + i;
+  }
+  if (run_offset > code_length ||
+      kPauseRunBytes > code_length - run_offset ||
+      code_length > std::numeric_limits<uint32_t>::max()) {
+    return result;
+  }
+  if (source_map.size() > kMaxMarkersPerFunction) {
+    for (auto& entry : result) entry.mapping = Mapping::kTruncated;
+    return result;
+  }
+  if (source_map.empty()) return result;
+
+  uint32_t previous = 0;
+  bool have_previous = false;
+  for (const auto& entry : source_map) {
+    if (entry.code_offset >= code_length ||
+        (have_previous && entry.code_offset < previous)) {
+      return result;
+    }
+    previous = entry.code_offset;
+    have_previous = true;
+  }
+
+  size_t cursor = 0;
+  for (auto& byte : result) {
+    while (cursor < source_map.size() &&
+           source_map[cursor].code_offset <= byte.code_offset) {
+      ++cursor;
+    }
+    if (cursor == 0) {
+      byte.mapping = Mapping::kFallback;
+      byte.next_marker_offset = source_map.front().code_offset;
+      continue;
+    }
+    const auto& preceding = source_map[cursor - 1];
+    byte.mapping = Mapping::kPreceding;
+    byte.guest_address = preceding.guest_address;
+    byte.hir_offset = preceding.hir_offset;
+    byte.marker_offset = preceding.code_offset;
+    byte.next_marker_offset = cursor < source_map.size()
+                                  ? source_map[cursor].code_offset
+                                  : static_cast<uint32_t>(code_length);
+  }
+  return result;
+}
+
 void MaybeRecord(GuestFunction& function) {
   if (!cvars::private_delay_source_map_trace) {
     return;
@@ -146,21 +201,37 @@ void MaybeRecord(GuestFunction& function) {
   while (per_function < kMaxPerFunction &&
          budget.records < kMaxRecords &&
          FindPauseRun(code, length, next_search, &offset)) {
-    const auto mapping = DescribeMatch(offset, length, function.source_map());
-    const char* kind = mapping.mapping == Mapping::kPreceding
-                           ? "preceding"
-                           : mapping.mapping == Mapping::kFallback
-                                 ? "fallback"
-                                 : mapping.mapping == Mapping::kTruncated
-                                       ? "truncated"
-                                       : "unmapped";
+    const auto mappings = DescribeRun(offset, length, function.source_map());
+    // Sixteen fixed 36-character fields, never a whole source-map dump.
+    // Field: byte index, state, guest, HIR, preceding marker, next marker.
+    std::array<char, kPauseRunBytes * 36 + 1> map_text{};
+    size_t used = 0;
+    for (size_t i = 0; i < mappings.size(); ++i) {
+      const auto& mapping = mappings[i];
+      const char state = mapping.mapping == Mapping::kPreceding
+                             ? 'P'
+                             : mapping.mapping == Mapping::kFallback
+                                   ? 'F'
+                                   : mapping.mapping == Mapping::kTruncated
+                                         ? 'T'
+                                         : 'U';
+      const int written = std::snprintf(
+          map_text.data() + used, map_text.size() - used,
+          "%02X%c%08X%08X%08X%08X;", static_cast<unsigned>(i), state,
+          mapping.guest_address, mapping.hir_offset, mapping.marker_offset,
+          mapping.next_marker_offset);
+      if (written != 36) {
+        // No partial mapping is emitted on an unexpected formatting failure.
+        used = 0;
+        break;
+      }
+      used += 36;
+    }
     XELOGI("XDELAYMAP001 match host_begin={:016X} code_length={} "
-           "guest_function={:08X} host_offset={} map={} "
-           "marker_offset={} next_marker_offset={} guest_marker={:08X} "
-           "hir_offset={:08X}",
+           "guest_function={:08X} host_offset={} map16={}",
            reinterpret_cast<uintptr_t>(code), length, function.address(),
-           offset, kind, mapping.marker_offset, mapping.next_marker_offset,
-           mapping.guest_address, mapping.hir_offset);
+           offset, used ? std::string_view(map_text.data(), used)
+                        : std::string_view("format_error"));
     ++per_function;
     budget.Record();
     next_search = offset + kPauseRunBytes;

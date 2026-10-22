@@ -38,6 +38,7 @@
 #include "xenia/cpu/hir/value.h"
 #include "xenia/cpu/ppc/native_timer_trace.h"
 #include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
+#include "xenia/cpu/ppc/timer_callsite_bytes.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/symbol.h"
 #include "xenia/cpu/thread_state.h"
@@ -53,6 +54,9 @@ DEFINE_bool(ignore_undefined_externs, true,
 DEFINE_bool(native_timer_undefined_trace, false,
             "Private Windows x64 raw-register trace for three undefined "
             "xboxkrnl timer exports; 16 records each, ABI uninterpreted.", "CPU");
+DEFINE_bool(native_timer_callsite_bytes, false,
+            "Private Windows x64 one-shot512B raw callsite bytes for exact "
+            "undefined KeSetTimer/LR; no ABI interpretation.", "CPU");
 DEFINE_bool(emit_source_annotations, false,
             "Add extra movs and nops to make disassembly easier to read.",
             "CPU");
@@ -953,6 +957,96 @@ void ObserveUndefinedNativeTimer(const Function* function, const void* raw_conte
          registers.r3_to_r8[0], registers.r3_to_r8[1], registers.r3_to_r8[2],
          registers.r3_to_r8[3], registers.r3_to_r8[4], registers.r3_to_r8[5]);
 }
+
+ppc::timer_callsite_bytes::OneShot timer_callsite_bytes_once;
+
+void ObserveNativeTimerCallsite(const Function* function, const void* raw_context) {
+  namespace bytes = ppc::timer_callsite_bytes;
+  // After the first attempt, return before metadata/context/QPC/log inspection.
+  if (!timer_callsite_bytes_once.Available()) return;
+  if (function->behavior() != Function::Behavior::kExtern) return;
+  const auto* guest = static_cast<const GuestFunction*>(function);
+  const auto* entry = guest->export_data();
+  if (!entry || !entry->name || guest->extern_handler()) return;
+  const auto* context = static_cast<const ppc::PPCContext*>(raw_context);
+  if (!context || !bytes::Selected(entry->ordinal, entry->name,
+          entry->get_type() == Export::Type::kFunction, entry->is_implemented(),
+          function->address(), context->lr) || !context->processor ||
+      !context->processor->export_resolver()) return;
+  if (context->processor->export_resolver()->GetExportByOrdinal(
+          "xboxkrnl.exe", entry->ordinal) != entry) return;
+  // Claim before all memory qualification, reading and failure logging.
+  if (!timer_callsite_bytes_once.TryClaim()) return;
+  const auto fail = [](const char* reason, DWORD error, SIZE_T got) {
+    XELOGW("Native timer callsite bytes: success=false attempt=1 limit=1 "
+           "reason={} winerror={} bytes_read={} capture_only=true",
+           reason, error, got);
+  };
+  if (!context->thread_state ||
+      context->thread_state->processor() != context->processor) {
+    fail("thread_processor_identity", 0, 0);
+    return;
+  }
+  auto* memory = context->thread_state->processor()->memory();
+  if (!memory || memory != context->thread_state->memory()) {
+    fail("memory_identity", 0, 0);
+    return;
+  }
+  uintptr_t host = 0;
+  if (!bytes::HostWindow(reinterpret_cast<uintptr_t>(memory->virtual_membase()),
+                         host)) {
+    fail("host_range", 0, 0);
+    return;
+  }
+  // This fixed guest range is below E0000000, so Windows TranslateVirtual
+  // is exactly actual Memory::virtual_membase() + kGuestStart, without aliasing.
+  LARGE_INTEGER begin{}, end{};
+  const bool begin_read = QueryPerformanceCounter(&begin) != FALSE;
+  MEMORY_BASIC_INFORMATION region{};
+  SetLastError(0);
+  const auto queried = VirtualQuery(reinterpret_cast<const void*>(host), &region,
+                                   sizeof(region));
+  const DWORD query_error = queried ? 0 : GetLastError();
+  if (queried != sizeof(region) ||
+      !bytes::ReadableRegion(host, reinterpret_cast<uintptr_t>(region.BaseAddress),
+                             region.RegionSize, region.State, region.Protect)) {
+    fail("readable_region", query_error, 0);
+    return;
+  }
+  std::array<uint8_t, bytes::kBytes> local{};
+  SIZE_T got = 0;
+  SetLastError(0);
+  const bool read = ReadProcessMemory(GetCurrentProcess(),
+      reinterpret_cast<const void*>(host), local.data(), local.size(), &got) != FALSE;
+  const DWORD read_error = read ? 0 : GetLastError();
+  if (!read || got != local.size()) {
+    fail("exact_read", read_error, got);
+    return;
+  }
+  const bool end_read = QueryPerformanceCounter(&end) != FALSE;
+  // Format only copied local bytes. Bounded128 opwords, no disassembly or ABI.
+  constexpr char hex[] = "0123456789ABCDEF";
+  std::array<char, bytes::kWords * 9> words{};
+  for (size_t word = 0; word < bytes::kWords; ++word) {
+    const auto value = bytes::Word(local, word);
+    for (size_t digit = 0; digit < 8; ++digit)
+      words[word * 9 + digit] = hex[(value >> (28 - digit * 4)) & 15];
+    words[word * 9 + 8] = word + 1 == bytes::kWords ? '\0' : ' ';
+  }
+  const auto registers = ppc::native_timer_trace::Capture(context->r, context->lr);
+  XELOGW("Native timer callsite bytes: success=true attempt=1 limit=1 "
+         "library=xboxkrnl.exe ordinal=00A6 name=KeSetTimer import={:08X} "
+         "caller_lr={:016X} guest_thread={} native_tid={} "
+         "guest_start={:08X} bytes=512 words=128 byte_order=big_endian "
+         "qpc_begin_read={} qpc_begin={} qpc_end_read={} qpc_end={} "
+         "r3={:016X} r4={:016X} r5={:016X} r6={:016X} r7={:016X} r8={:016X} "
+         "capture_only=true coherent=false abi_uninterpreted=true opwords={}",
+         function->address(), registers.lr, context->thread_state->thread_id(),
+         xe::threading::current_thread_system_id(), bytes::kGuestStart,
+         begin_read, uint64_t(begin.QuadPart), end_read, uint64_t(end.QuadPart),
+         registers.r3_to_r8[0], registers.r3_to_r8[1], registers.r3_to_r8[2],
+         registers.r3_to_r8[3], registers.r3_to_r8[4], registers.r3_to_r8[5], words.data());
+}
 }  // namespace
 #endif
 
@@ -961,6 +1055,8 @@ uint64_t UndefinedCallExtern(void* raw_context, uint64_t function_ptr) {
 #if XE_PLATFORM_WIN32
   if (cvars::native_timer_undefined_trace)
     ObserveUndefinedNativeTimer(function, raw_context);
+  if (cvars::native_timer_callsite_bytes)
+    ObserveNativeTimerCallsite(function, raw_context);
 #endif
   if (!cvars::ignore_undefined_externs) {
     xe::FatalError(fmt::format("undefined extern call to {:08X} {}",

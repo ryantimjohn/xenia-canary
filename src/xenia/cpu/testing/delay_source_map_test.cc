@@ -12,20 +12,24 @@
 #if XE_ARCH_AMD64
 
 #include <array>
+#include <string>
+#include <string_view>
 #include <vector>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/cpu/backend/x64/x64_delay_source_map.h"
+#include "xenia/cpu/ppc/ppc_hir_builder.h"
+#include "xenia/cpu/private_delay_guest_source.h"
 
 namespace xe::cpu::testing {
 namespace {
 
+using backend::x64::delay_source_map::Admission;
+using backend::x64::delay_source_map::Budget;
 using backend::x64::delay_source_map::DescribeMatch;
 using backend::x64::delay_source_map::DescribeRun;
 using backend::x64::delay_source_map::FindPauseRun;
 using backend::x64::delay_source_map::Mapping;
-using backend::x64::delay_source_map::Admission;
-using backend::x64::delay_source_map::Budget;
 
 TEST_CASE("PAUSE byte selector requires eight complete F3 90 pairs",
           "[delay_source_map]") {
@@ -74,8 +78,7 @@ TEST_CASE("PAUSE source association distinguishes first-entry fallback",
 
 TEST_CASE("Invalid source map cannot qualify a host byte match",
           "[delay_source_map]") {
-  std::vector<SourceMapEntry> map = {{0x82000000, 0, 60},
-                                     {0x82000004, 0, 20}};
+  std::vector<SourceMapEntry> map = {{0x82000000, 0, 60}, {0x82000004, 0, 20}};
   REQUIRE(DescribeMatch(64, 80, map).mapping == Mapping::kUnmapped);
   map[1].code_offset = 80;
   REQUIRE(DescribeMatch(64, 80, map).mapping == Mapping::kUnmapped);
@@ -87,9 +90,8 @@ TEST_CASE("Invalid source map cannot qualify a host byte match",
 TEST_CASE("PAUSE run maps later sampled bytes across marker changes",
           "[delay_source_map]") {
   std::vector<SourceMapEntry> map = {
-      {0x82000000, 1, 20}, {0x82000004, 2, 22},
-      {0x82000008, 3, 30}, {0x8200000C, 4, 30},
-      {0x82000010, 5, 36},
+      {0x82000000, 1, 20}, {0x82000004, 2, 22}, {0x82000008, 3, 30},
+      {0x8200000C, 4, 30}, {0x82000010, 5, 36},
   };
   const auto run = DescribeRun(20, 80, map);
   REQUIRE(run[0].mapping == Mapping::kPreceding);
@@ -130,6 +132,54 @@ TEST_CASE("Compiler diagnostic budget rejects over-cap work and records",
   REQUIRE(functions.Admit(0) == Admission::kAccepted);
   REQUIRE(functions.Admit(0) == Admission::kFunctionCap);
   REQUIRE(functions.functions == 4096);
+}
+
+TEST_CASE("Selected PPC carrier requires exact bounded contiguous source",
+          "[delay_source_map]") {
+  using private_delay_guest_source::ParseRecord;
+  private_delay_guest_source::Record parsed;
+  const std::string_view valid =
+      "XGUESTWORDS001:f=829E6360:e=829E6364:a=829E6360:n=02:p=0:c=1:w="
+      "7FFFFB784E800020";
+  REQUIRE(ParseRecord(valid, 0x829E6364, &parsed));
+  REQUIRE(parsed.function == 0x829E6360);
+  REQUIRE(parsed.count == 2);
+  REQUIRE_FALSE(parsed.partial);
+  REQUIRE_FALSE(ParseRecord(valid, 0x829E6368, &parsed));
+  REQUIRE_FALSE(
+      ParseRecord(valid.substr(0, valid.size() - 1), 0x829E6364, &parsed));
+  REQUIRE_FALSE(ParseRecord(std::string(valid) + "0", 0x829E6364, &parsed));
+  auto malformed = std::string(valid);
+  malformed.replace(malformed.find(":n=02"), 5, ":n=03");
+  REQUIRE_FALSE(ParseRecord(malformed, 0x829E6364, &parsed));
+  malformed = std::string(valid);
+  malformed.replace(malformed.find(":c=1"), 4, ":c=0");
+  REQUIRE_FALSE(ParseRecord(malformed, 0x829E6364, &parsed));
+  malformed = std::string(valid);
+  malformed.replace(malformed.find(":p=0"), 4, ":p=1");
+  REQUIRE_FALSE(ParseRecord(malformed, 0x829E6364, &parsed));
+  malformed = std::string(valid);
+  malformed.back() = 'g';
+  REQUIRE_FALSE(ParseRecord(malformed, 0x829E6364, &parsed));
+  REQUIRE_FALSE(ParseRecord(std::string(641, 'A'), 0x829E6364, &parsed));
+
+  std::string partial =
+      "XGUESTWORDS001:f=829E6360:e=829E6460:a=829E6360:n=40:p=1:c=1:w=";
+  for (size_t i = 0; i < 64; ++i) {
+    partial += "7FFFFB78";
+  }
+  REQUIRE(ParseRecord(partial, 0x829E6460, &parsed));
+  REQUIRE(parsed.count == 64);
+  REQUIRE(parsed.partial);
+  partial.replace(partial.find(":p=1"), 4, ":p=0");
+  REQUIRE_FALSE(ParseRecord(partial, 0x829E6460, &parsed));
+}
+
+TEST_CASE("Legacy PPC Emit overload remains addressable",
+          "[delay_source_map]") {
+  using LegacyEmit = bool (ppc::PPCHIRBuilder::*)(GuestFunction*, uint32_t);
+  const LegacyEmit legacy = static_cast<LegacyEmit>(&ppc::PPCHIRBuilder::Emit);
+  REQUIRE(legacy != nullptr);
 }
 
 }  // namespace

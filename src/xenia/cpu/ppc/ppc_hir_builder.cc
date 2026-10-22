@@ -93,6 +93,11 @@ void PPCHIRBuilder::Reset() {
 }
 
 bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
+  return Emit(function, flags, nullptr, nullptr);
+}
+
+bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags,
+                         SourceWordObserver observer, void* observer_context) {
   SCOPE_profile_cpu_f("cpu");
 
   Memory* memory = frontend_->memory();
@@ -134,6 +139,9 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     trace_info_.dest_count = 0;
     uint32_t code =
         xe::load_and_swap<uint32_t>(memory->TranslateVirtual(address));
+    if (observer) {
+      observer(observer_context, address, code);
+    }
     auto opcode = LookupOpcode(code);
     auto& opcode_info = GetOpcodeInfo(opcode);
 

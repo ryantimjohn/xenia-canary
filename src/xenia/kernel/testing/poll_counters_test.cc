@@ -117,9 +117,15 @@ TEST_CASE("Poll concurrent admissions and close retain accounting relations",
   REQUIRE(session);
   std::atomic<unsigned> ready{0};
   std::atomic<bool> go{false}, stop{false};
+  std::mutex bootstrap;
   std::vector<std::thread> workers;
   for (unsigned i = 0; i != 8; ++i) workers.emplace_back([&, i] {
-    auto first = session->Begin(Api::kNotify, 10 + i, 100 + i, 0x20);
+    // Deterministic accepted starts; bounded admission may legitimately exclude
+    // a contending call. Completion and subsequent calls still race close.
+    auto first = [&] {
+      std::lock_guard<std::mutex> lock(bootstrap);
+      return session->Begin(Api::kNotify, 10 + i, 100 + i, 0x20);
+    }();
     ++ready;
     while (!go.load()) std::this_thread::yield();
     first.FinishNotify(Notify::kAnyEmpty, 0, 0, 0);

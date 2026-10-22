@@ -18,6 +18,7 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
+#include "xenia/cpu/backend/x64/x64_delay_source_map.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/cpu_flags.h"
@@ -102,6 +103,7 @@ bool X64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
   function->set_debug_info(std::move(debug_info));
   static_cast<X64Function*>(function)->Setup(
       reinterpret_cast<uint8_t*>(machine_code), code_size);
+  delay_source_map::MaybeRecord(*function);
 
   // Install into indirection table.
   uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);

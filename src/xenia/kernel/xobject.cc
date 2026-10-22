@@ -467,7 +467,8 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
 object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                                              void* native_ptr,
                                              X_OBJECT_TYPES as_type,
-                                             bool already_locked) {
+                                             bool already_locked,
+                                             util::NativeObjectFailure* failure) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -491,7 +492,9 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     type = header->type;
   }
 
-  if (header->wait_list.flink_ptr == kXObjSignature) {
+  // Preserve the original single signature read. Diagnostic output reuses it.
+  const uint32_t signature_word = header->wait_list.flink_ptr;
+  if (signature_word == kXObjSignature) {
     // Already initialized.
     // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list.blink_ptr;
@@ -502,6 +505,11 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       // The only place the guest hands us a raw dispatch header, so the only
       // place a direct write to it can be picked up.
       result->SyncFromGuest();
+    } else if (failure) {
+      const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
+      *failure = {util::NativeObjectFailure::Reason::kStashedLookupMiss,
+                  uint32_t(type), read_type, read_type ? uint32_t(type) : 0,
+                  signature_word, true, handle};
     }
   } else {
     // First use, create new.
@@ -540,6 +548,12 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       default:
         assert_always();
         result = nullptr;
+        if (failure) {
+          const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
+          *failure = {util::NativeObjectFailure::Reason::kUnsupportedFirstUseType,
+                      uint32_t(type), read_type, read_type ? uint32_t(type) : 0,
+                      signature_word, false, 0};
+        }
     }
     // Stash pointer in struct.
     // FIXME: This assumes the object contains a dispatch header (some don't!)

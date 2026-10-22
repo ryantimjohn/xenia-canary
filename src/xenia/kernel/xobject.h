@@ -17,6 +17,7 @@
 
 #include "xenia/base/threading.h"
 #include "xenia/kernel/kernel.h"
+#include "xenia/kernel/util/native_object_failure.h"
 #include "xenia/memory.h"
 
 namespace xe {
@@ -226,12 +227,14 @@ class XObject {
 
   static object_ref<XObject> GetNativeObject(
       KernelState* kernel_state, void* native_ptr,
-      X_OBJECT_TYPES as_type = UndefinedObject, bool already_locked = false);
+      X_OBJECT_TYPES as_type = UndefinedObject, bool already_locked = false,
+      util::NativeObjectFailure* failure = nullptr);
   template <typename T>
   static object_ref<T> GetNativeObject(KernelState* kernel_state,
                                        void* native_ptr,
                                        X_OBJECT_TYPES as_type = UndefinedObject,
-                                       bool already_locked = false);
+                                       bool already_locked = false,
+                                       util::NativeObjectFailure* failure = nullptr);
 
   // Priority increment stored by the most recent signal operation
   // (KeSetEvent, KeReleaseSemaphore, etc.).  Read by the waiter on wake
@@ -418,9 +421,10 @@ object_ref<T> retain_object(T* ptr) {
 template <typename T>
 object_ref<T> XObject::GetNativeObject(KernelState* kernel_state,
                                        void* native_ptr, X_OBJECT_TYPES as_type,
-                                       bool already_locked) {
+                                       bool already_locked,
+                                       util::NativeObjectFailure* failure) {
   return object_ref<T>(reinterpret_cast<T*>(
-      GetNativeObject(kernel_state, native_ptr, as_type, already_locked)
+      GetNativeObject(kernel_state, native_ptr, as_type, already_locked, failure)
           .release()));
 }
 

@@ -10,9 +10,13 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/util/guest_range.h"
+#include "xenia/kernel/util/native_object_failure.h"
 #include "xenia/kernel/util/shim_utils.h"
 #include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
@@ -20,9 +24,18 @@
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
+DEFINE_bool(ke_wait_failure_trace, false,
+            "Windows private fork-only first 16 KeWaitMultiple resolver failures. "
+            "Bounded early logs may perturb timing; not a performance probe.",
+            "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+namespace {
+util::WaitFailureLogBudget wait_failure_log_budget;
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -1104,6 +1117,12 @@ dword_result_t KeWaitForMultipleObjects_entry(
     dword_t wait_reason, dword_t processor_mode, dword_t alertable,
     lpqword_t timeout_ptr, pointer_t<X_KWAIT_BLOCK> wait_block_array_ptr) {
   auto observation = xam::poll_counters::Begin(xam::poll_counters::Api::kWait);
+#if XE_PLATFORM_WIN32
+  const bool trace_failure = cvars::ke_wait_failure_trace &&
+                            wait_failure_log_budget.HasCapacity();
+#else
+  const bool trace_failure = false;
+#endif
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
   assert_true(count <= 64);
@@ -1111,12 +1130,49 @@ dword_result_t KeWaitForMultipleObjects_entry(
   {
     auto crit = global_critical_region::AcquireDirect();
     for (uint32_t n = 0; n < count; n++) {
-      auto object_ptr = kernel_memory()->TranslateVirtual(objects_ptr[n]);
+      util::NativeObjectFailure failure;
+      // Reuse the existing one array-element read; do not inspect other entries.
+      const uint32_t object_va = objects_ptr[n];
+      auto object_ptr = kernel_memory()->TranslateVirtual(object_va);
       auto object_ref = XObject::GetNativeObject<XObject>(
-          kernel_state(), object_ptr, UndefinedObject, true);
+          kernel_state(), object_ptr, UndefinedObject, true,
+          trace_failure ? &failure : nullptr);
       if (!object_ref) {
         observation.FinishWait(count, wait_type, bool(alertable), false, false,
                                0, false, 0, X_STATUS_INVALID_PARAMETER);
+        const uint32_t sequence =
+            trace_failure ? wait_failure_log_budget.TryClaim() : 0;
+        if (sequence) {
+          const uint64_t qpc = xam::poll_counters::RawQpc();
+          auto* thread = XThread::GetCurrentThread();
+          const uint32_t guest_id = thread ? thread->thread_id() : 0;
+          const uint32_t native_id = xe::threading::current_thread_system_id();
+          const auto* context = thread && thread->thread_state()
+              ? thread->thread_state()->context() : nullptr;
+          const uint64_t lr = context ? context->lr : 0;
+          const char* reason = failure.reason ==
+                  util::NativeObjectFailure::Reason::kStashedLookupMiss
+              ? "stashed_lookup_miss" : "unsupported_first_use_type";
+          // The failed decision is now scalar data. Do not hold this critical
+          // region across logger allocation/locking. Retained prior objects
+          // remain alive until the unchanged function-scope array unwinds.
+          crit.unlock();
+          XELOGW("KeWait failure trace: seq={} limit=16 reason={} "
+                 "guest_thread={} native_tid={} caller_lr_read={} "
+                 "caller_lr={:016X} qpc={} "
+                 "array={:08X} count={} wait_type={} failed_index={} "
+                 "object={:08X} header_type_read={} header_type={:02X} "
+                 "effective_type={:02X} signature_match={} "
+                 "signature_word={:08X} stashed_handle_read={} "
+                 "stashed_handle={:08X}",
+                 sequence, reason, guest_id, native_id, context != nullptr, lr, qpc,
+                 objects_ptr.guest_address(), uint32_t(count),
+                 uint32_t(wait_type), n, object_va, failure.header_type_read,
+                 failure.header_type, failure.effective_type,
+                 failure.signature_word == kXObjSignature,
+                 failure.signature_word, failure.stashed_handle_read,
+                 failure.stashed_handle);
+        }
         return X_STATUS_INVALID_PARAMETER;
       }
 

@@ -30,6 +30,7 @@
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xobject.h"
 #include "xenia/kernel/xthread.h"
+#include "xenia/kernel/xtimer.h"
 #include "xenia/ui/imgui_host_notification.h"
 
 #include "third_party/crypto/TinySHA1.hpp"
@@ -86,6 +87,9 @@ KernelState::KernelState(Emulator* emulator)
 }
 
 KernelState::~KernelState() {
+  if (NativeTimerCandidateEnabled()) {
+    XTimer::QuiesceNativeTimers(this);
+  }
   UninstallPrivateFirstChanceDispatcher(this);
   SetExecutableModule(nullptr);
 
@@ -463,6 +467,11 @@ void KernelState::SetExecutableModule(object_ref<UserModule> module) {
   executable_module_ = std::move(module);
   if (!executable_module_) {
     return;
+  }
+
+  if (NativeTimerCandidateEnabled()) {
+    auto lock = global_critical_region::AcquireDirect();
+    native_timers_closing_ = false;
   }
 
   auto title_process =
@@ -958,6 +967,15 @@ void KernelState::TerminateTitle() {
   if (xam_state_ && xam_state_->nui_state()) {
     global_lock.unlock();
     xam_state_->nui_state()->OnTitleTerminated();
+    global_lock.lock();
+  }
+
+  if (NativeTimerCandidateEnabled()) {
+    // Close admission before dropping global. No publisher/callback drain may
+    // run while this lock is held. Guest threads have reached termination.
+    native_timers_closing_ = true;
+    global_lock.unlock();
+    XTimer::QuiesceNativeTimers(this);
     global_lock.lock();
   }
 

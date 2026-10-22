@@ -309,6 +309,8 @@ class Event : public WaitHandle {
   virtual void Pulse() = 0;
 
   virtual EventInfo Query() = 0;
+  // Checked, optional state query. Unsupported backends leave output untouched.
+  virtual bool TryQuery(EventInfo* out) { return false; }
 #if XE_PLATFORM_WIN32 == 1
   // SetEvent, but if there is a waiter we immediately transfer execution to it
   virtual void SetBoostPriority() = 0;

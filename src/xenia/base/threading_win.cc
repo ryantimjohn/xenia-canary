@@ -337,6 +337,20 @@ class Win32Event : public Win32Handle<Event> {
     NtQueryEventPointer.invoke(handle_, 0, &result, sizeof(EventInfo), nullptr);
     return result;
   }
+
+  bool TryQuery(EventInfo* out) override {
+    if (!out || !NtQueryEventPointer) {
+      return false;
+    }
+    EventInfo result{};
+    const auto status = NtQueryEventPointer.invoke<int32_t>(
+        handle_, 0, &result, sizeof(result), nullptr);
+    if (status < 0) {
+      return false;
+    }
+    *out = result;
+    return true;
+  }
 };
 
 std::unique_ptr<Event> Event::CreateManualResetEvent(bool initial_state) {

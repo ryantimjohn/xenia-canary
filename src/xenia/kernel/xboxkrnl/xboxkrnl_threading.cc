@@ -8,6 +8,9 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <cstring>
+
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
@@ -2055,16 +2058,31 @@ void xeKeInitializeTimerEx(X_KTIMER* timer, uint32_t type, uint32_t proctype,
                            PPCContext* context) {
   xenia_assert(proctype < 3);
   xenia_assert(type == 0 || type == 1);
-  // other fields are unmodified, they must carry through multiple calls of
-  // initialize
-  timer->header.process_type = proctype;
-  timer->header.inserted = 0;
-  timer->header.type =
-      type ? TimerSynchronizationObject : TimerNotificationObject;
-  timer->header.signal_state = 0;
-  util::XeInitializeListHead(&timer->header.wait_list, context);
-  timer->due_time = 0;
-  timer->period = 0;
+  std::vector<std::shared_ptr<NativeTimerState>> retired;
+  auto initialize = [&] {
+    // Other fields carry through multiple calls of initialize.
+    timer->header.process_type = proctype;
+    timer->header.inserted = 0;
+    timer->header.type =
+        type ? TimerSynchronizationObject : TimerNotificationObject;
+    timer->header.signal_state = 0;
+    util::XeInitializeListHead(&timer->header.wait_list, context);
+    timer->due_time = 0;
+    timer->period = 0;
+  };
+  if (NativeTimerCandidateEnabled()) {
+    {
+      auto lock = global_critical_region::AcquireDirect();
+      retired = XTimer::RetireNativeAt(
+          kernel_state(), kernel_state()->memory()->HostToGuestVirtual(timer));
+      initialize();
+    }
+    for (auto& state : retired) {
+      state->Drain();
+    }
+  } else {
+    initialize();
+  }
 }
 
 void KeInitializeTimerEx_entry(pointer_t<X_KTIMER> timer, dword_t type,
@@ -2073,8 +2091,65 @@ void KeInitializeTimerEx_entry(pointer_t<X_KTIMER> timer, dword_t type,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeTimerEx, kThreading, kImplemented);
 
+namespace {
+object_ref<XTimer> ResolveCandidateTimer(PPCContext* context) {
+  auto lock = global_critical_region::AcquireDirect();
+  auto* kernel = kernel_state();
+  const uint32_t address = static_cast<uint32_t>(context->r[3]);
+  if (kernel->native_timers_closing() || !address ||
+      address > UINT32_MAX - sizeof(X_KTIMER) + 1 ||
+      !util::IsGuestRangeWritable(kernel->memory(), address, sizeof(X_KTIMER))) {
+    return nullptr;
+  }
+  auto* timer = kernel->memory()->TranslateVirtual<X_KTIMER*>(address);
+  if (timer->header.type != TimerNotificationObject &&
+      timer->header.type != TimerSynchronizationObject) {
+    return nullptr;
+  }
+  return XObject::GetNativeObject<XTimer>(kernel, timer, UndefinedObject, true);
+}
+
+void PrivateKeSetTimer(PPCContext* context) {
+  // Private compiler/game contract inference: r4 is the complete signed
+  // LARGE_INTEGER and r5 the pointer. Not independent Xbox export ABI proof.
+  int64_t due;
+  std::memcpy(&due, &context->r[4], sizeof(due));
+  NativeTimerState::Clock::time_point checked;
+  if (context->r[5] || Clock::guest_time_scalar() != 1.0 ||
+      !NativeTimerState::RelativeDeadline(
+          due, NativeTimerState::Clock::now(), &checked)) {
+    xe::FatalError("Private KeSetTimer candidate: unsupported due/DPC/scalar");
+  }
+  auto timer = ResolveCandidateTimer(context);
+  bool previous = false;
+  if (!timer || !timer->SetNativeTimer(due, &previous)) {
+    xe::FatalError("Private KeSetTimer candidate: unavailable timer association");
+  }
+  context->r[3] = previous ? 1 : 0;
+}
+
+void PrivateKeCancelTimer(PPCContext* context) {
+  auto timer = ResolveCandidateTimer(context);
+  bool previous = false;
+  if (!timer || !timer->CancelNativeTimer(&previous)) {
+    xe::FatalError("Private KeCancelTimer candidate: unavailable timer association");
+  }
+  context->r[3] = previous ? 1 : 0;
+}
+}  // namespace
+
+void RegisterThreadingExports(xe::cpu::ExportResolver* export_resolver,
+                             KernelState* kernel) {
+  if (NativeTimerCandidateEnabled()) {
+    // Mutate existing entries, preserving the resolver's by-name pointer view.
+    // CLI/config parsing precedes Emulator::Setup and this registration.
+    export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeSetTimer,
+                                       &PrivateKeSetTimer);
+    export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeCancelTimer,
+                                       &PrivateKeCancelTimer);
+  }
+}
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe
-
-DECLARE_XBOXKRNL_EMPTY_REGISTER_EXPORTS(Threading);

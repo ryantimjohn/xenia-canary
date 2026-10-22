@@ -316,7 +316,8 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
 X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                uint32_t wait_type, uint32_t wait_reason,
                                uint32_t processor_mode, uint32_t alertable,
-                               uint64_t* opt_timeout) {
+                               uint64_t* opt_timeout,
+                               uint32_t* observed_host_ms) {
   xe::threading::WaitHandle* wait_handles[64];
 
   for (size_t i = 0; i < count; ++i) {
@@ -328,6 +329,11 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // Private fork observer: reuse the exact computed duration, including the
+  // same DWORD narrowing used by the Windows wait backend. No second clock
+  // conversion and no change to the duration passed to the wait.
+  if (observed_host_ms) *observed_host_ms = uint32_t(timeout_ms.count());
 
   X_STATUS status;
   uint32_t boost_increment = 0;

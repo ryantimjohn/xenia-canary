@@ -14,6 +14,7 @@
 #include "xenia/cpu/processor.h"
 #include "xenia/kernel/util/guest_range.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
 #include "xenia/kernel/xtimer.h"
@@ -1102,6 +1103,7 @@ dword_result_t KeWaitForMultipleObjects_entry(
     dword_t count, lpdword_t objects_ptr, dword_t wait_type,
     dword_t wait_reason, dword_t processor_mode, dword_t alertable,
     lpqword_t timeout_ptr, pointer_t<X_KWAIT_BLOCK> wait_block_array_ptr) {
+  auto observation = xam::poll_counters::Begin(xam::poll_counters::Api::kWait);
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
   assert_true(count <= 64);
@@ -1113,6 +1115,8 @@ dword_result_t KeWaitForMultipleObjects_entry(
       auto object_ref = XObject::GetNativeObject<XObject>(
           kernel_state(), object_ptr, UndefinedObject, true);
       if (!object_ref) {
+        observation.FinishWait(count, wait_type, bool(alertable), false, false,
+                               0, false, 0, X_STATUS_INVALID_PARAMETER);
         return X_STATUS_INVALID_PARAMETER;
       }
 
@@ -1120,9 +1124,16 @@ dword_result_t KeWaitForMultipleObjects_entry(
     }
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  uint32_t observed_host_ms = 0;
+  observation.StartElapsed();
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
-      wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
+      wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr,
+      observation ? &observed_host_ms : nullptr);
+  observation.EndElapsed();
+  observation.FinishWait(count, wait_type, bool(alertable), true,
+                         bool(timeout_ptr), timeout, true, observed_host_ms,
+                         result);
   if (alertable) {
     if (result == X_STATUS_USER_APC) {
       xeProcessUserApcs(nullptr);

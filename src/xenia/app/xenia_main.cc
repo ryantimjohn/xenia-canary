@@ -29,6 +29,7 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/paired_capture.h"
+#include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
@@ -557,6 +558,11 @@ bool EmulatorApp::OnInitialize() {
     kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
     return false;
   }
+  if (!kernel::xam::poll_counters::StartFromFlag()) {
+    frame_timing::CloseForExit(std::chrono::seconds(2));
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
 
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();
@@ -638,6 +644,7 @@ void EmulatorApp::OnDestroy() {
 
   // Normal GUI close quick_exits and skips static destructors. Bound the
   // writer drain here; a missing footer identifies an incomplete sidecar.
+  kernel::xam::poll_counters::CloseForExit(std::chrono::seconds(2));
   frame_timing::CloseForExit(std::chrono::seconds(2));
   kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
 

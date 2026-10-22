@@ -4,7 +4,8 @@
 after x64 emission has copied the source map and after `X64Function::Setup` has
 set the actual emitted code length. The default is false and exits before any
 scan, allocation, budget lock, or diagnostic log. It changes no emitted bytes,
-guest time, scheduling, or exception behavior. This private fork must not be
+guest clock API, explicit scheduling policy, or exception handling. Enabled
+compiler scanning and logging can still perturb runtime timing. This private fork must not be
 published upstream with SDK-derived work.
 
 `XDELAYMAP001 begin` records the **effective** `delay_via_maybeyield` value at

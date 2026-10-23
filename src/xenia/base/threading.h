@@ -31,6 +31,9 @@
 #include "xenia/base/threading_timer_queue.h"
 
 namespace xe {
+namespace pacing {
+struct Record;
+}
 namespace threading {
 
 using namespace xe::literals;
@@ -116,6 +119,10 @@ void SyncMemory();
 // Sleeps the current thread for at least as long as the given duration.
 void Sleep(std::chrono::microseconds duration);
 void NanoSleep(int64_t ns);
+#if XE_PLATFORM_WIN32
+// Private observer overload; nullptr retains the ordinary path.
+void NanoSleep(int64_t ns, pacing::Record* observation);
+#endif
 // Like NanoSleep but trades a brief busy-wait tail for sub-millisecond
 // precision. Use only where wake-up jitter would miss a frame budget; the
 // spin costs CPU.

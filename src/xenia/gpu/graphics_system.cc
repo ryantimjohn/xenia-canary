@@ -13,6 +13,7 @@
 #include "xenia/base/clock.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
+#include "xenia/base/pacing_observer.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
@@ -164,12 +165,22 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                 if (elapsed_d >= vsync_duration_d) {
                   last_frame_time = current_time;
 
-                  MarkVblank();
+                  auto pacing_tick = pacing::BeginVblank();
+                  if (pacing_tick.session) {
+                    MarkVblank(&pacing_tick.record);
+                  } else {
+                    MarkVblank();
+                  }
                   const uint64_t estimated_nanoseconds = static_cast<uint64_t>(
                       (vsync_duration_d * 1000000.0) *
                       duration_scalar);  // 1000 microseconds = 1 ms
 
-                  threading::NanoSleep(estimated_nanoseconds);
+                  if (pacing_tick.session) {
+                    threading::NanoSleep(estimated_nanoseconds, &pacing_tick.record);
+                  } else {
+                    threading::NanoSleep(estimated_nanoseconds);
+                  }
+                  pacing::CompleteVblank(pacing_tick);
                 }
               }
 
@@ -398,6 +409,18 @@ void GraphicsSystem::MarkVblank() {
   //     something wrong and the CP will block waiting for code that
   //     needs to be run in the interrupt.
   DispatchInterruptCallback(0, 2);
+}
+
+void GraphicsSystem::MarkVblank(pacing::Record* observation) {
+  if (!observation) {
+    MarkVblank();
+    return;
+  }
+  SCOPE_profile_cpu_f("gpu");
+  command_processor_->increment_counter();
+  observation->callback_begin = pacing::RawQpc();
+  DispatchInterruptCallback(0, 2);
+  observation->callback_end = pacing::RawQpc();
 }
 
 void GraphicsSystem::ClearCaches() {

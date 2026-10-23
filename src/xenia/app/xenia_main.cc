@@ -23,6 +23,7 @@
 #include "xenia/base/frame_timing.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/pacing_observer.h"
+#include "xenia/base/swap_entry_observer.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/threading.h"
@@ -151,6 +152,7 @@ DEFINE_transient_bool(portable, true,
 DECLARE_bool(debug);
 DECLARE_string(frame_timing);
 DECLARE_string(pacing_observer);
+DECLARE_string(swap_entry_observer);
 DECLARE_string(poll_counters);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
@@ -568,7 +570,14 @@ bool EmulatorApp::OnInitialize() {
     kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
     return false;
   }
+  if (!swap_entry::StartFromFlag()) {
+    pacing::CloseForExit(std::chrono::seconds(2));
+    frame_timing::CloseForExit(std::chrono::seconds(2));
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
   if (!kernel::xam::poll_counters::StartFromFlag()) {
+    swap_entry::CloseForExit(std::chrono::seconds(2));
     pacing::CloseForExit(std::chrono::seconds(2));
     frame_timing::CloseForExit(std::chrono::seconds(2));
     kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
@@ -655,13 +664,14 @@ void EmulatorApp::OnDestroy() {
 
   // Normal GUI close quick_exits and skips static destructors. Bound the
   // writer drain here; a missing footer identifies an incomplete sidecar.
+  swap_entry::CloseForExit(std::chrono::seconds(2));
   pacing::CloseForExit(std::chrono::seconds(2));
   kernel::xam::poll_counters::CloseForExit(std::chrono::seconds(2));
   frame_timing::CloseForExit(std::chrono::seconds(2));
   kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
 
   if (!cvars::frame_timing.empty() || !cvars::poll_counters.empty() ||
-      !cvars::pacing_observer.empty()) {
+      !cvars::pacing_observer.empty() || !cvars::swap_entry_observer.empty()) {
     if (xe::DrainLogForCaptureExit(std::chrono::seconds(2)) !=
         xe::LogDrainResult::kComplete) {
       // Fixed-size direct indication; never queue a failure behind the drain.

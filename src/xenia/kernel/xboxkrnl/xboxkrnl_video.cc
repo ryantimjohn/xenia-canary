@@ -10,6 +10,8 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_video.h"
 
 #include "xenia/base/logging.h"
+#include "xenia/base/swap_entry_observer.h"
+#include "xenia/base/threading.h"
 #include "xenia/emulator.h"
 #include "xenia/gpu/graphics_system.h"
 #include "xenia/kernel/kernel_state.h"
@@ -17,6 +19,7 @@
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_rtl.h"
 #include "xenia/kernel/xconfig.h"
+#include "xenia/kernel/xthread.h"
 #include "xenia/xbox.h"
 
 DEFINE_bool(interlaced, false, "Toggles interlaced mode.", "Video");
@@ -472,6 +475,16 @@ void VdSwap_entry(
     lpdword_t frontbuffer_ptr,  // ptr to frontbuffer address
     lpdword_t texture_format_ptr, lpdword_t color_space_ptr, lpdword_t width,
     lpdword_t height) {
+  // Private construction-entry observation only. Empty flag returns before
+  // TLS/context reads; no guest data, packet or submission token is inspected.
+  if (auto* observation = swap_entry::Current()) {
+    auto* thread = XThread::GetCurrentThread();
+    const auto* context = thread && thread->thread_state()
+        ? thread->thread_state()->context() : nullptr;
+    observation->Observe(thread ? thread->thread_id() : 0,
+        xe::threading::current_thread_system_id(), context ? context->lr : 0,
+        context != nullptr);
+  }
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);
   assert(fetch_ptr);

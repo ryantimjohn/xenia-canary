@@ -35,27 +35,29 @@ The private disruptorplus dependency adds only `try_claim_once`: one strong CAS
 attempt with no contention retry or full-ring reservation wait. The outer drain
 checks its steady deadline between attempts. Existing vendor `try_claim` remains
 unchanged and is deliberately not used here because its CAS loop is not bounded.
-The dependency commit is local and unpublished; its gitlink is not fetchable
-from the unchanged upstream URL. Isolated validation must explicitly overlay a
-pinned archive of the private dependency into `third_party/disruptorplus` after
-extracting the parent source archive (Git parent archives omit gitlink contents).
-Never substitute upstream headers silently or touch the frozen staging headers.
+The original isolated validation used a pinned private dependency archive
+overlaid after extraction of the parent source archive because its gitlink
+was not fetchable from the upstream URL. That archive and the original
+validation receipts remain historical evidence. The current fork tree tracks
+the exact dependency source and MIT license in `third_party/disruptorplus`;
+a clean clone needs no private archive overlay or dependency gitlink fetch.
+See [the vendoring provenance and per-file manifest](vendor_disruptorplus_fork.md).
 
 Pinned dependency ancestry: original `bf9c70c0cc92b6435f7edec75e12751ea37e5c2f`,
 private commit `d52c0bf5f71b1b1275ff34b8725d75de8b1ebac4`, private tree
 `402654611f15cd672b6805a202af551a8e123e77`. The modified
-`include/disruptorplus/multi_threaded_claim_strategy.hpp` SHA256 is
-`06A8011BF9B134ACDC76932752AEA1BCD8FC2B297BD397373A8F5461D04461D2`.
-Future fork integration must preserve this commit in a private fetchable source
-or vendor the reviewed bytes through a separately reviewed integration change;
-an otherwise unreachable gitlink is not a complete distributable checkout.
+`include/disruptorplus/multi_threaded_claim_strategy.hpp` original Windows
+checkout SHA256 is `06A8011BF9B134ACDC76932752AEA1BCD8FC2B297BD397373A8F5461D04461D2`.
+The vendored Git/LF byte SHA256 is
+`8D44E72F960F1DE597BB6251FB544D5222D7E5F8F329B3C42F2D81C5618E94FD`;
+its Git blob OID matches the private child tree exactly.
 
 Six `[logging_drain]` host cases exercise the actual isolated ring/writer/sink:
 pending output, blocked sink flush with later recovery, a full ring, stopped
 writer, an unpublished predecessor and writer reentry. Fixtures release gates
 and reservations before assertions/joins. No process logger is replaced.
-Source review only: configure, build, tests and replay are UNRUN until separately
-granted. Validation should build xenia-base-tests and run only this filter, then
-build the application and perform a separately granted bounded recorded replay
-with unchanged capture ACK requirements. None of these checks retroactively
-qualifies the earlier failed artifacts.
+At the initial source review these cases, the app build and replay were UNRUN.
+Later isolated qualification passed six focused cases with 23 assertions and
+used the reviewed dependency bytes for a mixed app build. That evidence does
+not replace a clean build and test of the full integrated fork tree, and it
+does not retroactively qualify earlier failed artifacts.

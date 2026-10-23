@@ -115,6 +115,16 @@ the admitted original low32 nonvolatile r31 across a frame that does not save it
 and accepts a full64 r31 only when recovered from an owned save slot. Recovered
 SP has only low32 validity. It neither adjusts LR nor invents high SP bits.
 
+The dispatcher retains that raw LR as return evidence and separately selects
+the caller's suspended call instruction for its half-open scope lookup and
+bounded unwind control PC. It uses raw LR minus four only after alignment and
+owned executable-image bounds checks, an exact instruction read proving a
+direct relative BL to the just-unwound function's entry, and metadata showing
+that callee outside the caller's function. Unsupported call forms, targets, or
+unavailable evidence decline. The initial fault PC remains exact. This narrow
+selection rule does not establish a universal calling ABI, architectural
+resumption, or runtime qualification.
+
 For a non-C handler, the exact relocated no-catch C++ taken path must pass
 `AdmitNoCatchCppFirstPhase`. The dispatcher invokes the actual guest wrapper
 with four arguments and requires its actual return value 1; it does not skip

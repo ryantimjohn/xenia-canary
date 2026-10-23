@@ -16,6 +16,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/mutex.h"
+#include "xenia/cpu/exception_metadata.h"
 #include "xenia/cpu/ppc/ppc_cpp_first_phase.h"
 #include "xenia/cpu/ppc/ppc_virtual_unwind.h"
 #include "xenia/cpu/processor.h"
@@ -331,6 +332,7 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
   registers.gpr[1] = uint32_t(fault.modeled_context->r[1]);
   registers.gpr[31] = uint32_t(fault.modeled_context->r[31]);
   registers.low32_valid = (1u << 1) | (1u << 31);
+  uint32_t raw_saved_lr = 0;  // No caller return evidence for the initial fault.
   for (size_t depth = 0; depth < kMaxFrames; ++depth) {
     auto frame = evidence.metadata.LookupFrame(registers.control_pc);
     if (frame.status != ExceptionMetadataStatus::kValid || !frame.function ||
@@ -339,8 +341,8 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
     }
     const auto& function = *frame.function;
     const uint32_t frame_sp = uint32_t(registers.gpr[1]);
-    XELOGI("Private first-chance frame {} pc {:08X} sp {:08X}", depth,
-           registers.control_pc, frame_sp);
+    XELOGI("Private first-chance frame {} pc {:08X} sp {:08X} raw_lr {:08X}",
+           depth, registers.control_pc, frame_sp, raw_saved_lr);
     if (frame_sp < evidence.stack_begin ||
         uint64_t(frame_sp - evidence.stack_begin) >= evidence.stack.size()) {
       return;
@@ -435,8 +437,23 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
         next.caller_sp_address32 <= frame_sp || !next.return_address32) {
       return;
     }
-    registers.control_pc =
-        next.return_address32;  // Exact saved LR; no PC adjustment.
+    // A linked call saves its following instruction in LR. That continuation
+    // may be outside the caller's half-open scope (or in an adjacent scope).
+    // Keep the raw return evidence, but select only a proven suspended call.
+    const auto caller_pc = sdk_private::SelectSuspendedCallSite(
+        next.return_address32, function.begin, evidence.Input());
+    if (!caller_pc) {
+      return;
+    }
+    const auto caller_frame = evidence.metadata.LookupFrame(*caller_pc);
+    if (caller_frame.status != ExceptionMetadataStatus::kValid ||
+        !caller_frame.function ||
+        (function.begin >= caller_frame.function->begin &&
+         uint64_t(function.begin) < caller_frame.function->end)) {
+      return;  // Preserve the bounded recipe's external-call restriction.
+    }
+    raw_saved_lr = next.return_address32;
+    registers.control_pc = *caller_pc;
     registers.gpr[1] = next.caller_sp_address32;
     registers.low32_valid |= 1u << 1;
     registers.full64_valid &= ~(1u << 1);
@@ -451,6 +468,50 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
 }
 
 }  // namespace
+
+std::optional<uint32_t> sdk_private::SelectSuspendedCallSite(
+    uint32_t saved_lr, uint32_t callee_entry,
+    const cpu::ExceptionMetadataInput& owned_image) {
+  if (saved_lr < 4 || (saved_lr & 3) || !callee_entry ||
+      (callee_entry & 3) || !owned_image.read ||
+      owned_image.image_base >= owned_image.image_end ||
+      owned_image.image_end > (uint64_t{1} << 32)) {
+    return std::nullopt;
+  }
+  const uint32_t call_pc = saved_lr - 4;
+  const auto code = [&](uint32_t address) {
+    const uint64_t end = uint64_t(address) + 4;
+    return address >= owned_image.image_base && end <= owned_image.image_end &&
+           std::any_of(owned_image.sections.begin(), owned_image.sections.end(),
+                       [&](const auto& section) {
+                         return section.available && section.readable &&
+                                section.executable && address >= section.begin &&
+                                end <= section.end;
+                       });
+  };
+  if (!code(call_pc) || !code(callee_entry)) {
+    return std::nullopt;
+  }
+  std::array<uint8_t, 4> bytes{};
+  if (!owned_image.read(call_pc, bytes)) {
+    return std::nullopt;
+  }
+  const uint32_t word = ReadBe32(bytes);
+  if ((word >> 26) != 18 || (word & 3) != 1) {
+    return std::nullopt;  // Relative BL only; never subtract from an arbitrary LR.
+  }
+  const uint32_t encoded = word & 0x03FFFFFC;
+  const uint64_t magnitude =
+      encoded & 0x02000000 ? uint64_t{0x04000000} - encoded : encoded;
+  if (!magnitude || ((encoded & 0x02000000) && magnitude > call_pc)) {
+    return std::nullopt;
+  }
+  const uint64_t target = (encoded & 0x02000000)
+                              ? uint64_t(call_pc) - magnitude
+                              : uint64_t(call_pc) + magnitude;
+  return target == callee_entry ? std::optional<uint32_t>(call_pc)
+                                : std::nullopt;
+}
 
 void InstallPrivateFirstChanceDispatcher(KernelState* kernel) {
   // Install only during initial kernel setup with patch loading disabled. The

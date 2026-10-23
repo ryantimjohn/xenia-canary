@@ -30,11 +30,15 @@ class LifecycleBudget {
  public:
   LifecycleClaim Claim(bool registration) {
     const uint64_t row = observed_.fetch_add(1, std::memory_order_relaxed);
-    if (row > kMaxLifecycleRows) return {};
-    if (row == kMaxLifecycleRows) return {0, true, true};
-    return {registration ? serial_.fetch_add(1, std::memory_order_relaxed) + 1
-                         : 0,
-            true, false};
+    if (row > kMaxLifecycleRows) {
+      return {};
+    }
+    if (row == kMaxLifecycleRows) {
+      return {0, true, true};
+    }
+    return {
+        registration ? serial_.fetch_add(1, std::memory_order_relaxed) + 1 : 0,
+        true, false};
   }
   uint64_t observed() const {
     return observed_.load(std::memory_order_relaxed);
@@ -131,7 +135,9 @@ constexpr uint64_t PositiveLateness(uint64_t at_us, uint64_t deadline_us) {
 class Collector {
  public:
   bool Observe(const Attempt& attempt, Report* completed) {
-    if (exhausted_) return false;
+    if (exhausted_) {
+      return false;
+    }
     if (!active_) {
       Start(attempt.selected_now_us);
     }
@@ -151,8 +157,8 @@ class Collector {
         exhausted_ = true;
         return true;
       }
-      const uint64_t elapsed = attempt.selected_now_us -
-                               current_.window_start_us;
+      const uint64_t elapsed =
+          attempt.selected_now_us - current_.window_start_us;
       const uint64_t skipped = elapsed / kWindowUs - 1;
       Start(attempt.selected_now_us - elapsed % kWindowUs);
       current_.skipped_empty_windows = skipped;
@@ -193,10 +199,12 @@ class Collector {
       current_.first_selected_qpc = attempt.selected.qpc;
     }
     current_.last_selected_qpc = attempt.selected.qpc;
-    for (const Stamp* stamp : {&attempt.selected, &attempt.wake,
-                               &attempt.callback_begin,
-                               &attempt.callback_end}) {
-      if (!stamp->present) continue;
+    for (const Stamp* stamp :
+         {&attempt.selected, &attempt.wake, &attempt.callback_begin,
+          &attempt.callback_end}) {
+      if (!stamp->present) {
+        continue;
+      }
       current_.explicit_qpc_queries += 2;
       current_.stamp_bracket_ticks += stamp->query_cost_ticks;
       current_.invalid_qpc_stamps += stamp->qpc == 0;
@@ -204,12 +212,11 @@ class Collector {
     // next_pump_us starts at zero for a new/restored client. This is an
     // unarmed deadline, not a large lateness relative to the steady epoch.
     if (attempt.deadline_us) {
-      KeepLarger(current_.worst_selected, attempt,
-                 PositiveLateness(attempt.selected_now_us,
-                                  attempt.deadline_us),
-                 PositiveLateness(
-                     current_.worst_selected.attempt.selected_now_us,
-                     current_.worst_selected.attempt.deadline_us));
+      KeepLarger(
+          current_.worst_selected, attempt,
+          PositiveLateness(attempt.selected_now_us, attempt.deadline_us),
+          PositiveLateness(current_.worst_selected.attempt.selected_now_us,
+                           current_.worst_selected.attempt.deadline_us));
     }
     if (attempt.deadline_us && attempt.wake.present) {
       KeepLarger(current_.worst_wake, attempt,
@@ -226,9 +233,8 @@ class Collector {
       KeepLarger(
           current_.worst_token_timeout, attempt,
           PositiveLateness(attempt.wake.steady_us, attempt.deadline_us),
-          PositiveLateness(
-              current_.worst_token_timeout.attempt.wake.steady_us,
-              current_.worst_token_timeout.attempt.deadline_us));
+          PositiveLateness(current_.worst_token_timeout.attempt.wake.steady_us,
+                           current_.worst_token_timeout.attempt.deadline_us));
     }
   }
   Report current_{};

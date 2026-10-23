@@ -52,32 +52,29 @@ TEST_CASE("Audio pump window skips and final output cap are explicit",
           "[audio-pump-observer]") {
   Collector collector;
   Report report;
-  CHECK_FALSE(collector.Observe(MakeAttempt(1, 1, Outcome::kNoCallback),
-                                &report));
+  CHECK_FALSE(
+      collector.Observe(MakeAttempt(1, 1, Outcome::kNoCallback), &report));
   CHECK(collector.Observe(
-      MakeAttempt(3 * kWindowUs + 1, 3 * kWindowUs + 1,
-                  Outcome::kNoCallback),
+      MakeAttempt(3 * kWindowUs + 1, 3 * kWindowUs + 1, Outcome::kNoCallback),
       &report));
   CHECK(report.selected == 1);
   CHECK(report.window_start_us == 1);
   CHECK(collector.reports_emitted() == 1);
   CHECK(collector.Observe(
-      MakeAttempt(4 * kWindowUs + 1, 4 * kWindowUs + 1,
-                  Outcome::kNoCallback),
+      MakeAttempt(4 * kWindowUs + 1, 4 * kWindowUs + 1, Outcome::kNoCallback),
       &report));
   CHECK(report.skipped_empty_windows == 2);
   for (uint32_t i = 5; i <= kMaxWindows + 2; ++i) {
     CHECK(collector.Observe(
-        MakeAttempt(uint64_t(i) * kWindowUs + 1,
-                    uint64_t(i) * kWindowUs + 1, Outcome::kNoCallback),
+        MakeAttempt(uint64_t(i) * kWindowUs + 1, uint64_t(i) * kWindowUs + 1,
+                    Outcome::kNoCallback),
         &report));
   }
   CHECK(collector.reports_emitted() == kMaxWindows);
   CHECK(collector.exhausted());
   CHECK(report.cap_reached);
   CHECK_FALSE(collector.Observe(
-      MakeAttempt(1000 * kWindowUs, 1000 * kWindowUs,
-                  Outcome::kNoCallback),
+      MakeAttempt(1000 * kWindowUs, 1000 * kWindowUs, Outcome::kNoCallback),
       &report));
 }
 
@@ -87,8 +84,8 @@ TEST_CASE("Audio pump initial zero deadline is not a lateness maximum",
   Report report;
   auto first = MakeAttempt(1000000, 0, Outcome::kTokenTimeout);
   CHECK_FALSE(collector.Observe(first, &report));
-  CHECK(collector.Observe(
-      MakeAttempt(6000000, 6000000, Outcome::kNoCallback), &report));
+  CHECK(collector.Observe(MakeAttempt(6000000, 6000000, Outcome::kNoCallback),
+                          &report));
   CHECK(report.selected == 1);
   CHECK(report.outcomes[std::size_t(Outcome::kTokenTimeout)] == 1);
   CHECK_FALSE(report.worst_selected.present);

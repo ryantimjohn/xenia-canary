@@ -109,21 +109,23 @@ void LogPumpLifecycle(const AudioSystem* owner, PumpLifecycleKind kind,
                       uint32_t wrapped_arg) {
   const bool registration = kind == PumpLifecycleKind::kRegister;
   const auto claim = PumpLifecycleBudget().Claim(registration);
-  if (!claim.emit) return;
+  if (!claim.emit) {
+    return;
+  }
   const uint64_t at = PumpQpc();
   if (claim.cutoff) {
-    XELOGI("APUMP001 lifecycle_cap owner={:p} at_qpc={} "
-           "identity_after_cap=unknown",
-           owner, at);
+    XELOGI(
+        "APUMP001 lifecycle_cap owner={:p} at_qpc={} "
+        "identity_after_cap=unknown",
+        owner, at);
   } else {
-    const char* name = kind == PumpLifecycleKind::kRegister
-                           ? "register"
-                           : kind == PumpLifecycleKind::kUnregister
-                                 ? "unregister"
-                                 : "invalidate";
-    XELOGI("APUMP001 lifecycle owner={:p} kind={} serial={} slot={} "
-           "callback={} wrapped_arg={} at_qpc={}",
-           owner, name, claim.serial, client_index, callback, wrapped_arg, at);
+    const char* name = kind == PumpLifecycleKind::kRegister     ? "register"
+                       : kind == PumpLifecycleKind::kUnregister ? "unregister"
+                                                                : "invalidate";
+    XELOGI(
+        "APUMP001 lifecycle owner={:p} kind={} serial={} slot={} "
+        "callback={} wrapped_arg={} at_qpc={}",
+        owner, name, claim.serial, client_index, callback, wrapped_arg, at);
   }
   const uint64_t after = PumpQpc();
   if (at && after >= at) {
@@ -131,55 +133,57 @@ void LogPumpLifecycle(const AudioSystem* owner, PumpLifecycleKind kind,
   }
 }
 
-void LogPumpDetail(const AudioSystem* owner, uint32_t window,
-                   const char* role, const pump_observer::Detail& detail) {
-  if (!detail.present) return;
+void LogPumpDetail(const AudioSystem* owner, uint32_t window, const char* role,
+                   const pump_observer::Detail& detail) {
+  if (!detail.present) {
+    return;
+  }
   const auto& a = detail.attempt;
-  XELOGI("APUMP001 detail owner={:p} window={} role={} slot={} callback={} "
-         "wrapped_arg={} outcome={} deadline_us={} selected_now_us={} "
-         "next_us={} selected_stamp_us={} selected_qpc={} wake_us={} "
-         "wake_qpc={} callback_begin_us={} callback_begin_qpc={} "
-         "callback_end_us={} callback_end_qpc={} logging_adjacent={}",
-         owner, window, role, a.client_index, a.callback,
-         a.wrapped_callback_arg, uint32_t(a.outcome), a.deadline_us,
-         a.selected_now_us, a.scheduled_next_us, a.selected.steady_us,
-         a.selected.qpc, a.wake.steady_us, a.wake.qpc,
-         a.callback_begin.steady_us, a.callback_begin.qpc,
-         a.callback_end.steady_us, a.callback_end.qpc,
-         a.logging_adjacent);
+  XELOGI(
+      "APUMP001 detail owner={:p} window={} role={} slot={} callback={} "
+      "wrapped_arg={} outcome={} deadline_us={} selected_now_us={} "
+      "next_us={} selected_stamp_us={} selected_qpc={} wake_us={} "
+      "wake_qpc={} callback_begin_us={} callback_begin_qpc={} "
+      "callback_end_us={} callback_end_qpc={} logging_adjacent={}",
+      owner, window, role, a.client_index, a.callback, a.wrapped_callback_arg,
+      uint32_t(a.outcome), a.deadline_us, a.selected_now_us,
+      a.scheduled_next_us, a.selected.steady_us, a.selected.qpc,
+      a.wake.steady_us, a.wake.qpc, a.callback_begin.steady_us,
+      a.callback_begin.qpc, a.callback_end.steady_us, a.callback_end.qpc,
+      a.logging_adjacent);
 }
 
-uint64_t LogPumpReport(const AudioSystem* owner, uint32_t window,
-                       uint64_t qpf, const pump_observer::Report& report,
+uint64_t LogPumpReport(const AudioSystem* owner, uint32_t window, uint64_t qpf,
+                       const pump_observer::Report& report,
                        uint64_t previous_log_cost, bool previous_log_cost_valid,
                        uint64_t* log_end_qpc) {
   const uint64_t begin = PumpQpc();
   const uint64_t lifecycle_rows = PumpLifecycleBudget().observed();
-  XELOGI("APUMP001 window owner={:p} ordinal={} qpf={} start_us={} end_us={} "
-         "first_qpc={} last_qpc={} emitted_qpc={} selected={} "
-         "no_callback={} interrupted={} token_timeout={} token_other={} "
-         "driver_missing={} executed={} skipped_empty_windows={} "
-         "explicit_qpc_queries={} stamp_bracket_ticks={} "
-         "invalid_qpc_stamps={} "
-         "logging_adjacent={} lifecycle_rows={} identity_unknown={} "
-         "lifecycle_log_enqueue_span_ticks={} "
-         "previous_window_log_enqueue_span_ticks={} "
-         "previous_log_cost_valid={} cap_reached={} final_partial=unknown",
-         owner, window, qpf, report.window_start_us, report.window_end_us,
-         report.first_selected_qpc, report.last_selected_qpc, begin,
-         report.selected,
-         report.outcomes[size_t(pump_observer::Outcome::kNoCallback)],
-         report.outcomes[size_t(pump_observer::Outcome::kInterrupted)],
-         report.outcomes[size_t(pump_observer::Outcome::kTokenTimeout)],
-         report.outcomes[size_t(pump_observer::Outcome::kTokenOther)],
-         report.outcomes[size_t(pump_observer::Outcome::kDriverMissing)],
-         report.outcomes[size_t(pump_observer::Outcome::kExecuted)],
-         report.skipped_empty_windows, report.explicit_qpc_queries,
-         report.stamp_bracket_ticks, report.invalid_qpc_stamps,
-         report.logging_adjacent, lifecycle_rows,
-         PumpLifecycleBudget().identity_unknown(),
-         PumpLifecycleLogCost().load(), previous_log_cost,
-         previous_log_cost_valid, report.cap_reached);
+  XELOGI(
+      "APUMP001 window owner={:p} ordinal={} qpf={} start_us={} end_us={} "
+      "first_qpc={} last_qpc={} emitted_qpc={} selected={} "
+      "no_callback={} interrupted={} token_timeout={} token_other={} "
+      "driver_missing={} executed={} skipped_empty_windows={} "
+      "explicit_qpc_queries={} stamp_bracket_ticks={} "
+      "invalid_qpc_stamps={} "
+      "logging_adjacent={} lifecycle_rows={} identity_unknown={} "
+      "lifecycle_log_enqueue_span_ticks={} "
+      "previous_window_log_enqueue_span_ticks={} "
+      "previous_log_cost_valid={} cap_reached={} final_partial=unknown",
+      owner, window, qpf, report.window_start_us, report.window_end_us,
+      report.first_selected_qpc, report.last_selected_qpc, begin,
+      report.selected,
+      report.outcomes[size_t(pump_observer::Outcome::kNoCallback)],
+      report.outcomes[size_t(pump_observer::Outcome::kInterrupted)],
+      report.outcomes[size_t(pump_observer::Outcome::kTokenTimeout)],
+      report.outcomes[size_t(pump_observer::Outcome::kTokenOther)],
+      report.outcomes[size_t(pump_observer::Outcome::kDriverMissing)],
+      report.outcomes[size_t(pump_observer::Outcome::kExecuted)],
+      report.skipped_empty_windows, report.explicit_qpc_queries,
+      report.stamp_bracket_ticks, report.invalid_qpc_stamps,
+      report.logging_adjacent, lifecycle_rows,
+      PumpLifecycleBudget().identity_unknown(), PumpLifecycleLogCost().load(),
+      previous_log_cost, previous_log_cost_valid, report.cap_reached);
   LogPumpDetail(owner, window, "worst_selected", report.worst_selected);
   LogPumpDetail(owner, window, "worst_wake", report.worst_wake);
   LogPumpDetail(owner, window, "worst_callback", report.worst_callback);
@@ -256,18 +260,20 @@ void AudioSystem::WorkerThreadMain() {
       PumpWindowBudget().ClaimSession()) {
     pump_observer = std::make_unique<pump_observer::Collector>();
     pump_qpf = PumpQpf();
-    XELOGI("APUMP001 start owner={:p} qpf={} start_qpc={} "
-           "window_us={} max_windows={} max_sessions={} "
-           "max_details_per_window=4 "
-           "lifecycle_cap={} paired_audio_queue_trace={} "
-           "pre_first_selection_and_final_partial=unqualified",
-           this, pump_qpf, PumpQpc(), pump_observer::kWindowUs,
-           pump_observer::kMaxWindows, pump_observer::kMaxSessions,
-           pump_observer::kMaxLifecycleRows,
-           AudioQueueTraceEnabled());
+    XELOGI(
+        "APUMP001 start owner={:p} qpf={} start_qpc={} "
+        "window_us={} max_windows={} max_sessions={} "
+        "max_details_per_window=4 "
+        "lifecycle_cap={} paired_audio_queue_trace={} "
+        "pre_first_selection_and_final_partial=unqualified",
+        this, pump_qpf, PumpQpc(), pump_observer::kWindowUs,
+        pump_observer::kMaxWindows, pump_observer::kMaxSessions,
+        pump_observer::kMaxLifecycleRows, AudioQueueTraceEnabled());
   }
   auto record_pump = [&](const pump_observer::Attempt& attempt) {
-    if (!pump_observer) return;
+    if (!pump_observer) {
+      return;
+    }
     pump_observer::Report completed;
     if (pump_observer->Observe(attempt, &completed)) {
       const auto claim = PumpWindowBudget().Claim();
@@ -280,7 +286,9 @@ void AudioSystem::WorkerThreadMain() {
           this, pump_observer->reports_emitted(), pump_qpf, completed,
           previous_log_cost, previous_log_cost_valid, &last_log_end_qpc);
       previous_log_cost_valid = last_log_end_qpc != 0;
-      if (completed.cap_reached) pump_observer.reset();
+      if (completed.cap_reached) {
+        pump_observer.reset();
+      }
     }
   };
 
@@ -331,7 +339,9 @@ void AudioSystem::WorkerThreadMain() {
         clients_[client_index].next_pump_us = scheduled_next_us;
         // Stamp while the existing global lock still establishes registration
         // order; the enabled query cost is reported in the window.
-        if (pump_observer) selected_stamp = PumpStamp();
+        if (pump_observer) {
+          selected_stamp = PumpStamp();
+        }
       }
     }
 
@@ -378,7 +388,9 @@ void AudioSystem::WorkerThreadMain() {
           pause_fence_.Signal();
           xe::threading::Wait(resume_event_.get(), false);
         }
-        if (pump_attempt) record_pump(*pump_attempt);
+        if (pump_attempt) {
+          record_pump(*pump_attempt);
+        }
         continue;
       }
 
@@ -392,11 +404,13 @@ void AudioSystem::WorkerThreadMain() {
     }
 
     // Submit only if the host has a free output slot;
-    if (pump_observer) pump_attempt->wake = PumpStamp();
+    if (pump_observer) {
+      pump_attempt->wake = PumpStamp();
+    }
     if (client_callback) {
-      const auto token_result = xe::threading::Wait(
-          client_semaphores_[client_index].get(), false,
-          std::chrono::milliseconds(0));
+      const auto token_result =
+          xe::threading::Wait(client_semaphores_[client_index].get(), false,
+                              std::chrono::milliseconds(0));
       if (token_result == xe::threading::WaitResult::kSuccess) {
         std::lock_guard<std::mutex> guard(clients_[client_index].lock);
         if (clients_[client_index].driver == nullptr) {
@@ -407,7 +421,9 @@ void AudioSystem::WorkerThreadMain() {
             continue;
           }
         } else {
-          if (pump_observer) pump_attempt->callback_begin = PumpStamp();
+          if (pump_observer) {
+            pump_attempt->callback_begin = PumpStamp();
+          }
           SCOPE_profile_cpu_i("apu", "xe::apu::AudioSystem->client_callback");
           uint64_t args[] = {client_callback_arg};
           processor_->Execute(worker_thread_->thread_state(), client_callback,
@@ -424,7 +440,9 @@ void AudioSystem::WorkerThreadMain() {
                 : pump_observer::Outcome::kTokenOther;
       }
     }
-    if (pump_attempt) record_pump(*pump_attempt);
+    if (pump_attempt) {
+      record_pump(*pump_attempt);
+    }
   }
   worker_running_ = false;
 
@@ -620,8 +638,8 @@ bool AudioSystem::Restore(ByteStream* stream) {
   // Restore may recreate a driver and slot without RegisterClient. Its
   // mapping must not inherit a prior registration serial.
   if (PumpObserverEnabled()) {
-    LogPumpLifecycle(this, PumpLifecycleKind::kInvalidate,
-                     kMaximumClientCount, 0, 0);
+    LogPumpLifecycle(this, PumpLifecycleKind::kInvalidate, kMaximumClientCount,
+                     0, 0);
   }
 
   uint32_t num_clients = stream->Read<uint32_t>();
@@ -672,8 +690,9 @@ void AudioSystem::Pause() {
 
   pending_work_event_->Set();
   pause_fence_.Wait();
-  if (AudioQueueTraceEnabled())
+  if (AudioQueueTraceEnabled()) {
     AudioQueuePauseEpoch().fetch_add(1, std::memory_order_relaxed);
+  }
 
   xma_decoder_->Pause();
 }
@@ -683,8 +702,9 @@ void AudioSystem::Resume() {
     return;
   }
   paused_ = false;
-  if (AudioQueueTraceEnabled())
+  if (AudioQueueTraceEnabled()) {
     AudioQueuePauseEpoch().fetch_add(1, std::memory_order_relaxed);
+  }
 
   resume_event_->Set();
 

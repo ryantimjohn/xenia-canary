@@ -11,8 +11,7 @@
 #define XENIA_APU_APU_FLAGS_H_
 
 #include "xenia/base/cvar.h"
-DECLARE_bool(mute)
-DECLARE_bool(audio_queue_trace)
-DECLARE_bool(audio_pump_observer)
+DECLARE_bool(mute) DECLARE_bool(audio_queue_trace)
+    DECLARE_bool(audio_pump_observer)
 
 #endif  // XENIA_APU_APU_FLAGS_H_

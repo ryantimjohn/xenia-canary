@@ -146,11 +146,10 @@ void LogPumpDetail(const AudioSystem* owner, uint32_t window, const char* role,
       "next_us={} selected_stamp_us={} selected_qpc={} wake_us={} "
       "wake_qpc={} callback_begin_us={} callback_begin_qpc={} "
       "callback_end_us={} callback_end_qpc={} logging_adjacent={}",
-      static_cast<const void*>(owner), window, role, a.client_index,
-      a.callback, a.wrapped_callback_arg,
-      uint32_t(a.outcome), a.deadline_us, a.selected_now_us,
-      a.scheduled_next_us, a.selected.steady_us, a.selected.qpc,
-      a.wake.steady_us, a.wake.qpc, a.callback_begin.steady_us,
+      static_cast<const void*>(owner), window, role, a.client_index, a.callback,
+      a.wrapped_callback_arg, uint32_t(a.outcome), a.deadline_us,
+      a.selected_now_us, a.scheduled_next_us, a.selected.steady_us,
+      a.selected.qpc, a.wake.steady_us, a.wake.qpc, a.callback_begin.steady_us,
       a.callback_begin.qpc, a.callback_end.steady_us, a.callback_end.qpc,
       a.logging_adjacent);
 }
@@ -173,9 +172,8 @@ uint64_t LogPumpReport(const AudioSystem* owner, uint32_t window, uint64_t qpf,
       "previous_window_log_enqueue_span_ticks={} "
       "previous_log_cost_valid={} cap_reached={} final_partial=unknown",
       static_cast<const void*>(owner), window, qpf, report.window_start_us,
-      report.window_end_us,
-      report.first_selected_qpc, report.last_selected_qpc, begin,
-      report.selected,
+      report.window_end_us, report.first_selected_qpc, report.last_selected_qpc,
+      begin, report.selected,
       report.outcomes[size_t(pump_observer::Outcome::kNoCallback)],
       report.outcomes[size_t(pump_observer::Outcome::kInterrupted)],
       report.outcomes[size_t(pump_observer::Outcome::kTokenTimeout)],
@@ -270,9 +268,9 @@ void AudioSystem::WorkerThreadMain() {
         "lifecycle_cap={} paired_audio_queue_trace={} "
         "pre_first_selection_and_final_partial=unqualified",
         static_cast<const void*>(this), pump_qpf, PumpQpc(),
-        pump_observer::kWindowUs,
-        pump_observer::kMaxWindows, pump_observer::kMaxSessions,
-        pump_observer::kMaxLifecycleRows, AudioQueueTraceEnabled());
+        pump_observer::kWindowUs, pump_observer::kMaxWindows,
+        pump_observer::kMaxSessions, pump_observer::kMaxLifecycleRows,
+        AudioQueueTraceEnabled());
   }
   auto record_pump = [&](const pump_observer::Attempt& attempt) {
     if (!pump_observer) {

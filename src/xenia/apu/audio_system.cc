@@ -117,7 +117,7 @@ void LogPumpLifecycle(const AudioSystem* owner, PumpLifecycleKind kind,
     XELOGI(
         "APUMP001 lifecycle_cap owner={:p} at_qpc={} "
         "identity_after_cap=unknown",
-        owner, at);
+        static_cast<const void*>(owner), at);
   } else {
     const char* name = kind == PumpLifecycleKind::kRegister     ? "register"
                        : kind == PumpLifecycleKind::kUnregister ? "unregister"
@@ -125,7 +125,8 @@ void LogPumpLifecycle(const AudioSystem* owner, PumpLifecycleKind kind,
     XELOGI(
         "APUMP001 lifecycle owner={:p} kind={} serial={} slot={} "
         "callback={} wrapped_arg={} at_qpc={}",
-        owner, name, claim.serial, client_index, callback, wrapped_arg, at);
+        static_cast<const void*>(owner), name, claim.serial, client_index,
+        callback, wrapped_arg, at);
   }
   const uint64_t after = PumpQpc();
   if (at && after >= at) {
@@ -145,7 +146,8 @@ void LogPumpDetail(const AudioSystem* owner, uint32_t window, const char* role,
       "next_us={} selected_stamp_us={} selected_qpc={} wake_us={} "
       "wake_qpc={} callback_begin_us={} callback_begin_qpc={} "
       "callback_end_us={} callback_end_qpc={} logging_adjacent={}",
-      owner, window, role, a.client_index, a.callback, a.wrapped_callback_arg,
+      static_cast<const void*>(owner), window, role, a.client_index,
+      a.callback, a.wrapped_callback_arg,
       uint32_t(a.outcome), a.deadline_us, a.selected_now_us,
       a.scheduled_next_us, a.selected.steady_us, a.selected.qpc,
       a.wake.steady_us, a.wake.qpc, a.callback_begin.steady_us,
@@ -170,7 +172,8 @@ uint64_t LogPumpReport(const AudioSystem* owner, uint32_t window, uint64_t qpf,
       "lifecycle_log_enqueue_span_ticks={} "
       "previous_window_log_enqueue_span_ticks={} "
       "previous_log_cost_valid={} cap_reached={} final_partial=unknown",
-      owner, window, qpf, report.window_start_us, report.window_end_us,
+      static_cast<const void*>(owner), window, qpf, report.window_start_us,
+      report.window_end_us,
       report.first_selected_qpc, report.last_selected_qpc, begin,
       report.selected,
       report.outcomes[size_t(pump_observer::Outcome::kNoCallback)],
@@ -266,7 +269,8 @@ void AudioSystem::WorkerThreadMain() {
         "max_details_per_window=4 "
         "lifecycle_cap={} paired_audio_queue_trace={} "
         "pre_first_selection_and_final_partial=unqualified",
-        this, pump_qpf, PumpQpc(), pump_observer::kWindowUs,
+        static_cast<const void*>(this), pump_qpf, PumpQpc(),
+        pump_observer::kWindowUs,
         pump_observer::kMaxWindows, pump_observer::kMaxSessions,
         pump_observer::kMaxLifecycleRows, AudioQueueTraceEnabled());
   }

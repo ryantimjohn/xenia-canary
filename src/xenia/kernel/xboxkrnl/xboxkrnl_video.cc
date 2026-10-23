@@ -480,10 +480,11 @@ void VdSwap_entry(
   if (auto* observation = swap_entry::Current()) {
     auto* thread = XThread::GetCurrentThread();
     const auto* context = thread && thread->thread_state()
-        ? thread->thread_state()->context() : nullptr;
+                              ? thread->thread_state()->context()
+                              : nullptr;
     observation->Observe(thread ? thread->thread_id() : 0,
-        xe::threading::current_thread_system_id(), context ? context->lr : 0,
-        context != nullptr);
+                         xe::threading::current_thread_system_id(),
+                         context ? context->lr : 0, context != nullptr);
   }
   // All of these parameters are REQUIRED.
   assert(buffer_ptr);

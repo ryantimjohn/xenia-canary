@@ -22,7 +22,8 @@ struct Record {
   uint32_t guest_tid = 0, native_tid = 0, flags = 0, reserved = 0;
 };
 struct Counts {
-  // Only open-gate admissions: attempted = accepted + queue + limit + contention.
+  // Only open-gate admissions: attempted = accepted + queue + limit +
+  // contention.
   uint64_t attempted = 0, accepted = 0, written = 0;
   uint64_t queue_drops = 0, limit_drops = 0, contention_drops = 0;
   // Sampled at cutoff, NOT a final count of calls arriving after close.
@@ -35,19 +36,23 @@ struct Summary {
 std::array<uint8_t, kHeaderBytes> EncodeHeader(uint64_t qpf, uint64_t start);
 std::array<uint8_t, kRecordBytes> EncodeRecord(const Record& record);
 std::array<uint8_t, kFooterBytes> EncodeFooter(const Summary& summary);
-bool ValidateFile(const std::filesystem::path& path, Summary* summary = nullptr);
-bool MatchesAcknowledgement(const Summary& file, const Summary& ack, bool complete);
+bool ValidateFile(const std::filesystem::path& path,
+                  Summary* summary = nullptr);
+bool MatchesAcknowledgement(const Summary& file, const Summary& ack,
+                            bool complete);
 uint64_t RawQpc();
 class Session {
  public:
   // Writer gates are isolated-test seams; production supplies neither.
-  static std::unique_ptr<Session> Create(const std::filesystem::path& path,
-      uint64_t qpf, uint64_t start, std::function<void()> before_drain = {},
+  static std::unique_ptr<Session> Create(
+      const std::filesystem::path& path, uint64_t qpf, uint64_t start,
+      std::function<void()> before_drain = {},
       std::function<void()> before_footer = {});
   ~Session();
   void Observe(uint32_t guest_tid, uint32_t native_tid, uint64_t caller_lr,
                bool caller_lr_read);
-  // One shutdown caller, concurrent Observe allowed. No admission spans guest work.
+  // One shutdown caller, concurrent Observe allowed. No admission spans guest
+  // work.
   bool Close(std::chrono::milliseconds timeout);
   bool timed_out() const { return timed_out_.load(); }
   Summary summary() const;  // Only after Close finished without a timeout.

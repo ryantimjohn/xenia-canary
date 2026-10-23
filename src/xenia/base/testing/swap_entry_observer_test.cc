@@ -15,25 +15,33 @@ struct Temp {
   Temp() {
     static std::atomic<unsigned> next{0};
     path = std::filesystem::temp_directory_path() /
-        ("xenia-swap-entry-" + std::to_string(
-            std::chrono::steady_clock::now().time_since_epoch().count()) +
-         "-" + std::to_string(++next) + ".bin");
+           ("xenia-swap-entry-" +
+            std::to_string(
+                std::chrono::steady_clock::now().time_since_epoch().count()) +
+            "-" + std::to_string(++next) + ".bin");
   }
-  ~Temp() { std::error_code ec; std::filesystem::remove(path, ec); }
+  ~Temp() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
 };
 void Patch(const std::filesystem::path& path, uint64_t offset, uint8_t value) {
   std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
-  file.seekp(std::streamoff(offset)); file.put(char(value)); file.flush();
+  file.seekp(std::streamoff(offset));
+  file.put(char(value));
+  file.flush();
 }
 }  // namespace
-TEST_CASE("Swap entry disabled lookup does not start a session", "[swap-entry]") {
+TEST_CASE("Swap entry disabled lookup does not start a session",
+          "[swap-entry]") {
   REQUIRE(Current() == nullptr);
   REQUIRE(StartFromFlag());  // Default empty flag; no fixture path or writer.
   REQUIRE(Current() == nullptr);
   REQUIRE(CloseForExit(1ms));
 }
 #if XE_PLATFORM_WIN32
-TEST_CASE("Swap entry real writer preserves scalars and close proof", "[swap-entry]") {
+TEST_CASE("Swap entry real writer preserves scalars and close proof",
+          "[swap-entry]") {
   Temp file;
   auto session = Session::Create(file.path, 10000000, RawQpc());
   REQUIRE(session);
@@ -66,15 +74,22 @@ TEST_CASE("Swap entry real writer preserves scalars and close proof", "[swap-ent
   Patch(file.path, kHeaderBytes + 2 * kRecordBytes + 8, 3);  // Bad attempted.
   REQUIRE_FALSE(ValidateFile(file.path));
 }
-TEST_CASE("Swap entry full queue records loss without producer blocking", "[swap-entry]") {
+TEST_CASE("Swap entry full queue records loss without producer blocking",
+          "[swap-entry]") {
   Temp file;
   std::promise<void> release;
   auto gate = release.get_future().share();
-  auto session = Session::Create(file.path, 10000000, RawQpc(), [gate] { gate.wait(); });
-  if (!session) release.set_value();
+  auto session =
+      Session::Create(file.path, 10000000, RawQpc(), [gate] { gate.wait(); });
+  if (!session) {
+    release.set_value();
+  }
   REQUIRE(session);
-  for (uint32_t i = 0; i < kQueueLimit + 7; ++i) session->Observe(1, 2, 0, true);
-  release.set_value();  // Release before any failing assertion / destructor join.
+  for (uint32_t i = 0; i < kQueueLimit + 7; ++i) {
+    session->Observe(1, 2, 0, true);
+  }
+  release
+      .set_value();  // Release before any failing assertion / destructor join.
   REQUIRE(session->Close(2s));
   Summary s{};
   REQUIRE(ValidateFile(file.path, &s));
@@ -83,7 +98,8 @@ TEST_CASE("Swap entry full queue records loss without producer blocking", "[swap
   REQUIRE(s.counts.queue_drops == 7);
   REQUIRE(s.counts.contention_drops == 0);
 }
-TEST_CASE("Swap entry concurrent producers retain exact admitted accounting", "[swap-entry]") {
+TEST_CASE("Swap entry concurrent producers retain exact admitted accounting",
+          "[swap-entry]") {
   Temp file;
   auto session = Session::Create(file.path, 10000000, RawQpc());
   REQUIRE(session);
@@ -91,22 +107,30 @@ TEST_CASE("Swap entry concurrent producers retain exact admitted accounting", "[
   std::vector<std::thread> workers;
   for (uint32_t t = 1; t <= 4; ++t) {
     workers.emplace_back([&, t] {
-      while (!start.load(std::memory_order_acquire)) std::this_thread::yield();
-      for (unsigned i = 0; i < 500; ++i) session->Observe(t, t + 100, t, true);
+      while (!start.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+      }
+      for (unsigned i = 0; i < 500; ++i) {
+        session->Observe(t, t + 100, t, true);
+      }
     });
   }
   start.store(true, std::memory_order_release);
-  for (auto& worker : workers) worker.join();
+  for (auto& worker : workers) {
+    worker.join();
+  }
   REQUIRE(session->Close(2s));
   Summary s{};
   REQUIRE(ValidateFile(file.path, &s));
   REQUIRE(s.counts.attempted == 2000);
   REQUIRE(s.counts.accepted > 0);
   REQUIRE(s.counts.attempted == s.counts.accepted + s.counts.queue_drops +
-      s.counts.limit_drops + s.counts.contention_drops);
+                                    s.counts.limit_drops +
+                                    s.counts.contention_drops);
   REQUIRE(s.counts.written == s.counts.accepted);
 }
-TEST_CASE("Swap entry cutoff excludes late calls without changing frozen proof", "[swap-entry]") {
+TEST_CASE("Swap entry cutoff excludes late calls without changing frozen proof",
+          "[swap-entry]") {
   Temp file;
   auto session = Session::Create(file.path, 10000000, RawQpc());
   REQUIRE(session);
@@ -122,18 +146,23 @@ TEST_CASE("Swap entry cutoff excludes late calls without changing frozen proof",
   REQUIRE(MatchesAcknowledgement(wire, ack, true));
   REQUIRE(MatchesAcknowledgement(wire, session->summary(), true));
 }
-TEST_CASE("Swap entry writer timeout never acknowledges successful close", "[swap-entry]") {
+TEST_CASE("Swap entry writer timeout never acknowledges successful close",
+          "[swap-entry]") {
   Temp file;
   std::promise<void> entered, release;
   auto entered_future = entered.get_future();
   auto gate = release.get_future().share();
   auto session = Session::Create(file.path, 10000000, RawQpc(), {}, [&] {
-    entered.set_value(); gate.wait();
+    entered.set_value();
+    gate.wait();
   });
-  if (!session) release.set_value();
+  if (!session) {
+    release.set_value();
+  }
   REQUIRE(session);
   session->Observe(1, 2, 3, true);
-  auto close = std::async(std::launch::async, [&] { return session->Close(20ms); });
+  auto close =
+      std::async(std::launch::async, [&] { return session->Close(20ms); });
   bool reached = entered_future.wait_for(1s) == std::future_status::ready;
   auto closed = close.wait_for(1s);
   release.set_value();  // Always release before any assertion or join.
@@ -142,7 +171,8 @@ TEST_CASE("Swap entry writer timeout never acknowledges successful close", "[swa
   REQUIRE(closed == std::future_status::ready);
   REQUIRE_FALSE(first_result);
   REQUIRE(session->timed_out());
-  REQUIRE_FALSE(session->Close(2s));  // Sticky failed attempt, no retry success.
+  REQUIRE_FALSE(
+      session->Close(2s));  // Sticky failed attempt, no retry success.
   Summary wire{};
   REQUIRE(ValidateFile(file.path, &wire));
   REQUIRE_FALSE(MatchesAcknowledgement(wire, session->summary(), first_result));

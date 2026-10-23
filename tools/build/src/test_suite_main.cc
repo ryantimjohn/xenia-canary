@@ -20,10 +20,22 @@
 #define CATCH_CONFIG_RUNNER
 #include "third_party/catch/single_include/catch2/catch.hpp"
 
+#if defined(XE_CPU_FAULT_CHILD)
+namespace xe::cpu::testing {
+bool RunScalarFaultChild(const std::vector<std::string>& args, int* result);
+}
+#endif
+
 namespace xe {
 namespace test_suite {
 
 int test_suite_main(const std::vector<std::string>& args) {
+#if defined(XE_CPU_FAULT_CHILD)
+  int child_result = EXIT_FAILURE;
+  if (xe::cpu::testing::RunScalarFaultChild(args, &child_result)) {
+    return child_result;
+  }
+#endif
   // Catch doesn't expose a way to pass a vector of strings, despite building a
   // vector internally.
   int argc = 0;

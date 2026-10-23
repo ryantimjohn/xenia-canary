@@ -12,7 +12,14 @@
 #if XE_PLATFORM_WIN32 && XE_ARCH_AMD64
 
 #include <array>
+#include <atomic>
+#include <charconv>
 #include <cstring>
+#include <filesystem>
+#include <string>
+#include <string_view>
+#include <type_traits>
+#include <vector>
 
 #include "third_party/catch/include/catch.hpp"
 #include "xenia/base/byte_order.h"
@@ -25,6 +32,7 @@
 DECLARE_bool(zero_page_scalar_first_chance);
 DECLARE_bool(protect_zero);
 DECLARE_bool(full_optimization_even_with_debug);
+DECLARE_path(log_file);
 
 namespace xe::cpu::testing {
 namespace {
@@ -80,13 +88,21 @@ struct Fixture {
   ThreadState* previous = ThreadState::Get();
   uint32_t stack = 0;
 
-  explicit Fixture(uint32_t word) {
-    REQUIRE(memory->Initialize());
+  Fixture() = default;
+  explicit Fixture(uint32_t word) { REQUIRE(Initialize(word)); }
+
+  // The death-test child must not enter Catch, even during setup.
+  bool Initialize(uint32_t word) {
+    if (!memory->Initialize()) {
+      return false;
+    }
     auto* heap = memory->LookupHeap(kCode);
-    REQUIRE(heap);
-    REQUIRE(heap->AllocFixed(kCode, 0x10000, 0x10000,
-                             kMemoryAllocationReserve | kMemoryAllocationCommit,
-                             kMemoryProtectRead | kMemoryProtectWrite));
+    if (!heap ||
+        !heap->AllocFixed(kCode, 0x10000, 0x10000,
+                          kMemoryAllocationReserve | kMemoryAllocationCommit,
+                          kMemoryProtectRead | kMemoryProtectWrite)) {
+      return false;
+    }
     const std::array<uint32_t, 4> code = {kLiR10One, word, kLiR10Two, kBlr};
     for (size_t index = 0; index < code.size(); ++index) {
       xe::store_and_swap<uint32_t>(
@@ -94,12 +110,16 @@ struct Fixture {
           code[index]);
     }
     processor = std::make_unique<Processor>(memory.get(), nullptr);
-    REQUIRE(processor->Setup(std::make_unique<backend::x64::X64Backend>()));
-    REQUIRE(
-        processor->AddModule(std::make_unique<ScalarModule>(processor.get())));
+    if (!processor->Setup(std::make_unique<backend::x64::X64Backend>()) ||
+        !processor->AddModule(
+            std::make_unique<ScalarModule>(processor.get()))) {
+      return false;
+    }
     processor->backend()->CommitExecutableRange(kCode, kCode + 0x10000);
     stack = memory->SystemHeapAlloc(0x10000);
-    REQUIRE(stack);
+    if (!stack) {
+      return false;
+    }
     thread =
         std::make_unique<ThreadState>(processor.get(), 0x100, stack + 0x10000);
     ThreadState::Bind(thread.get());
@@ -108,6 +128,7 @@ struct Fixture {
     thread->context()->r[0] = 0x123456789ABCDEF0;
     thread->context()->r[10] = 0xCCCC;
     thread->context()->r[11] = 0xDDDD;
+    return true;
   }
 
   ~Fixture() {
@@ -126,73 +147,327 @@ struct Fixture {
   }
 };
 
-struct ExpectedFault {
-  uint64_t code_begin;
-  uint64_t code_end;
-  uint64_t expected_address;
-  ULONG_PTR expected_operation;
-  uint64_t observed_pc = 0;
+// Ordinary pre-access evidence only. There is deliberately no native exception
+// observer, CONTEXT inspection, SEH recovery, or assertion in the child.
+// The record plus AV exit does not prove the native fault RIP/address/state,
+// tail suppression, or correctness of native unwinding through JIT thunks.
+struct CallbackRecord {
+  uint64_t version;
+  uint64_t nonce;
+  uint64_t write;
+  uint64_t callbacks;
+  uint64_t same_thread;
+  uint64_t guest_pc;
+  uint64_t instruction;
+  uint64_t address;
+  uint64_t reported_write;
+  uint64_t r10;
+  uint64_t r0;
+  uint64_t complete;
+};
+static_assert(std::is_trivially_copyable_v<CallbackRecord>);
+static_assert(sizeof(CallbackRecord) == 12 * sizeof(uint64_t));
+constexpr uint64_t kRecordComplete = 0x5343414C415231;
+constexpr int kChildFailure = 90;
+constexpr wchar_t kRecordName[] = L"scalar-fault-record.bin";
+
+class Handle {
+ public:
+  explicit Handle(HANDLE value = nullptr) : value_(value) {}
+  ~Handle() {
+    if (value_ && value_ != INVALID_HANDLE_VALUE) {
+      CloseHandle(value_);
+    }
+  }
+  Handle(const Handle&) = delete;
+  Handle& operator=(const Handle&) = delete;
+  HANDLE get() const { return value_; }
+
+ private:
+  HANDLE value_;
 };
 
-int CaptureExpectedFault(EXCEPTION_POINTERS* exception,
-                         ExpectedFault* expected) {
-  const auto* record = exception->ExceptionRecord;
-  const auto pc = reinterpret_cast<uint64_t>(record->ExceptionAddress);
-  if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION ||
-      record->NumberParameters < 2 || pc < expected->code_begin ||
-      pc >= expected->code_end ||
-      record->ExceptionInformation[0] != expected->expected_operation ||
-      record->ExceptionInformation[1] != expected->expected_address) {
-    return EXCEPTION_CONTINUE_SEARCH;
-  }
-  expected->observed_pc = pc;
-  return EXCEPTION_EXECUTE_HANDLER;
-}
-
-// No C++ locals requiring destruction in this SEH leaf. The expected native
-// access fault unwinds the call; it never resumes or skips the instruction.
-bool InvokeWithExpectedFault(Function* function, ThreadState* thread,
-                             ExpectedFault* expected) {
-  __try {
-    function->Call(thread, 0xBCBCBCBC);
+bool WriteCallbackRecord(const CallbackRecord& record) {
+  Handle file(CreateFileW(kRecordName, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                          FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (file.get() == INVALID_HANDLE_VALUE) {
     return false;
-  } __except (CaptureExpectedFault(GetExceptionInformation(), expected)) {
-    return true;
   }
+  DWORD written = 0;
+  return WriteFile(file.get(), &record, sizeof(record), &written, nullptr) &&
+         written == sizeof(record) && FlushFileBuffers(file.get());
 }
 
-TEST_CASE(
-    "Scalar first chance observes materialized state before real zero fault",
-    "[cpu][scalar-first-chance]") {
-  const bool write = GENERATE(false, true);
-  INFO("Native access is write: " << write);
+bool ValidCallbackRecord(const CallbackRecord& record, uint64_t nonce,
+                         bool write) {
+  return record.version == 1 && record.nonce == nonce &&
+         record.write == uint64_t(write) && record.callbacks == 1 &&
+         record.same_thread == 1 && record.guest_pc == kCode + 4 &&
+         record.instruction == ScalarWord(write) && record.address == 0 &&
+         record.reported_write == uint64_t(write) && record.r10 == 1 &&
+         record.r0 == 0x123456789ABCDEF0 && record.complete == kRecordComplete;
+}
+
+int ScalarFaultChild(bool write, uint64_t nonce) {
+  SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+               SEM_NOOPENFILEERRORBOX);
   Options options;
-  Fixture fixture(ScalarWord(write));
-  auto* function = fixture.Resolve();
+  Fixture fixture;
+  if (!fixture.Initialize(ScalarWord(write))) {
+    return kChildFailure;
+  }
+  auto* resolved = fixture.processor->ResolveFunction(kCode);
+  if (!resolved || !resolved->is_guest()) {
+    return kChildFailure;
+  }
+  uint64_t callbacks = 0;
+  fixture.processor->set_scalar_access_first_chance_handler(
+      [&](ThreadState* thread,
+          const Processor::ScalarAccessFirstChance& fault) {
+        CallbackRecord record{1,
+                              nonce,
+                              uint64_t(write),
+                              ++callbacks,
+                              uint64_t(thread == fixture.thread.get()),
+                              fault.guest_pc,
+                              fault.raw_instruction,
+                              fault.guest_address,
+                              uint64_t(fault.is_write),
+                              fault.modeled_context->r[10],
+                              fault.modeled_context->r[0],
+                              kRecordComplete};
+        // A repeated callback or a failed/partial record must never leave a
+        // record that can qualify an eventual unrelated process failure.
+        if (callbacks != 1 || !WriteCallbackRecord(record)) {
+          ExitProcess(kChildFailure);
+        }
+      });
+  resolved->Call(fixture.thread.get(), 0xBCBCBCBC);
+  // A return is not success, even if the pre-access record was written.
+  Handle returned(CreateFileW(L"normal-return", GENERIC_WRITE, 0, nullptr,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr));
+  return kChildFailure;
+}
+
+struct ChildResult {
+  bool setup = false;
+  bool timed_out = false;
+  bool exited = false;
+  bool job_empty = false;
+  DWORD exit_code = STILL_ACTIVE;
+  bool exact_record = false;
+  bool normal_return = false;
+  CallbackRecord record{};
+};
+
+// No inherited handles, shell, detached child, or process-name cleanup. The
+// retained process handle and nested kill-on-close Job own this single child.
+ChildResult RunChild(bool write, uint64_t nonce,
+                     const std::filesystem::path& directory) {
+  ChildResult result;
+  wchar_t executable[32768]{};
+  const DWORD length =
+      GetModuleFileNameW(nullptr, executable, DWORD(std::size(executable)));
+  if (!length || length >= std::size(executable)) {
+    return result;
+  }
+  Handle job(CreateJobObjectW(nullptr, nullptr));
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!job.get() ||
+      !SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
+                               &limits, sizeof(limits))) {
+    return result;
+  }
+  std::wstring command =
+      L"\"" + std::wstring(executable) + L"\" --xe-scalar-fault-child=" +
+      (write ? L"write:" : L"read:") + std::to_wstring(nonce);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessW(executable, command.data(), nullptr, nullptr, FALSE,
+                      CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
+                      directory.c_str(), &startup, &process)) {
+    return result;
+  }
+  Handle process_handle(process.hProcess);
+  Handle thread_handle(process.hThread);
+  if (!AssignProcessToJobObject(job.get(), process.hProcess)) {
+    TerminateProcess(process.hProcess, kChildFailure);
+    WaitForSingleObject(process.hProcess, 5000);
+    return result;
+  }
+  if (ResumeThread(process.hThread) == DWORD(-1)) {
+    TerminateJobObject(job.get(), kChildFailure);
+    WaitForSingleObject(process.hProcess, 5000);
+    return result;
+  }
+  result.setup = true;
+  const DWORD wait = WaitForSingleObject(process.hProcess, 15000);
+  result.exited = wait == WAIT_OBJECT_0;
+  result.timed_out = wait == WAIT_TIMEOUT;
+  if (!result.exited) {
+    TerminateJobObject(job.get(), kChildFailure);
+    WaitForSingleObject(process.hProcess, 5000);
+    return result;
+  }
+  GetExitCodeProcess(process.hProcess, &result.exit_code);
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting{};
+  result.job_empty =
+      QueryInformationJobObject(job.get(), JobObjectBasicAccountingInformation,
+                                &accounting, sizeof(accounting), nullptr) &&
+      accounting.ActiveProcesses == 0;
+  Handle file(CreateFileW((directory / kRecordName).c_str(), GENERIC_READ,
+                          FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL, nullptr));
+  LARGE_INTEGER size{};
+  DWORD read = 0;
+  result.exact_record = file.get() != INVALID_HANDLE_VALUE &&
+                        GetFileSizeEx(file.get(), &size) &&
+                        size.QuadPart == sizeof(result.record) &&
+                        ReadFile(file.get(), &result.record,
+                                 sizeof(result.record), &read, nullptr) &&
+                        read == sizeof(result.record);
+  result.normal_return =
+      GetFileAttributesW((directory / L"normal-return").c_str()) !=
+      INVALID_FILE_ATTRIBUTES;
+  return result;
+}
+
+bool ValidChildResult(const ChildResult& result, uint64_t nonce, bool write) {
+  return result.setup && !result.timed_out && result.exited &&
+         result.job_empty && result.exit_code == EXCEPTION_ACCESS_VIOLATION &&
+         result.exact_record && !result.normal_return &&
+         ValidCallbackRecord(result.record, nonce, write);
+}
+
+TEST_CASE("Scalar pre-access callback precedes child access-violation death",
+          "[cpu][scalar-first-chance]") {
+  const bool write = GENERATE(false, true);
+  // A fixed per-parent prefix and strictly increasing low word cannot cancel
+  // one another as independently sampled clock/sequence XOR operands could.
+  static std::atomic<uint32_t> sequence{0};
+  const uint32_t serial = ++sequence;
+  REQUIRE(serial != 0);
+  const uint64_t nonce = (uint64_t(GetCurrentProcessId()) << 32) | serial;
+  const auto directory_name = L"xenia-scalar-" +
+                              std::to_wstring(GetTickCount64()) + L"-" +
+                              std::to_wstring(nonce);
+  const auto directory =
+      std::filesystem::temp_directory_path() / directory_name;
+  REQUIRE(CreateDirectoryW(directory.c_str(), nullptr));
+  const ChildResult result = RunChild(write, nonce, directory);
+  // Retain success and failure evidence; never recursively remove a temp path.
+  INFO("Child evidence directory: " << directory.string());
+  INFO("Child setup=" << result.setup << " exited=" << result.exited
+                      << " timeout=" << result.timed_out << " exit code="
+                      << result.exit_code << " Job empty=" << result.job_empty
+                      << " exact record=" << result.exact_record);
+  REQUIRE(ValidChildResult(result, nonce, write));
+}
+
+TEST_CASE("Scalar child evidence rejects incomplete and nonfatal outcomes",
+          "[cpu][scalar-first-chance]") {
+  ChildResult result;
+  result.setup = result.exited = result.job_empty = result.exact_record = true;
+  result.exit_code = EXCEPTION_ACCESS_VIOLATION;
+  result.record = {1,
+                   17,
+                   0,
+                   1,
+                   1,
+                   kCode + 4,
+                   ScalarWord(false),
+                   0,
+                   0,
+                   1,
+                   0x123456789ABCDEF0,
+                   kRecordComplete};
+  REQUIRE(ValidChildResult(result, 17, false));
+  auto bad = result;
+  bad.record.version = 2;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.complete = 0;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.callbacks = 2;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.instruction = ScalarWord(true);
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.nonce = 18;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.write = 1;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.guest_pc += 4;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.address = 4;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.reported_write = 1;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.same_thread = 0;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.r10 = 2;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.record.r0 = 0;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.exit_code = 0;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.exit_code = kChildFailure;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.normal_return = true;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.exact_record = false;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.timed_out = true;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.setup = false;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.job_empty = false;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+  bad = result;
+  bad.exited = false;
+  CHECK_FALSE(ValidChildResult(bad, 17, false));
+}
+
+TEST_CASE("Scalar direct site restores context and nested offers on return",
+          "[cpu][scalar-first-chance]") {
+  Options options;
+  Fixture fixture(ScalarWord(true));
   auto* site = fixture.processor->RegisterScalarAccessFirstChance(
-      function, kCode + 4, ScalarWord(write));
+      fixture.Resolve(), kCode + 4, ScalarWord(true));
   REQUIRE(site);
+  fixture.thread->context()->r[10] = 1;
+  ppc::PPCContext saved;
+  std::memcpy(&saved, fixture.thread->context(), sizeof(saved));
   size_t callbacks = 0;
-  ppc::PPCContext saved{};
   fixture.processor->set_scalar_access_first_chance_handler(
       [&](ThreadState* thread,
           const Processor::ScalarAccessFirstChance& fault) {
         ++callbacks;
         CHECK(thread == fixture.thread.get());
-        CHECK(fault.guest_pc == kCode + 4);
-        CHECK(fault.raw_instruction == ScalarWord(write));
-        CHECK(fault.guest_address == 0);
-        CHECK(fault.is_write == write);
         CHECK(fault.modeled_context->r[10] == 1);
-        CHECK(fault.modeled_context->r[0] == 0x123456789ABCDEF0);
-        std::memcpy(&saved, fault.modeled_context, sizeof(saved));
-        // Nested offers must decline. Replacing the registry inside the
-        // callback also proves that no registry lock spans guest invocation.
-        site->Call(thread, 0xBCBCBCBC);
+        REQUIRE(site->Call(thread, 0xBCBCBCBC));
         CHECK(callbacks == 1);
         {
           ThreadState nested(fixture.processor.get(), 0x101);
-          site->Call(&nested, 0xBCBCBCBC);
+          REQUIRE(site->Call(&nested, 0xBCBCBCBC));
           CHECK(callbacks == 1);
           CHECK(ThreadState::Get() == thread);
         }
@@ -202,18 +477,16 @@ TEST_CASE(
         thread->context()->ctr = 0xBAD;
         thread->context()->f[7] = -1.0;
       });
-  ExpectedFault fault{
-      reinterpret_cast<uint64_t>(function->machine_code()),
-      reinterpret_cast<uint64_t>(function->machine_code()) +
-          function->machine_code_length(),
-      reinterpret_cast<uint64_t>(fixture.memory->TranslateVirtual(0)),
-      write ? ULONG_PTR(1) : ULONG_PTR(0)};
-  REQUIRE(InvokeWithExpectedFault(function, fixture.thread.get(), &fault));
+  REQUIRE(site->Call(fixture.thread.get(), 0xBCBCBCBC));
   CHECK(callbacks == 1);
-  CHECK(function->MapMachineCodeToGuestAddress(fault.observed_pc) == kCode + 4);
   CHECK(std::memcmp(fixture.thread->context(), &saved, sizeof(saved)) == 0);
-  CHECK(fixture.thread->context()->r[10] == 1);  // Tail overwrite did not run.
-  CHECK(fixture.thread->context()->r[11] == 0xDDDD);
+  fixture.processor->set_scalar_access_first_chance_handler(
+      [&](ThreadState*, const Processor::ScalarAccessFirstChance&) {
+        ++callbacks;
+      });
+  REQUIRE(site->Call(fixture.thread.get(), 0xBCBCBCBC));
+  CHECK(callbacks == 2);
+  CHECK(std::memcmp(fixture.thread->context(), &saved, sizeof(saved)) == 0);
 }
 
 TEST_CASE(
@@ -372,6 +645,64 @@ TEST_CASE("Scalar boundary control reloads native operands after CALL_EXTERN",
 }
 
 }  // namespace
+
+namespace {
+constexpr char kChildSwitch[] = "--xe-scalar-fault-child=";
+
+bool HasChildSwitch(const std::vector<std::string>& args) {
+  for (size_t i = 1; i < args.size(); ++i) {
+    if (args[i].starts_with(kChildSwitch)) {
+      return true;
+    }
+  }
+  return false;
+}
+}  // namespace
+
+// Called only by the CPU executable before ordinary logging initialization.
+// Transparent console arguments otherwise do not select a separate log file.
+void PrepareScalarFaultChild(const std::vector<std::string>& args) {
+  if (HasChildSwitch(args)) {
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+    cvars::log_file = std::filesystem::current_path() / L"child.log";
+  }
+}
+
+bool RunScalarFaultChild(const std::vector<std::string>& args, int* result) {
+  if (!HasChildSwitch(args)) {
+    return false;
+  }
+  *result = kChildFailure;
+  if (args.size() != 2 || !args[1].starts_with(kChildSwitch)) {
+    return true;
+  }
+  auto value = std::string_view(args[1]).substr(sizeof(kChildSwitch) - 1);
+  bool write = false;
+  if (value.starts_with("write:")) {
+    write = true;
+    value.remove_prefix(6);
+  } else if (value.starts_with("read:")) {
+    value.remove_prefix(5);
+  } else {
+    return true;
+  }
+  uint64_t nonce = 0;
+  const auto parsed =
+      std::from_chars(value.data(), value.data() + value.size(), nonce);
+  if (parsed.ec != std::errc() || parsed.ptr != value.data() + value.size() ||
+      !nonce) {
+    return true;
+  }
+  try {
+    *result = ScalarFaultChild(write, nonce);
+  } catch (...) {
+    // Ordinary setup errors cannot qualify as the requested AV termination.
+    *result = kChildFailure;
+  }
+  return true;
+}
+
 }  // namespace xe::cpu::testing
 
 #endif  // XE_PLATFORM_WIN32 && XE_ARCH_AMD64

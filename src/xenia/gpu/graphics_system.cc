@@ -176,7 +176,8 @@ X_STATUS GraphicsSystem::Setup(cpu::Processor* processor,
                       duration_scalar);  // 1000 microseconds = 1 ms
 
                   if (pacing_tick.session) {
-                    threading::NanoSleep(estimated_nanoseconds, &pacing_tick.record);
+                    threading::NanoSleep(estimated_nanoseconds,
+                                         &pacing_tick.record);
                   } else {
                     threading::NanoSleep(estimated_nanoseconds);
                   }

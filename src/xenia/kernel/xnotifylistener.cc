@@ -54,7 +54,9 @@ bool XNotifyListener::DequeueNotification(XNotificationID* out_id,
                                           uint32_t* out_data,
                                           QueueObservation* observation) {
   auto global_lock = global_critical_region_.Acquire();
-  if (observation) observation->before = notifications_.size();
+  if (observation) {
+    observation->before = notifications_.size();
+  }
   bool dequeued = false;
   if (notifications_.size()) {
     dequeued = true;
@@ -66,7 +68,9 @@ bool XNotifyListener::DequeueNotification(XNotificationID* out_id,
       wait_handle_->Reset();
     }
   }
-  if (observation) observation->after = notifications_.size();
+  if (observation) {
+    observation->after = notifications_.size();
+  }
   return dequeued;
 }
 
@@ -94,7 +98,9 @@ bool XNotifyListener::DequeueNotification(XNotificationID id,
     }
     break;
   }
-  if (observation) observation->after = notifications_.size();
+  if (observation) {
+    observation->after = notifications_.size();
+  }
   return dequeued;
 }
 

@@ -130,8 +130,8 @@ TEST_CASE("Private caller scope rejects invalid addresses before reading",
 TEST_CASE("Private caller scope requires the admitted linked target",
           "[sdk-private-caller-scope]") {
   Fixture fixture;
-  for (uint32_t word : {0x480000C4u, 0x480000C7u, 0x4E800421u,
-                         0x60000000u, 0x48000000u, 0x480000C1u}) {
+  for (uint32_t word : {0x480000C4u, 0x480000C7u, 0x4E800421u, 0x60000000u,
+                        0x48000000u, 0x480000C1u}) {
     fixture.Put(0x103C, word);
     CHECK_FALSE(SelectSuspendedCallSite(0x1040, 0x1100, fixture.Input()));
   }

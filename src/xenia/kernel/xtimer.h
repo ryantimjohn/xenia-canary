@@ -52,7 +52,8 @@ class XTimer : public XObject {
     return native_ ? native_->wait_handle() : timer_.get();
   }
   void WaitCallback() override;
-  void SyncFromGuest() override {}  // Never re-signal from a stale guest header.
+  void SyncFromGuest() override {
+  }  // Never re-signal from a stale guest header.
 
  private:
   std::unique_ptr<xe::threading::Timer> timer_;

@@ -35,17 +35,20 @@ bool ParseRecording(const std::vector<uint8_t>& bytes, Recording* out,
     return false;
   };
   if (bytes.size() < kHeaderBytes ||
-      bytes.size() > kHeaderBytes + kMaxEvents * kEventBytes)
+      bytes.size() > kHeaderBytes + kMaxEvents * kEventBytes) {
     return fail("invalid recording size");
-  if (!std::equal(std::begin(kMagic), std::end(kMagic), bytes.begin()))
+  }
+  if (!std::equal(std::begin(kMagic), std::end(kMagic), bytes.begin())) {
     return fail("invalid magic/version");
+  }
   Recording parsed;
   parsed.duration_us = ReadLE(bytes.data() + 8, 8);
   uint64_t count = ReadLE(bytes.data() + 16, 4);
   if (!parsed.duration_us || parsed.duration_us > kMaxDurationUs || !count ||
       count > kMaxEvents || ReadLE(bytes.data() + 20, 4) ||
-      bytes.size() != kHeaderBytes + count * kEventBytes)
+      bytes.size() != kHeaderBytes + count * kEventBytes) {
     return fail("invalid duration, count, reserved field or truncation");
+  }
   parsed.events.reserve(size_t(count));
   uint64_t previous = 0;
   for (size_t i = 0; i < count; ++i) {
@@ -57,8 +60,9 @@ bool ParseRecording(const std::vector<uint8_t>& bytes, Recording* out,
     if ((i == 0 && e.time_us != 0) || e.time_us < previous ||
         e.time_us >= parsed.duration_us || e.port >= 4 ||
         (e.status != X_ERROR_SUCCESS &&
-         e.status != X_ERROR_DEVICE_NOT_CONNECTED))
+         e.status != X_ERROR_DEVICE_NOT_CONNECTED)) {
       return fail("invalid event timestamp, port or status");
+    }
     e.state.packet_number = uint32_t(ReadLE(p + 16, 4));
     e.state.gamepad.buttons = uint16_t(ReadLE(p + 20, 2));
     e.state.gamepad.left_trigger = p[22];
@@ -68,8 +72,9 @@ bool ParseRecording(const std::vector<uint8_t>& bytes, Recording* out,
     e.state.gamepad.thumb_rx = ReadS16(p + 28);
     e.state.gamepad.thumb_ry = ReadS16(p + 30);
     if (e.status != X_ERROR_SUCCESS &&
-        std::any_of(p + 16, p + 32, [](uint8_t v) { return v != 0; }))
+        std::any_of(p + 16, p + 32, [](uint8_t v) { return v != 0; })) {
       return fail("disconnected event must have zero state");
+    }
     previous = e.time_us;
     parsed.events.push_back(e);
   }
@@ -117,18 +122,23 @@ X_STATUS ReplayInputDriver::Setup() {
   }
   loaded_ = true;
   Advance(false);  // Seed time zero; capability discovery must not start time.
-  XELOGI("HID replay: loaded {} events; clock starts on first GetState; "
-         "wall time continues through guest pauses; GetKeystroke not recorded",
-         recording_.events.size());
+  XELOGI(
+      "HID replay: loaded {} events; clock starts on first GetState; "
+      "wall time continues through guest pauses; GetKeystroke not recorded",
+      recording_.events.size());
   return X_STATUS_SUCCESS;
 }
 
 void ReplayInputDriver::Advance(bool start, TimingEvents* timing) {
-  if (!loaded_ || completed_) return;
+  if (!loaded_ || completed_) {
+    return;
+  }
   if (start && !started_) {
     start_us_ = clock_();
     started_ = true;
-    if (timing) timing->Add(TimingKind::kStart, start_us_);
+    if (timing) {
+      timing->Add(TimingKind::kStart, start_us_);
+    }
   }
   uint64_t now = started_ ? clock_() : 0;
   uint64_t elapsed = started_ && now >= start_us_ ? now - start_us_ : 0;
@@ -138,8 +148,9 @@ void ReplayInputDriver::Advance(bool start, TimingEvents* timing) {
     states_[e.port] = e;
     if (!timing_first_positive_seen_ && e.time_us > 0) {
       timing_first_positive_seen_ = true;
-      if (timing)
+      if (timing) {
         timing->Add(TimingKind::kFirstPositiveEvent, clock_(), e.time_us);
+      }
     }
   }
   if (elapsed >= recording_.duration_us) {
@@ -151,7 +162,9 @@ void ReplayInputDriver::Advance(bool start, TimingEvents* timing) {
       }
     }
     completed_ = true;
-    if (timing) timing->Add(TimingKind::kCompletion, clock_());
+    if (timing) {
+      timing->Add(TimingKind::kCompletion, clock_());
+    }
     XELOGI("HID replay: completed; connected ports neutral, no loop");
   }
 }
@@ -164,9 +177,10 @@ void ReplayInputDriver::LogTimingEvents(const TimingEvents& events) {
         XELOGI("Replay timing HID start host_us={}", event.host_us);
         break;
       case TimingKind::kFirstPositiveEvent:
-        XELOGI("Replay timing HID first_positive_event host_us={} "
-               "recorded_relative_us={}",
-               event.host_us, event.recorded_relative_us);
+        XELOGI(
+            "Replay timing HID first_positive_event host_us={} "
+            "recorded_relative_us={}",
+            event.host_us, event.recorded_relative_us);
         break;
       case TimingKind::kCompletion:
         XELOGI("Replay timing HID completion host_us={}", event.host_us);
@@ -198,10 +212,13 @@ X_RESULT ReplayInputDriver::GetCapabilities(uint32_t user_index, uint32_t,
       }
     }
   }
-  if (timing.count) LogTimingEvents(timing);
+  if (timing.count) {
+    LogTimingEvents(timing);
+  }
   return result;
 }
-X_RESULT ReplayInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_state) {
+X_RESULT ReplayInputDriver::GetState(uint32_t user_index,
+                                     X_INPUT_STATE* out_state) {
   TimingEvents timing;
   X_RESULT result = X_ERROR_DEVICE_NOT_CONNECTED;
   {
@@ -218,7 +235,9 @@ X_RESULT ReplayInputDriver::GetState(uint32_t user_index, X_INPUT_STATE* out_sta
       }
     }
   }
-  if (timing.count) LogTimingEvents(timing);
+  if (timing.count) {
+    LogTimingEvents(timing);
+  }
   return result;
 }
 X_RESULT ReplayInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION*) {
@@ -227,13 +246,16 @@ X_RESULT ReplayInputDriver::SetState(uint32_t user_index, X_INPUT_VIBRATION*) {
   {
     std::lock_guard<std::mutex> lock(mutex_);
     Advance(false, cvars::replay_timing_observe ? &timing : nullptr);
-    // Virtual controller: acknowledge and discard vibration, never touch hardware.
+    // Virtual controller: acknowledge and discard vibration, never touch
+    // hardware.
     result = loaded_ && user_index < 4 &&
                      states_[user_index].status == X_ERROR_SUCCESS
                  ? X_ERROR_SUCCESS
                  : X_ERROR_DEVICE_NOT_CONNECTED;
   }
-  if (timing.count) LogTimingEvents(timing);
+  if (timing.count) {
+    LogTimingEvents(timing);
+  }
   return result;
 }
 X_RESULT ReplayInputDriver::GetKeystroke(uint32_t user_index, uint32_t,
@@ -255,7 +277,9 @@ X_RESULT ReplayInputDriver::GetKeystroke(uint32_t user_index, uint32_t,
       result = X_ERROR_EMPTY;  // No keystroke history exists in this format.
     }
   }
-  if (timing.count) LogTimingEvents(timing);
+  if (timing.count) {
+    LogTimingEvents(timing);
+  }
   return result;
 }
 }  // namespace xe::hid::replay

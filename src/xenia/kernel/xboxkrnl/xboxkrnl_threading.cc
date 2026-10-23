@@ -27,10 +27,11 @@
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
-DEFINE_bool(ke_wait_failure_trace, false,
-            "Windows private fork-only first 16 KeWaitMultiple resolver failures. "
-            "Bounded early logs may perturb timing; not a performance probe.",
-            "Kernel");
+DEFINE_bool(
+    ke_wait_failure_trace, false,
+    "Windows private fork-only first 16 KeWaitMultiple resolver failures. "
+    "Bounded early logs may perturb timing; not a performance probe.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -1121,8 +1122,8 @@ dword_result_t KeWaitForMultipleObjects_entry(
     lpqword_t timeout_ptr, pointer_t<X_KWAIT_BLOCK> wait_block_array_ptr) {
   auto observation = xam::poll_counters::Begin(xam::poll_counters::Api::kWait);
 #if XE_PLATFORM_WIN32
-  const bool trace_failure = cvars::ke_wait_failure_trace &&
-                            wait_failure_log_budget.HasCapacity();
+  const bool trace_failure =
+      cvars::ke_wait_failure_trace && wait_failure_log_budget.HasCapacity();
 #else
   const bool trace_failure = false;
 #endif
@@ -1134,7 +1135,8 @@ dword_result_t KeWaitForMultipleObjects_entry(
     auto crit = global_critical_region::AcquireDirect();
     for (uint32_t n = 0; n < count; n++) {
       util::NativeObjectFailure failure;
-      // Reuse the existing one array-element read; do not inspect other entries.
+      // Reuse the existing one array-element read; do not inspect other
+      // entries.
       const uint32_t object_va = objects_ptr[n];
       auto object_ptr = kernel_memory()->TranslateVirtual(object_va);
       auto object_ref = XObject::GetNativeObject<XObject>(
@@ -1151,30 +1153,33 @@ dword_result_t KeWaitForMultipleObjects_entry(
           const uint32_t guest_id = thread ? thread->thread_id() : 0;
           const uint32_t native_id = xe::threading::current_thread_system_id();
           const auto* context = thread && thread->thread_state()
-              ? thread->thread_state()->context() : nullptr;
+                                    ? thread->thread_state()->context()
+                                    : nullptr;
           const uint64_t lr = context ? context->lr : 0;
-          const char* reason = failure.reason ==
-                  util::NativeObjectFailure::Reason::kStashedLookupMiss
-              ? "stashed_lookup_miss" : "unsupported_first_use_type";
+          const char* reason =
+              failure.reason ==
+                      util::NativeObjectFailure::Reason::kStashedLookupMiss
+                  ? "stashed_lookup_miss"
+                  : "unsupported_first_use_type";
           // The failed decision is now scalar data. Do not hold this critical
           // region across logger allocation/locking. Retained prior objects
           // remain alive until the unchanged function-scope array unwinds.
           crit.unlock();
-          XELOGW("KeWait failure trace: seq={} limit=16 reason={} "
-                 "guest_thread={} native_tid={} caller_lr_read={} "
-                 "caller_lr={:016X} qpc={} "
-                 "array={:08X} count={} wait_type={} failed_index={} "
-                 "object={:08X} header_type_read={} header_type={:02X} "
-                 "effective_type={:02X} signature_match={} "
-                 "signature_word={:08X} stashed_handle_read={} "
-                 "stashed_handle={:08X}",
-                 sequence, reason, guest_id, native_id, context != nullptr, lr, qpc,
-                 objects_ptr.guest_address(), uint32_t(count),
-                 uint32_t(wait_type), n, object_va, failure.header_type_read,
-                 failure.header_type, failure.effective_type,
-                 failure.signature_word == kXObjSignature,
-                 failure.signature_word, failure.stashed_handle_read,
-                 failure.stashed_handle);
+          XELOGW(
+              "KeWait failure trace: seq={} limit=16 reason={} "
+              "guest_thread={} native_tid={} caller_lr_read={} "
+              "caller_lr={:016X} qpc={} "
+              "array={:08X} count={} wait_type={} failed_index={} "
+              "object={:08X} header_type_read={} header_type={:02X} "
+              "effective_type={:02X} signature_match={} "
+              "signature_word={:08X} stashed_handle_read={} "
+              "stashed_handle={:08X}",
+              sequence, reason, guest_id, native_id, context != nullptr, lr,
+              qpc, objects_ptr.guest_address(), uint32_t(count),
+              uint32_t(wait_type), n, object_va, failure.header_type_read,
+              failure.header_type, failure.effective_type,
+              failure.signature_word == kXObjSignature, failure.signature_word,
+              failure.stashed_handle_read, failure.stashed_handle);
         }
         return X_STATUS_INVALID_PARAMETER;
       }
@@ -2098,7 +2103,8 @@ object_ref<XTimer> ResolveCandidateTimer(PPCContext* context) {
   const uint32_t address = static_cast<uint32_t>(context->r[3]);
   if (kernel->native_timers_closing() || !address ||
       address > UINT32_MAX - sizeof(X_KTIMER) + 1 ||
-      !util::IsGuestRangeWritable(kernel->memory(), address, sizeof(X_KTIMER))) {
+      !util::IsGuestRangeWritable(kernel->memory(), address,
+                                  sizeof(X_KTIMER))) {
     return nullptr;
   }
   auto* timer = kernel->memory()->TranslateVirtual<X_KTIMER*>(address);
@@ -2116,14 +2122,15 @@ void PrivateKeSetTimer(PPCContext* context) {
   std::memcpy(&due, &context->r[4], sizeof(due));
   NativeTimerState::Clock::time_point checked;
   if (context->r[5] || Clock::guest_time_scalar() != 1.0 ||
-      !NativeTimerState::RelativeDeadline(
-          due, NativeTimerState::Clock::now(), &checked)) {
+      !NativeTimerState::RelativeDeadline(due, NativeTimerState::Clock::now(),
+                                          &checked)) {
     xe::FatalError("Private KeSetTimer candidate: unsupported due/DPC/scalar");
   }
   auto timer = ResolveCandidateTimer(context);
   bool previous = false;
   if (!timer || !timer->SetNativeTimer(due, &previous)) {
-    xe::FatalError("Private KeSetTimer candidate: unavailable timer association");
+    xe::FatalError(
+        "Private KeSetTimer candidate: unavailable timer association");
   }
   context->r[3] = previous ? 1 : 0;
 }
@@ -2132,21 +2139,22 @@ void PrivateKeCancelTimer(PPCContext* context) {
   auto timer = ResolveCandidateTimer(context);
   bool previous = false;
   if (!timer || !timer->CancelNativeTimer(&previous)) {
-    xe::FatalError("Private KeCancelTimer candidate: unavailable timer association");
+    xe::FatalError(
+        "Private KeCancelTimer candidate: unavailable timer association");
   }
   context->r[3] = previous ? 1 : 0;
 }
 }  // namespace
 
 void RegisterThreadingExports(xe::cpu::ExportResolver* export_resolver,
-                             KernelState* kernel) {
+                              KernelState* kernel) {
   if (NativeTimerCandidateEnabled()) {
     // Mutate existing entries, preserving the resolver's by-name pointer view.
     // CLI/config parsing precedes Emulator::Setup and this registration.
     export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeSetTimer,
-                                       &PrivateKeSetTimer);
+                                        &PrivateKeSetTimer);
     export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeCancelTimer,
-                                       &PrivateKeCancelTimer);
+                                        &PrivateKeCancelTimer);
   }
 }
 

@@ -24,8 +24,9 @@ bool NativeTimerAssociationMatches(const X_KTIMER& timer, uint8_t type,
 }
 
 NativeTimerState::NativeTimerState(std::unique_ptr<threading::Event> event,
-                                 Access access, Publish publish)
-    : event_(std::move(event)), access_(std::move(access)),
+                                   Access access, Publish publish)
+    : event_(std::move(event)),
+      access_(std::move(access)),
       publish_(std::move(publish)) {
   if (!publish_) {
     publish_ = [](std::function<void(void*)> callback, Clock::time_point due) {
@@ -35,7 +36,7 @@ NativeTimerState::NativeTimerState(std::unique_ptr<threading::Event> event,
 }
 
 bool NativeTimerState::RelativeDeadline(int64_t due, Clock::time_point now,
-                                      Clock::time_point* deadline) {
+                                        Clock::time_point* deadline) {
   // Zero/absolute times and INT64_MIN are deliberately unsupported. Convert
   // only after bounding against the host's remaining representable interval.
   if (!deadline || due >= 0 || due == std::numeric_limits<int64_t>::min() ||
@@ -86,11 +87,13 @@ bool NativeTimerState::Arm(int64_t due, bool* previous) {
   std::weak_ptr<Item> item;
   try {
     std::weak_ptr<NativeTimerState> weak = shared_from_this();
-    item = publish_([weak, generation](void*) {
-      if (auto state = weak.lock()) {
-        state->Expire(generation);
-      }
-    }, deadline);
+    item = publish_(
+        [weak, generation](void*) {
+          if (auto state = weak.lock()) {
+            state->Expire(generation);
+          }
+        },
+        deadline);
   } catch (...) {
     {
       auto lock = global_critical_region::AcquireDirect();

@@ -12,7 +12,8 @@ namespace xe {
 class Logger;
 namespace logging::testing {
 // Isolated real ring/writer/sink; never replaces the process logger. Stop and
-// destruction require released test sinks and must not race other fixture calls.
+// destruction require released test sinks and must not race other fixture
+// calls.
 class LoggerFixture {
  public:
   explicit LoggerFixture(std::unique_ptr<LogSink> sink);

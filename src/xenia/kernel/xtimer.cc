@@ -17,10 +17,11 @@
 #include "xenia/kernel/util/guest_range.h"
 #include "xenia/kernel/xthread.h"
 
-DEFINE_bool(private_native_timer_candidate, false,
-            "Windows private relative one-shot null-DPC native timer candidate. "
-            "Requires time scalar 1 and process restart. Unsupported arms fail.",
-            "Kernel");
+DEFINE_bool(
+    private_native_timer_candidate, false,
+    "Windows private relative one-shot null-DPC native timer candidate. "
+    "Requires time scalar 1 and process restart. Unsupported arms fail.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -101,10 +102,13 @@ void XTimer::WaitCallback() {
     static std::atomic<uint32_t> failures{0};
     uint32_t count = failures.load(std::memory_order_relaxed);
     while (count < 16 && !failures.compare_exchange_weak(
-                             count, count + 1, std::memory_order_relaxed)) {}
+                             count, count + 1, std::memory_order_relaxed)) {
+    }
     if (count < 16) {
-      XELOGW("Private native timer: guest state query/identity unavailable; "
-             "header left unchanged (bounded warning {})", count + 1);
+      XELOGW(
+          "Private native timer: guest state query/identity unavailable; "
+          "header left unchanged (bounded warning {})",
+          count + 1);
     }
   }
 }

@@ -27,9 +27,8 @@ struct SinkState {
 
   bool Entered(bool flush = false) {
     std::unique_lock<std::mutex> lock(mutex);
-    return changed.wait_for(lock, 2s, [&] {
-      return flush ? flush_entered : write_entered;
-    });
+    return changed.wait_for(
+        lock, 2s, [&] { return flush ? flush_entered : write_entered; });
   }
   void Release() {
     std::lock_guard<std::mutex> lock(mutex);
@@ -122,12 +121,16 @@ TEST_CASE("Capture log drain times out without reserving a full ring",
   logger.Append("x");
   const bool entered = state.Entered();
   // Each tiny line is one 256-byte block. With the first writer blocked before
-  // consumer publication, exactly 32767 remaining blocks fit the real 8MiB ring.
-  // Skip filling if entry failed, so a failing test never blocks an Append.
+  // consumer publication, exactly 32767 remaining blocks fit the real 8MiB
+  // ring. Skip filling if entry failed, so a failing test never blocks an
+  // Append.
   if (entered) {
-    for (unsigned i = 1; i < 32768; ++i) logger.Append("x");
+    for (unsigned i = 1; i < 32768; ++i) {
+      logger.Append("x");
+    }
   }
-  const auto result = entered ? logger.Drain(30ms) : LogDrainResult::kUnavailable;
+  const auto result =
+      entered ? logger.Drain(30ms) : LogDrainResult::kUnavailable;
   state.Release();
   logger.Stop();
   REQUIRE(entered);

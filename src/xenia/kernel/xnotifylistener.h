@@ -45,7 +45,9 @@ class XNotifyListener : public XObject {
   // Private fork-only observation, copied under the existing dequeue lock.
   // Queue nonemptiness implies expected signal by the queue contract; no
   // event query is performed and this is not an observed event state.
-  struct QueueObservation { uint64_t before = 0, after = 0; };
+  struct QueueObservation {
+    uint64_t before = 0, after = 0;
+  };
   static const XObject::Type kObjectType = XObject::Type::NotifyListener;
 
   explicit XNotifyListener(KernelState* kernel_state);

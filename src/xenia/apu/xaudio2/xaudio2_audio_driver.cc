@@ -46,8 +46,9 @@ template <typename AudioInterface>
 void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
                              uint64_t sample_us) {
   AudioQueueTrace::Checkpoint checkpoint;
-  if (!trace.TakeCheckpoint(sample_us, trace_checkpoint_budget, &checkpoint))
+  if (!trace.TakeCheckpoint(sample_us, trace_checkpoint_budget, &checkpoint)) {
     return;
+  }
   // Each driver owns one XAudio2 engine. Query only on an already-due
   // checkpoint, after the original submit path, through the selected 2.7 or
   // 2.8+ interface. This is engine-wide, not a source-voice glitch count.
@@ -60,8 +61,9 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
   const uint64_t log_start_us = AudioTraceNowUs();
   size_t transitions_emitted = 0;
   while (transitions_emitted < checkpoint.transition_count &&
-         transition_log_budget.TakeRow())
+         transition_log_budget.TakeRow()) {
     ++transitions_emitted;
+  }
   const auto& total = checkpoint.total;
   const int64_t min_queue =
       total.min_queue_before == AudioQueueTrace::kNoQueueSample
@@ -81,12 +83,12 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
       checkpoint.sample_us, checkpoint.sample_bin, log_start_us,
       trace.start_us(), total.last_us, total.attempts, total.submitted,
       total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
-      total.queue_one, total.max_success_gap_us,
-      checkpoint.max_success_gap_bin, total.buffer_ends_sampled,
-      total.voice_errors_sampled, performance.GlitchesSinceEngineStarted,
-      engine_query_start_us, engine_query_end_us,
-      checkpoint.qpc_frequency, checkpoint.transition_count,
-      transitions_emitted, checkpoint.transitions_overwritten,
+      total.queue_one, total.max_success_gap_us, checkpoint.max_success_gap_bin,
+      total.buffer_ends_sampled, total.voice_errors_sampled,
+      performance.GlitchesSinceEngineStarted, engine_query_start_us,
+      engine_query_end_us, checkpoint.qpc_frequency,
+      checkpoint.transition_count, transitions_emitted,
+      checkpoint.transitions_overwritten,
       checkpoint.transition_count - transitions_emitted);
   // Keep the newest events if the process-wide log budget is nearly exhausted.
   for (size_t i = checkpoint.transition_count - transitions_emitted;
@@ -99,9 +101,8 @@ void MaybeLogQueueCheckpoint(AudioQueueTrace& trace, AudioInterface* audio,
         "submit_success={} ratio_error={}",
         trace.driver_id(), trace.client_index(), event.steady_us,
         event.qpc_ticks, event.became_empty, event.previous_depth,
-        event.current_depth, event.last_success_gap_us,
-        event.buffer_ends_seen, event.pause_epoch, event.submit_success,
-        event.ratio_error);
+        event.current_depth, event.last_success_gap_us, event.buffer_ends_seen,
+        event.pause_epoch, event.submit_success, event.ratio_error);
   }
 }
 
@@ -113,29 +114,33 @@ void LogQueueTraceBin(const AudioQueueTrace& trace, size_t index,
           : static_cast<int64_t>(bin.min_queue_before);
   XELOGI(
       "APU XAudio2 queue selected interval driver={} client={} bin={} "
-      "steady_us=[{},{}] attempts={} submitted={} submit_errors={} ratio_errors={} "
+      "steady_us=[{},{}] attempts={} submitted={} submit_errors={} "
+      "ratio_errors={} "
       "min_queued_before={} queue_zero={} queue_one={} "
       "max_success_gap_us={} buffer_ends_sampled={} voice_errors_sampled={}",
-      trace.driver_id(), trace.client_index(), index, bin.first_us,
-      bin.last_us, bin.attempts, bin.submitted, bin.submit_errors,
-      bin.ratio_errors, min_queue,
-      bin.queue_zero, bin.queue_one, bin.max_success_gap_us,
+      trace.driver_id(), trace.client_index(), index, bin.first_us, bin.last_us,
+      bin.attempts, bin.submitted, bin.submit_errors, bin.ratio_errors,
+      min_queue, bin.queue_zero, bin.queue_one, bin.max_success_gap_us,
       bin.buffer_ends_sampled, bin.voice_errors_sampled);
 }
 
-void FlushQueueTrace(const AudioQueueTrace& trace,
-                     uint64_t teardown_start_us) {
+void FlushQueueTrace(const AudioQueueTrace& trace, uint64_t teardown_start_us) {
   const auto total = trace.GetTotal();
   if (!total.attempts && !total.buffer_ends_sampled &&
-      !total.voice_errors_sampled)
+      !total.voice_errors_sampled) {
     return;
+  }
   // A selected row always needs its companion summary with teardown bounds.
-  if (!trace_log_budget.TakeSummary()) return;
+  if (!trace_log_budget.TakeSummary()) {
+    return;
+  }
   const auto selection = trace.SelectWorstBins();
   const uint64_t flush_start_us = AudioTraceNowUs();
   size_t emitted = 0;
   for (size_t i = 0; i < selection.count; ++i) {
-    if (!trace_log_budget.TakeRow()) break;
+    if (!trace_log_budget.TakeRow()) {
+      break;
+    }
     const size_t bin_index = selection.indexes[i];
     LogQueueTraceBin(trace, bin_index, trace.GetBin(bin_index));
     ++emitted;
@@ -155,14 +160,13 @@ void FlushQueueTrace(const AudioQueueTrace& trace,
       "ratio_errors={} min_queued_before={} queue_zero={} queue_one={} "
       "max_success_gap_us={} max_success_gap_bin={} "
       "buffer_ends_sampled={} voice_errors_sampled={}",
-      trace.driver_id(), trace.client_index(), trace.start_us(),
-      total.last_us, teardown_start_us, before_summary_us, flush_start_us,
-      before_summary_us, selection.occupied, emitted,
-      selection.occupied - emitted, total.attempts, total.submitted,
-      total.submit_errors, total.ratio_errors, min_queue, total.queue_zero,
-      total.queue_one, total.max_success_gap_us,
-      selection.max_success_gap_bin,
-      total.buffer_ends_sampled, total.voice_errors_sampled);
+      trace.driver_id(), trace.client_index(), trace.start_us(), total.last_us,
+      teardown_start_us, before_summary_us, flush_start_us, before_summary_us,
+      selection.occupied, emitted, selection.occupied - emitted, total.attempts,
+      total.submitted, total.submit_errors, total.ratio_errors, min_queue,
+      total.queue_zero, total.queue_one, total.max_success_gap_us,
+      selection.max_success_gap_bin, total.buffer_ends_sampled,
+      total.voice_errors_sampled);
 }
 
 }  // namespace
@@ -179,12 +183,16 @@ class XAudio2AudioDriver::VoiceCallback : public api::IXAudio2VoiceCallback {
   void OnBufferEnd(void* context) noexcept {
     auto ret = semaphore_->Release(1, nullptr);
     assert_true(ret);
-    if (trace_) trace_->BufferEnded();
+    if (trace_) {
+      trace_->BufferEnded();
+    }
   }
   void OnBufferStart(void* context) noexcept {}
   void OnLoopEnd(void* context) noexcept {}
   void OnVoiceError(void* context, HRESULT result) noexcept {
-    if (trace_) trace_->VoiceErrored();
+    if (trace_) {
+      trace_->VoiceErrored();
+    }
   }
 
  private:
@@ -376,8 +384,9 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
   uint64_t trace_qpc_ticks = 0;
   if (queue_trace_) {
     LARGE_INTEGER qpc_now{};
-    if (QueryPerformanceCounter(&qpc_now))
+    if (QueryPerformanceCounter(&qpc_now)) {
       trace_qpc_ticks = static_cast<uint64_t>(qpc_now.QuadPart);
+    }
   }
 
   auto output_frame = reinterpret_cast<float*>(frames_[current_frame_]);
@@ -406,11 +415,12 @@ void XAudio2AudioDriver::SubmitFrame(float* frame) {
     hr = objects_.api_2_7.pcm_voice->SubmitSourceBuffer(&buffer);
   }
   if (FAILED(hr)) {
-    if (queue_trace_)
+    if (queue_trace_) {
       queue_trace_->Submission(
           trace_now_us, state.BuffersQueued, false, false,
           AudioQueuePauseEpoch().load(std::memory_order_relaxed),
           trace_qpc_ticks);
+    }
     XELOGE("SubmitSourceBuffer failed with 0x{:08X}", hr);
     if (queue_trace_) {
       if (api_minor_version_ >= 8) {
@@ -456,7 +466,9 @@ void XAudio2AudioDriver::Pause() {
   } else {
     objects_.api_2_7.pcm_voice->Stop();
   }
-  if (queue_trace_) queue_trace_->Pause();
+  if (queue_trace_) {
+    queue_trace_->Pause();
+  }
 }
 
 void XAudio2AudioDriver::Resume() {
@@ -465,7 +477,9 @@ void XAudio2AudioDriver::Resume() {
   } else {
     objects_.api_2_7.pcm_voice->Start();
   }
-  if (queue_trace_) queue_trace_->Resume();
+  if (queue_trace_) {
+    queue_trace_->Resume();
+  }
 }
 
 void XAudio2AudioDriver::SetVolume(float volume) {

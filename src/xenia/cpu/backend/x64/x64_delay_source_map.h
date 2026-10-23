@@ -10,9 +10,9 @@
 #ifndef XENIA_CPU_BACKEND_X64_X64_DELAY_SOURCE_MAP_H_
 #define XENIA_CPU_BACKEND_X64_X64_DELAY_SOURCE_MAP_H_
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
-#include <array>
 #include <vector>
 
 #include "xenia/cpu/function.h"
@@ -26,7 +26,12 @@ constexpr size_t kMaxRecords = 16;
 constexpr size_t kMaxPerFunction = 4;
 constexpr size_t kMaxMarkersPerFunction = 65536;
 
-enum class Admission : uint8_t { kAccepted, kFunctionCap, kByteCap, kRecordCap };
+enum class Admission : uint8_t {
+  kAccepted,
+  kFunctionCap,
+  kByteCap,
+  kRecordCap
+};
 
 // Used only while the diagnostic budget mutex is held. Counters are process
 // wide and do not reset when a new title loads in the same process.
@@ -36,8 +41,12 @@ struct Budget {
   size_t records = 0;
 
   Admission Admit(size_t code_length) {
-    if (functions >= kMaxFunctions) return Admission::kFunctionCap;
-    if (records >= kMaxRecords) return Admission::kRecordCap;
+    if (functions >= kMaxFunctions) {
+      return Admission::kFunctionCap;
+    }
+    if (records >= kMaxRecords) {
+      return Admission::kRecordCap;
+    }
     if (code_length > kMaxScannedBytes - scanned_bytes) {
       return Admission::kByteCap;
     }
@@ -47,7 +56,9 @@ struct Budget {
   }
 
   bool Record() {
-    if (records >= kMaxRecords) return false;
+    if (records >= kMaxRecords) {
+      return false;
+    }
     ++records;
     return true;
   }

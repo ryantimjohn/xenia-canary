@@ -22,12 +22,14 @@
 DEFINE_bool(trace_disc_read_completions, false,
             "Log at most 64 disc read completions, without buffer contents.",
             "Kernel");
-DEFINE_string(trace_disc_read_path_prefix, "",
-              "Optional device-relative disc path prefix for completion tracing.",
-              "Kernel");
-DEFINE_uint32(trace_disc_read_delay_ms, 0,
-              "Delay from the first enabled disc read completion before tracing.",
-              "Kernel");
+DEFINE_string(
+    trace_disc_read_path_prefix, "",
+    "Optional device-relative disc path prefix for completion tracing.",
+    "Kernel");
+DEFINE_uint32(
+    trace_disc_read_delay_ms, 0,
+    "Delay from the first enabled disc read completion before tracing.",
+    "Kernel");
 
 namespace xe {
 namespace kernel {
@@ -55,12 +57,14 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
       std::chrono::duration_cast<std::chrono::milliseconds>(
           Clock::now().time_since_epoch())
           .count();
-  if (uint64_t(elapsed_ms) < cvars::trace_disc_read_delay_ms) return;
+  if (uint64_t(elapsed_ms) < cvars::trace_disc_read_delay_ms) {
+    return;
+  }
   const auto& relative_path = file.path();
   const auto& prefix = cvars::trace_disc_read_path_prefix;
   if (relative_path.size() < prefix.size() ||
-      !utf8::equal_case(std::string_view(relative_path).substr(0, prefix.size()),
-                       prefix)) {
+      !utf8::equal_case(
+          std::string_view(relative_path).substr(0, prefix.size()), prefix)) {
     return;
   }
 
@@ -68,36 +72,44 @@ void TraceDiscReadCompletion(const XFile& file, uint32_t guest_buffer,
   // process cap even under simultaneous completions on different files.
   static std::atomic<uint32_t> rows{0};
   uint32_t ticket = rows.load(std::memory_order_relaxed);
-  while (ticket < 64 &&
-         !rows.compare_exchange_weak(ticket, ticket + 1,
-                                     std::memory_order_relaxed)) {
+  while (ticket < 64 && !rows.compare_exchange_weak(
+                            ticket, ticket + 1, std::memory_order_relaxed)) {
   }
-  if (ticket >= 64) return;
+  if (ticket >= 64) {
+    return;
+  }
 
   std::string path = file.entry()->absolute_path();  // Guest VFS path only.
   const bool path_truncated = path.size() > 256;
   if (path_truncated) {
     size_t end = 256;
-    while (end && (uint8_t(path[end]) & 0xC0) == 0x80) --end;
+    while (end && (uint8_t(path[end]) & 0xC0) == 0x80) {
+      --end;
+    }
     path.resize(end);  // Do not split a UTF-8 sequence.
   }
   for (char& c : path) {
-    if (uint8_t(c) < 0x20 || uint8_t(c) == 0x7F) c = '?';
+    if (uint8_t(c) < 0x20 || uint8_t(c) == 0x7F) {
+      c = '?';
+    }
   }
-  // XFile receives a guest address, not a host span. Only the existing validated
-  // guest translation path sets this flag. Invalid/zero-length requests are
-  // unmatched; VFS reads into host temporaries bypass XFile and are not guessed.
+  // XFile receives a guest address, not a host span. Only the existing
+  // validated guest translation path sets this flag. Invalid/zero-length
+  // requests are unmatched; VFS reads into host temporaries bypass XFile and
+  // are not guessed.
   const std::string destination = guest_buffer_translated
                                       ? fmt::format("{:08X}", guest_buffer)
                                       : "unmatched";
-  XELOGI("Disc read completion: seq={} elapsed_ms={} steady_epoch_ms={} "
-         "guest_buffer={} requested={} resolved_offset={} actual={} "
-         "completion_status={:08X} notify_completion={} path_truncated={} path={}",
-         ticket + 1, elapsed_ms, steady_epoch_ms, destination, requested, offset,
-         actual, status, notify_completion, path_truncated, path);
+  XELOGI(
+      "Disc read completion: seq={} elapsed_ms={} steady_epoch_ms={} "
+      "guest_buffer={} requested={} resolved_offset={} actual={} "
+      "completion_status={:08X} notify_completion={} path_truncated={} path={}",
+      ticket + 1, elapsed_ms, steady_epoch_ms, destination, requested, offset,
+      actual, status, notify_completion, path_truncated, path);
   if (ticket == 63) {
-    XELOGI("Disc read completion trace: 64 rows reserved; further matching "
-           "completions suppressed for this process");
+    XELOGI(
+        "Disc read completion trace: 64 rows reserved; further matching "
+        "completions suppressed for this process");
   }
 }
 }  // namespace
@@ -251,8 +263,9 @@ X_STATUS XFile::ReadInternal(uint32_t buffer_guest_address,
                             buffer_guest_address))
                   : memory()->TranslateVirtual(buffer_guest_address);
           guest_buffer_translated = read_buffer != nullptr;
-          result = file_->ReadSync(std::span<uint8_t>(read_buffer, buffer_length),
-                                   size_t(byte_offset), &bytes_read);
+          result =
+              file_->ReadSync(std::span<uint8_t>(read_buffer, buffer_length),
+                              size_t(byte_offset), &bytes_read);
           if (XSUCCEEDED(result)) {
             if (buffer_physical_heap) {
               buffer_physical_heap->TriggerCallbacks(

@@ -237,9 +237,7 @@ class Logger {
     write_thread_->set_name("Logging Writer");
   }
 
-  ~Logger() {
-    Stop();
-  }
+  ~Logger() { Stop(); }
 
   void Stop() {
     if (!writer_stopped_.load(std::memory_order_acquire)) {
@@ -259,7 +257,8 @@ class Logger {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     dp::sequence_range range;
     // Private dependency seam attempts one strong CAS and returns on contention
-    // or full ring. Never use vendor try_claim's internal contention retry here.
+    // or full ring. Never use vendor try_claim's internal contention retry
+    // here.
     while (true) {
       if (std::chrono::steady_clock::now() >= deadline) {
         return LogDrainResult::kTimedOut;

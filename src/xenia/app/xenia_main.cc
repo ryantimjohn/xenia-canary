@@ -30,9 +30,9 @@
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
-#include "xenia/kernel/xam/xam_module.h"
 #include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/kernel/xam/poll_counters.h"
+#include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
 #include "xenia/ui/window_listener.h"
@@ -102,8 +102,8 @@
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
-DEFINE_path(hid_replay, "", "Controller timeline file for exclusive --hid=replay.",
-            "HID");
+DEFINE_path(hid_replay, "",
+            "Controller timeline file for exclusive --hid=replay.", "HID");
 DEFINE_string(nui, "any", "NUI (Kinect) system. Use: " NUI_OPTIONS, "Kinect");
 
 DEFINE_path(
@@ -675,7 +675,8 @@ void EmulatorApp::OnDestroy() {
     if (xe::DrainLogForCaptureExit(std::chrono::seconds(2)) !=
         xe::LogDrainResult::kComplete) {
       // Fixed-size direct indication; never queue a failure behind the drain.
-      // Like sink I/O itself, an OS stderr write has no hard wall-time guarantee.
+      // Like sink I/O itself, an OS stderr write has no hard wall-time
+      // guarantee.
       std::fputs("Capture log drain failed before quick_exit\n", stderr);
       std::quick_exit(EXIT_FAILURE);
     }

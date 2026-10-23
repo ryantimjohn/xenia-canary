@@ -41,10 +41,13 @@ namespace {
 // or writes. X_NUI_DEVICE_STATUS lives alongside it in nui_state.h.
 NuiState* nui_state() { return kernel_state()->xam_state()->nui_state(); }
 
-void CaptureTiltStatus(X_RESULT result, const X_NUI_TILT_STATUS* block = nullptr,
+void CaptureTiltStatus(X_RESULT result,
+                       const X_NUI_TILT_STATUS* block = nullptr,
                        int32_t degrees = 0) {
   auto* capture = paired_capture::Active();
-  if (!capture) return;
+  if (!capture) {
+    return;
+  }
   paired_capture::Words words{};
   words[0] = result;
   words[1] = uint32_t(degrees);
@@ -54,8 +57,9 @@ void CaptureTiltStatus(X_RESULT result, const X_NUI_TILT_STATUS* block = nullptr
     words[4] = uint32_t(int32_t(block->accel_y));
     words[5] = uint32_t(int32_t(block->accel_z));
     words[6] = block->status_flags;
-    for (size_t i = 0; i < 4; ++i)
+    for (size_t i = 0; i < 4; ++i) {
       words[7 + i] = paired_capture::FloatBits(block->floor_plane[i]);
+    }
     words[11] = block->floor_flags;
     words[12] = uint32_t(int32_t(block->floor_accel_x));
     words[13] = uint32_t(int32_t(block->floor_accel_y));
@@ -67,7 +71,9 @@ void CaptureTiltStatus(X_RESULT result, const X_NUI_TILT_STATUS* block = nullptr
 void CaptureElevationGet(X_RESULT result, int32_t degrees, uint32_t status,
                          bool angle_written, bool status_written) {
   auto* capture = paired_capture::Active();
-  if (!capture) return;
+  if (!capture) {
+    return;
+  }
   paired_capture::Words words{};
   words[0] = result;
   words[1] = uint32_t(degrees);
@@ -424,8 +430,9 @@ dword_result_t XamNuiCameraRememberFloor_entry(qword_t plane_ab,
     if (auto* capture = paired_capture::Active()) {
       paired_capture::Words words{};
       words[0] = X_E_DEVICE_NOT_CONNECTED;
-      for (size_t i = 0; i < 4; ++i)
+      for (size_t i = 0; i < 4; ++i) {
         words[1 + i] = paired_capture::FloatBits(plane[i]);
+      }
       words[5] = flag.value();
       capture->RecordEvent(paired_capture::Kind::kRememberFloor, 0, words,
                            true);
@@ -436,11 +443,11 @@ dword_result_t XamNuiCameraRememberFloor_entry(qword_t plane_ab,
   if (auto* capture = paired_capture::Active()) {
     paired_capture::Words words{};
     words[0] = X_ERROR_SUCCESS;
-    for (size_t i = 0; i < 4; ++i)
+    for (size_t i = 0; i < 4; ++i) {
       words[1 + i] = paired_capture::FloatBits(plane[i]);
+    }
     words[5] = flag.value();
-    capture->RecordEvent(paired_capture::Kind::kRememberFloor, 0, words,
-                         true);
+    capture->RecordEvent(paired_capture::Kind::kRememberFloor, 0, words, true);
   }
   return X_ERROR_SUCCESS;
 }

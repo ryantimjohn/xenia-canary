@@ -23,9 +23,8 @@ class TempSidecar {
     static std::atomic<uint64_t> next{0};
     path_ = std::filesystem::temp_directory_path() /
             ("xenia-paired-capture-test-" +
-             std::to_string(std::chrono::steady_clock::now()
-                                .time_since_epoch()
-                                .count()) +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()) +
              "-" + std::to_string(++next) + ".bin");
   }
   ~TempSidecar() {
@@ -39,7 +38,8 @@ class TempSidecar {
 };
 }  // namespace
 
-TEST_CASE("Paired scalar codec has stable byte layout", "[nui][paired_capture]") {
+TEST_CASE("Paired scalar codec has stable byte layout",
+          "[nui][paired_capture]") {
   const auto header = EncodeHeader(10000000, 0x0102030405060708ull, 8, 10);
   CHECK(std::string(reinterpret_cast<const char*>(header.data()), 8) ==
         "XPAIR001");
@@ -100,8 +100,8 @@ TEST_CASE("Paired sidecar closes cleanly and requires its footer",
   REQUIRE(ValidateFileStructure(file.path(), &summary));
   CHECK(summary.counts.accepted == 2);
   CHECK(summary.counts.written == 2);
-  CloseAcknowledgement acknowledgement{true, session->start_qpc(),
-                                        session->cutoff_qpc(), session->counts()};
+  CloseAcknowledgement acknowledgement{
+      true, session->start_qpc(), session->cutoff_qpc(), session->counts()};
   CHECK(MatchesCloseAcknowledgement(summary, acknowledgement));
   acknowledgement.complete = false;
   CHECK_FALSE(MatchesCloseAcknowledgement(summary, acknowledgement));
@@ -110,13 +110,13 @@ TEST_CASE("Paired sidecar closes cleanly and requires its footer",
   CHECK_FALSE(MatchesCloseAcknowledgement(summary, acknowledgement));
   CHECK(std::filesystem::file_size(file.path()) ==
         kHeaderBytes + 2 * kRecordBytes + kFooterBytes);
-  std::filesystem::resize_file(file.path(),
-                               kHeaderBytes + 2 * kRecordBytes);
+  std::filesystem::resize_file(file.path(), kHeaderBytes + 2 * kRecordBytes);
   CHECK_FALSE(ValidateFileStructure(file.path()));
 }
 
-TEST_CASE("Paired controller coalescing preserves route changes and fails overflow",
-          "[nui][paired_capture]") {
+TEST_CASE(
+    "Paired controller coalescing preserves route changes and fails overflow",
+    "[nui][paired_capture]") {
   TempSidecar file;
   std::atomic<uint64_t> tick{200};
   auto clock = [&tick] { return ++tick; };
@@ -207,8 +207,9 @@ TEST_CASE("Paired close cuts off concurrent producer admission",
   recorded.read(reinterpret_cast<char*>(qpc_bytes), sizeof(qpc_bytes));
   REQUIRE(recorded.good());
   uint64_t record_qpc = 0;
-  for (uint32_t i = 0; i < 8; ++i)
+  for (uint32_t i = 0; i < 8; ++i) {
     record_qpc |= uint64_t(qpc_bytes[i]) << (8 * i);
+  }
   CHECK(record_qpc <= summary.cutoff_qpc);
 }
 
@@ -226,9 +227,8 @@ TEST_CASE("Paired footer gate timeout is an unacknowledged close",
     gate_cv.notify_all();
     gate_cv.wait(lock, [&] { return release; });
   };
-  auto session = Session::Create(file.path(), 10000000,
-                                 [&tick] { return ++tick; }, {2, 2},
-                                 before_footer);
+  auto session = Session::Create(
+      file.path(), 10000000, [&tick] { return ++tick; }, {2, 2}, before_footer);
   REQUIRE(session);
   bool clean = true;
   std::thread closer([&] { clean = session->Close(100ms); });

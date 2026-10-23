@@ -26,7 +26,7 @@ static_assert(sizeof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA) ==
               sizeof(::XAUDIO2_PERFORMANCE_DATA));
 static_assert(alignof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA) ==
               alignof(::XAUDIO2_PERFORMANCE_DATA));
-#define XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(field)                         \
+#define XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(field)                          \
   static_assert(offsetof(xaudio2::api::XAUDIO2_PERFORMANCE_DATA, field) == \
                 offsetof(::XAUDIO2_PERFORMANCE_DATA, field))
 XE_CHECK_XAUDIO2_PERFORMANCE_FIELD(AudioCyclesSinceLastQuery);
@@ -101,11 +101,15 @@ TEST_CASE("Audio queue trace samples callback atomics and caps time bins",
   std::vector<std::thread> threads;
   for (int i = 0; i < 4; ++i) {
     threads.emplace_back([&trace] {
-      for (int j = 0; j < 100; ++j) trace.BufferEnded();
+      for (int j = 0; j < 100; ++j) {
+        trace.BufferEnded();
+      }
       trace.VoiceErrored();
     });
   }
-  for (auto& thread : threads) thread.join();
+  for (auto& thread : threads) {
+    thread.join();
+  }
   trace.Finish(602000000);
   CHECK(trace.GetTotal().buffer_ends_sampled == 400);
   CHECK(trace.GetTotal().voice_errors_sampled == 4);
@@ -130,8 +134,9 @@ TEST_CASE("Audio queue log budget bounds rows and summaries across drivers",
   CHECK(reused_slot.start_us() == 700000000);
 }
 
-TEST_CASE("Audio queue selection keeps a late severe bin over early healthy bins",
-          "[audio-queue-trace]") {
+TEST_CASE(
+    "Audio queue selection keeps a late severe bin over early healthy bins",
+    "[audio-queue-trace]") {
   AudioQueueTrace trace(14, 0, 1000000, 0);
   for (uint64_t i = 0; i < 10; ++i) {
     trace.Resume();  // Each interval starts with a fresh priming submission.
@@ -144,8 +149,9 @@ TEST_CASE("Audio queue selection keeps a late severe bin over early healthy bins
   CHECK(selected.occupied == 11);
   CHECK(selected.count == AudioQueueTrace::kRowsPerShutdown);
   bool found_late = false;
-  for (size_t i = 0; i < selected.count; ++i)
+  for (size_t i = 0; i < selected.count; ++i) {
     found_late |= selected.indexes[i] == 599;
+  }
   CHECK(found_late);
   CHECK(selected.indexes[0] == 599);
   CHECK(selected.occupied - selected.count == 3);
@@ -169,8 +175,9 @@ TEST_CASE("Audio queue summary locates the largest gap omitted from top eight",
   CHECK(selected.max_success_gap_us == 50000);
   CHECK(selected.max_success_gap_bin == 20);
   bool gap_bin_selected = false;
-  for (size_t i = 0; i < selected.count; ++i)
+  for (size_t i = 0; i < selected.count; ++i) {
     gap_bin_selected |= selected.indexes[i] == 20;
+  }
   CHECK_FALSE(gap_bin_selected);
   CHECK(trace.GetTotal().max_success_gap_us == 50000);
   trace.Resume();
@@ -225,8 +232,8 @@ TEST_CASE("Audio queue live checkpoint budgets bound driver and process",
     AudioQueueTrace::Checkpoint checkpoint;
     trace.Submission(1000000, 0, true, false, 0);
     for (uint64_t ordinal = 1; ordinal <= 13; ++ordinal) {
-      const uint64_t at = 1000000 +
-                          ordinal * AudioQueueTrace::kCheckpointPeriodUs;
+      const uint64_t at =
+          1000000 + ordinal * AudioQueueTrace::kCheckpointPeriodUs;
       trace.Submission(at, 1, true, false, 0);
       const bool took = trace.TakeCheckpoint(at, process_budget, &checkpoint);
       CHECK(took == (driver < 8 && ordinal <= 12));
@@ -306,8 +313,9 @@ TEST_CASE("Audio queue transitions reset at pause and epoch priming",
   CHECK(checkpoint.transitions[1].became_empty);
 }
 
-TEST_CASE("Audio queue transition ring keeps newest events and counts overwrites",
-          "[audio-queue-trace][transition]") {
+TEST_CASE(
+    "Audio queue transition ring keeps newest events and counts overwrites",
+    "[audio-queue-trace][transition]") {
   AudioQueueTrace trace(43, 0, 1000000, 0);
   trace.Submission(1000000, 0, true, false, 0);
   trace.Submission(1005333, 1, true, false, 0);

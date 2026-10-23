@@ -14,12 +14,20 @@ constexpr uint32_t kNotSelected = kExports;
 
 // This selects a candidate only. The caller must also verify pointer identity
 // against the registered xboxkrnl.exe table before observing any registers.
-inline uint32_t Select(uint16_t ordinal, std::string_view name,
-                        bool function, bool implemented) {
-  if (!function || implemented) return kNotSelected;
-  if (ordinal == 0x54 && name == "KeCancelTimer") return 0;
-  if (ordinal == 0xA6 && name == "KeSetTimer") return 1;
-  if (ordinal == 0xA7 && name == "KeSetTimerEx") return 2;
+inline uint32_t Select(uint16_t ordinal, std::string_view name, bool function,
+                       bool implemented) {
+  if (!function || implemented) {
+    return kNotSelected;
+  }
+  if (ordinal == 0x54 && name == "KeCancelTimer") {
+    return 0;
+  }
+  if (ordinal == 0xA6 && name == "KeSetTimer") {
+    return 1;
+  }
+  if (ordinal == 0xA7 && name == "KeSetTimerEx") {
+    return 2;
+  }
   return kNotSelected;
 }
 
@@ -30,15 +38,20 @@ class Budget {
            claimed_[index].load(std::memory_order_relaxed) < kPerExportLimit;
   }
   uint32_t TryClaim(uint32_t index) {
-    if (index >= kExports) return 0;
+    if (index >= kExports) {
+      return 0;
+    }
     auto& field = claimed_[index];
     uint32_t old = field.load(std::memory_order_relaxed);
     while (old < kPerExportLimit) {
       if (field.compare_exchange_strong(old, old + 1,
-                                       std::memory_order_relaxed)) return old + 1;
+                                        std::memory_order_relaxed)) {
+        return old + 1;
+      }
     }
     return 0;
   }
+
  private:
   // Strong-CAS failure implies a successful competing claim, so at most 16
   // successful competitors can delay a claim. No overshoot or reset.

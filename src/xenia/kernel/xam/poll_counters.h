@@ -20,8 +20,13 @@ constexpr size_t kSlots = 64, kWaitBuckets = 90, kNotifyBuckets = 7;
 constexpr uint64_t kClosed = uint64_t(1) << 63;
 enum class Api : uint32_t { kNotify, kWait };
 enum class Notify : uint32_t {
-  kInvalidOutput, kInvalidHandle, kAnyDequeue, kAnyEmpty,
-  kFilteredDequeue, kFilteredEmpty, kFilteredPending
+  kInvalidOutput,
+  kInvalidHandle,
+  kAnyDequeue,
+  kAnyEmpty,
+  kFilteredDequeue,
+  kFilteredEmpty,
+  kFilteredPending
 };
 struct Range {
   uint64_t min = UINT64_MAX, max = 0;
@@ -32,7 +37,9 @@ struct Elapsed {
   Range ticks;
   uint64_t sum = 0;
 };
-struct Caller { uint64_t lr = 0, count = 0; };
+struct Caller {
+  uint64_t lr = 0, count = 0;
+};
 struct ApiStats {
   uint64_t started = 0, completed = 0, abandoned = 0;
   uint64_t outstanding_at_cutoff = 0;
@@ -92,6 +99,7 @@ class Operation {
   void FinishWait(uint32_t count, uint32_t type, bool alertable,
                   bool timeout_known, bool timeout_present, uint64_t timeout,
                   bool host_known, uint32_t host_ms, uint32_t result);
+
  private:
   friend class Session;
   Session* session_ = nullptr;
@@ -112,6 +120,7 @@ class Session {
   bool Close(std::chrono::milliseconds timeout);
   // Only inspect after successful Close; late completions cannot alter data.
   const Snapshot& snapshot() const { return snapshot_; }
+
  private:
   friend class Operation;
   explicit Session(FILE* file, uint64_t qpf, Write write);

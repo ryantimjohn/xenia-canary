@@ -35,7 +35,7 @@ class WaitFailureLogBudget {
     uint32_t old = claimed_.load(std::memory_order_relaxed);
     while (old < kLimit) {
       if (claimed_.compare_exchange_strong(old, old + 1,
-                                         std::memory_order_relaxed)) {
+                                           std::memory_order_relaxed)) {
         return old + 1;
       }
     }

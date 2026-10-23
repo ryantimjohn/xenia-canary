@@ -9,8 +9,8 @@
 
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
-#include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xam/poll_counters.h"
+#include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xnotifylistener.h"
 #include "xenia/kernel/xthread.h"
@@ -101,12 +101,12 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
     *param_ptr = dequeued ? param : 0;
   }
   observation.EndElapsed();
-  const auto outcome = match_id
-      ? (dequeued ? poll_counters::Notify::kFilteredDequeue
+  const auto outcome =
+      match_id ? (dequeued       ? poll_counters::Notify::kFilteredDequeue
                   : queue.before ? poll_counters::Notify::kFilteredPending
                                  : poll_counters::Notify::kFilteredEmpty)
-      : (dequeued ? poll_counters::Notify::kAnyDequeue
-                  : poll_counters::Notify::kAnyEmpty);
+               : (dequeued ? poll_counters::Notify::kAnyDequeue
+                           : poll_counters::Notify::kAnyEmpty);
   observation.FinishNotify(outcome, match_id, queue.before, queue.after);
   return dequeued ? 1 : 0;
 }

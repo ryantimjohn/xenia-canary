@@ -46,7 +46,8 @@ TEST_CASE("HUD sample bounds confidence and checks tracked vectors",
   CHECK(sample.guide_selected_id == 0);
 }
 
-TEST_CASE("Disabled tracking observer does no collection", "[nui-tracking-observer]") {
+TEST_CASE("Disabled tracking observer does no collection",
+          "[nui-tracking-observer]") {
   NuiTrackingObserver observer(false);
   NuiTrackingObserver::HudSample hud;
   hud.states[0] = 2;
@@ -112,8 +113,8 @@ TEST_CASE("Tracking observer distinguishes delivery and HUD evidence",
 TEST_CASE("Tracking observer bounds rows and handles ambiguous stamps",
           "[nui-tracking-observer]") {
   NuiTrackingObserver observer(true);
-  observer.DepthDelivery(NuiTrackingObserver::Delivery::kCopied, 1000000,
-                         0, 42);
+  observer.DepthDelivery(NuiTrackingObserver::Delivery::kCopied, 1000000, 0,
+                         42);
   observer.DepthDelivery(NuiTrackingObserver::Delivery::kCopied, 1000001,
                          2000000, 42);
   NuiTrackingObserver::HudSample hud;
@@ -141,10 +142,14 @@ TEST_CASE("Tracking observer shares bounded counters across threads",
   for (unsigned i = 0; i < 4; ++i) {
     threads.emplace_back([&observer] {
       NuiTrackingObserver::HudSample hud;
-      for (unsigned j = 0; j < 100; ++j) observer.Hud(hud, 1000000);
+      for (unsigned j = 0; j < 100; ++j) {
+        observer.Hud(hud, 1000000);
+      }
     });
   }
-  for (auto& thread : threads) thread.join();
+  for (auto& thread : threads) {
+    thread.join();
+  }
   CHECK(observer.Summary().hud_frames == 400);
 }
 

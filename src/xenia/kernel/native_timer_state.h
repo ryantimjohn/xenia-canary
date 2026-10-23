@@ -23,9 +23,10 @@ class NativeTimerState : public std::enable_shared_from_this<NativeTimerState> {
  public:
   using Clock = std::chrono::steady_clock;
   using Item = threading::TimerQueueWaitItem;
-  using Access = std::function<X_KTIMER*()>;  // Validated identity, under global.
-  using Publish = std::function<std::weak_ptr<Item>(
-      std::function<void(void*)>, Clock::time_point)>;
+  using Access =
+      std::function<X_KTIMER*()>;  // Validated identity, under global.
+  using Publish = std::function<std::weak_ptr<Item>(std::function<void(void*)>,
+                                                    Clock::time_point)>;
 
   NativeTimerState(std::unique_ptr<threading::Event> event, Access access,
                    Publish publish = {});
@@ -37,8 +38,8 @@ class NativeTimerState : public std::enable_shared_from_this<NativeTimerState> {
   bool Cancel(bool* previous);
   bool AfterWait();
   bool associated() const;
-  void Invalidate();    // Nonblocking; safe with global already held.
-  void Drain();         // Caller must hold neither global nor state locks.
+  void Invalidate();  // Nonblocking; safe with global already held.
+  void Drain();       // Caller must hold neither global nor state locks.
 
  private:
   void Expire(uint64_t generation);

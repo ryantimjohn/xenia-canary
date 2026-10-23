@@ -46,8 +46,9 @@ class AudioQueueLogBudget {
     uint32_t value = left.load(std::memory_order_relaxed);
     while (value) {
       if (left.compare_exchange_weak(value, value - 1,
-                                     std::memory_order_relaxed))
+                                     std::memory_order_relaxed)) {
         return true;
+      }
     }
     return false;
   }
@@ -63,8 +64,9 @@ class AudioQueueCheckpointBudget {
     uint32_t value = left_.load(std::memory_order_relaxed);
     while (value) {
       if (left_.compare_exchange_weak(value, value - 1,
-                                      std::memory_order_relaxed))
+                                      std::memory_order_relaxed)) {
         return true;
+      }
     }
     return false;
   }
@@ -176,7 +178,9 @@ class AudioQueueTrace {
                   bool ratio_error, uint64_t pause_epoch,
                   uint64_t qpc_ticks = 0) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!bin_origin_us_) bin_origin_us_ = now_us ? now_us : 1;
+    if (!bin_origin_us_) {
+      bin_origin_us_ = now_us ? now_us : 1;
+    }
     if (client_index_ >= 0 && pause_epoch != pause_epoch_) {
       pause_epoch_ = pause_epoch;
       primed_ = false;
@@ -188,16 +192,22 @@ class AudioQueueTrace {
     Touch(total_, now_us);
     auto count = [&](Bin& b) {
       ++b.attempts;
-      if (success) ++b.submitted;
-      else ++b.submit_errors;
-      if (ratio_error) ++b.ratio_errors;
+      if (success) {
+        ++b.submitted;
+      } else {
+        ++b.submit_errors;
+      }
+      if (ratio_error) {
+        ++b.ratio_errors;
+      }
       if (primed_ && !paused_) {
         b.min_queue_before = std::min(b.min_queue_before, queued_before);
         b.queue_zero += queued_before == 0;
         b.queue_one += queued_before == 1;
-        if (success && last_success_us_ && now_us >= last_success_us_)
-          b.max_success_gap_us = std::max(b.max_success_gap_us,
-                                         now_us - last_success_us_);
+        if (success && last_success_us_ && now_us >= last_success_us_) {
+          b.max_success_gap_us =
+              std::max(b.max_success_gap_us, now_us - last_success_us_);
+        }
       }
     };
     count(bin);
@@ -235,7 +245,9 @@ class AudioQueueTrace {
   // Call after the XAudio2 voice is destroyed, when no callback remains.
   void Finish(uint64_t now_us) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!bin_origin_us_) bin_origin_us_ = now_us ? now_us : 1;
+    if (!bin_origin_us_) {
+      bin_origin_us_ = now_us ? now_us : 1;
+    }
     Touch(total_, now_us);
     Bin& bin = bins_[BinIndex(now_us)];
     SampleCallbacks(bin, now_us);
@@ -257,14 +269,16 @@ class AudioQueueTrace {
                       Checkpoint* out) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!out || !bin_origin_us_ || paused_ ||
-        checkpoint_count_ >= kCheckpointsPerDriver)
+        checkpoint_count_ >= kCheckpointsPerDriver) {
       return false;
+    }
     const uint64_t since = last_checkpoint_sample_us_
                                ? last_checkpoint_sample_us_
                                : bin_origin_us_;
     if (sample_us < since || sample_us - since < kCheckpointPeriodUs ||
-        !budget.Take())
+        !budget.Take()) {
       return false;
+    }
     last_checkpoint_sample_us_ = sample_us;
     out->ordinal = ++checkpoint_count_;
     out->sample_us = sample_us;
@@ -278,8 +292,7 @@ class AudioQueueTrace {
         (transition_next_ + kTransitionRingSize - transition_size_) %
         kTransitionRingSize;
     for (size_t i = 0; i < transition_size_; ++i) {
-      out->transitions[i] =
-          transitions_[(oldest + i) % kTransitionRingSize];
+      out->transitions[i] = transitions_[(oldest + i) % kTransitionRingSize];
     }
     transition_next_ = 0;
     transition_size_ = 0;
@@ -303,7 +316,9 @@ class AudioQueueTrace {
     std::lock_guard<std::mutex> lock(mutex_);
     Selection selection;
     for (size_t i = 0; i < bins_.size(); ++i) {
-      if (!Occupied(bins_[i])) continue;
+      if (!Occupied(bins_[i])) {
+        continue;
+      }
       ++selection.occupied;
       if (bins_[i].max_success_gap_us &&
           (bins_[i].max_success_gap_us > selection.max_success_gap_us ||
@@ -315,12 +330,18 @@ class AudioQueueTrace {
       size_t position = 0;
       while (position < selection.count &&
              !Worse(bins_[i], i, bins_[selection.indexes[position]],
-                    selection.indexes[position]))
+                    selection.indexes[position])) {
         ++position;
-      if (position >= kRowsPerShutdown) continue;
-      if (selection.count < kRowsPerShutdown) ++selection.count;
-      for (size_t j = selection.count - 1; j > position; --j)
+      }
+      if (position >= kRowsPerShutdown) {
+        continue;
+      }
+      if (selection.count < kRowsPerShutdown) {
+        ++selection.count;
+      }
+      for (size_t j = selection.count - 1; j > position; --j) {
         selection.indexes[j] = selection.indexes[j - 1];
+      }
       selection.indexes[position] = i;
     }
     return selection;
@@ -338,8 +359,7 @@ class AudioQueueTrace {
   }
 
   static bool Occupied(const Bin& bin) {
-    return bin.attempts || bin.buffer_ends_sampled ||
-           bin.voice_errors_sampled;
+    return bin.attempts || bin.buffer_ends_sampled || bin.voice_errors_sampled;
   }
   static bool Worse(const Bin& a, size_t a_index, const Bin& b,
                     size_t b_index) {
@@ -351,26 +371,39 @@ class AudioQueueTrace {
     const bool b_anomaly = b.queue_zero || b.submit_errors || b.ratio_errors ||
                            b.voice_errors_sampled ||
                            b.max_success_gap_us > 10666;
-    if (a_anomaly != b_anomaly) return a_anomaly;
-    if (a.queue_zero != b.queue_zero) return a.queue_zero > b.queue_zero;
-    if (a.submit_errors != b.submit_errors)
+    if (a_anomaly != b_anomaly) {
+      return a_anomaly;
+    }
+    if (a.queue_zero != b.queue_zero) {
+      return a.queue_zero > b.queue_zero;
+    }
+    if (a.submit_errors != b.submit_errors) {
       return a.submit_errors > b.submit_errors;
-    if (a.voice_errors_sampled != b.voice_errors_sampled)
+    }
+    if (a.voice_errors_sampled != b.voice_errors_sampled) {
       return a.voice_errors_sampled > b.voice_errors_sampled;
-    if (a.max_success_gap_us != b.max_success_gap_us)
+    }
+    if (a.max_success_gap_us != b.max_success_gap_us) {
       return a.max_success_gap_us > b.max_success_gap_us;
-    if (a.ratio_errors != b.ratio_errors)
+    }
+    if (a.ratio_errors != b.ratio_errors) {
       return a.ratio_errors > b.ratio_errors;
-    if (a.queue_one != b.queue_one) return a.queue_one > b.queue_one;
+    }
+    if (a.queue_one != b.queue_one) {
+      return a.queue_one > b.queue_one;
+    }
     return a_index > b_index;
   }
   size_t BinIndex(uint64_t now_us) const {
     return now_us >= bin_origin_us_
-               ? std::min<uint64_t>((now_us - bin_origin_us_) / 1000000, kSeconds)
+               ? std::min<uint64_t>((now_us - bin_origin_us_) / 1000000,
+                                    kSeconds)
                : 0;
   }
   static void Touch(Bin& bin, uint64_t now_us) {
-    if (!bin.first_us) bin.first_us = now_us;
+    if (!bin.first_us) {
+      bin.first_us = now_us;
+    }
     bin.last_us = now_us;
   }
   void SampleCallbacks(Bin& bin, uint64_t now_us) {

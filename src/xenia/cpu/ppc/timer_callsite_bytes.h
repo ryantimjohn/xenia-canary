@@ -23,7 +23,10 @@ inline bool Selected(uint16_t ordinal, std::string_view name, bool function,
 class OneShot {
  public:
   bool Available() const { return !claimed_.load(std::memory_order_relaxed); }
-  bool TryClaim() { return !claimed_.exchange(true, std::memory_order_relaxed); }
+  bool TryClaim() {
+    return !claimed_.exchange(true, std::memory_order_relaxed);
+  }
+
  private:
   std::atomic<bool> claimed_{false};
 };
@@ -31,20 +34,30 @@ static_assert(std::atomic<bool>::is_always_lock_free);
 
 inline bool HostWindow(uintptr_t membase, uintptr_t& host) {
   constexpr auto max = std::numeric_limits<uintptr_t>::max();
-  if (!membase || membase > max - kGuestStart - kBytes) return false;
+  if (!membase || membase > max - kGuestStart - kBytes) {
+    return false;
+  }
   host = membase + kGuestStart;
   return true;
 }
 
 // Public Windows MEM_COMMIT/PAGE_* values, kept dependency-light for tests.
 // No guest code or direct host-memory read occurs here.
-inline bool ReadableRegion(uintptr_t host, uintptr_t region, size_t region_bytes,
-                           uint32_t state, uint32_t protect) {
+inline bool ReadableRegion(uintptr_t host, uintptr_t region,
+                           size_t region_bytes, uint32_t state,
+                           uint32_t protect) {
   if (state != 0x1000 || (protect & (0x100 | 0x01)) || region_bytes < kBytes ||
       host > std::numeric_limits<uintptr_t>::max() - kBytes || host < region ||
-      host - region > region_bytes - kBytes) return false;
+      host - region > region_bytes - kBytes) {
+    return false;
+  }
   switch (protect & 0xff) {
-    case 0x02: case 0x04: case 0x08: case 0x20: case 0x40: case 0x80:
+    case 0x02:
+    case 0x04:
+    case 0x08:
+    case 0x20:
+    case 0x40:
+    case 0x80:
       return true;
     default:
       return false;

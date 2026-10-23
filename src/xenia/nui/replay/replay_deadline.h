@@ -42,7 +42,9 @@ class ReplayDeadline {
                                         uint64_t recorded_us, bool eof_wrap,
                                         Clock::time_point now) {
     // The caller anchors on the first frame before requesting any next wait.
-    if (!anchored_) return std::chrono::milliseconds::zero();
+    if (!anchored_) {
+      return std::chrono::milliseconds::zero();
+    }
     constexpr uint64_t kDefaultGapUs = 33000;
     constexpr uint64_t kMaximumGapUs = 200000;
     const uint64_t gap_us =
@@ -52,7 +54,9 @@ class ReplayDeadline {
     // Clamp in uint64_t before conversion to signed chrono: a corrupt or
     // discontinuous recording timestamp can otherwise overflow that type.
     deadline_ += std::chrono::microseconds(static_cast<int64_t>(gap_us));
-    if (now >= deadline_) return std::chrono::milliseconds::zero();
+    if (now >= deadline_) {
+      return std::chrono::milliseconds::zero();
+    }
     return std::chrono::ceil<std::chrono::milliseconds>(deadline_ - now);
   }
 

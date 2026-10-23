@@ -69,26 +69,26 @@ void LogTrackingStats(const NuiTrackingObserver::Snapshot& snapshot,
       "same_set_slot_reassigned={} guide=[{},{},{},{}] "
       "timestamp=[{},{},{}] hud_lag_max_ms={} hud_lag_unknown={} "
       "quality_nonzero={} nonfinite={} zero={}",
-      scope, snapshot.row_index, snapshot.start_us, snapshot.end_us,
-      elapsed_ms, s.sessions, s.source_frames, s.source_first, s.source_last,
-      s.source_skipped, s.source_resets, s.no_buffer,
-      s.invalid_buffer, s.copied_stamped, s.completion_called,
-      s.callback_returned, s.host_age_unknown, s.host_age_max_ms,
-      s.delivery_gap_max_ms, s.hud_frames, s.slot_states[0],
-      s.slot_states[1], s.slot_states[2], s.slot_states[3],
-      s.joint_states[0], s.joint_states[1], s.joint_states[2],
+      scope, snapshot.row_index, snapshot.start_us, snapshot.end_us, elapsed_ms,
+      s.sessions, s.source_frames, s.source_first, s.source_last,
+      s.source_skipped, s.source_resets, s.no_buffer, s.invalid_buffer,
+      s.copied_stamped, s.completion_called, s.callback_returned,
+      s.host_age_unknown, s.host_age_max_ms, s.delivery_gap_max_ms,
+      s.hud_frames, s.slot_states[0], s.slot_states[1], s.slot_states[2],
+      s.slot_states[3], s.joint_states[0], s.joint_states[1], s.joint_states[2],
       s.joint_states[3], s.id_appeared, s.id_disappeared, s.id_replaced,
-      s.tracked_set_changed, s.same_set_slot_reassigned,
-      s.guide_not_selected, s.guide_selected_matched,
-      s.guide_selected_unmatched, s.guide_selected_ambiguous,
-      s.timestamp_exact, s.timestamp_ambiguous, s.timestamp_unmatched,
-      s.hud_lag_max_ms, s.hud_lag_unknown, s.quality_nonzero,
-      s.nonfinite_vectors, s.zero_vectors);
+      s.tracked_set_changed, s.same_set_slot_reassigned, s.guide_not_selected,
+      s.guide_selected_matched, s.guide_selected_unmatched,
+      s.guide_selected_ambiguous, s.timestamp_exact, s.timestamp_ambiguous,
+      s.timestamp_unmatched, s.hud_lag_max_ms, s.hud_lag_unknown,
+      s.quality_nonzero, s.nonfinite_vectors, s.zero_vectors);
 }
 
 void FlushTrackingRow(uint64_t now_us) {
   auto row = GetNuiTrackingObserver().TakeRow(now_us);
-  if (row) LogTrackingStats(*row, "interval");
+  if (row) {
+    LogTrackingStats(*row, "interval");
+  }
 }
 
 // Switch (read off the texture the runtime binds over the depth ring: format
@@ -828,8 +828,9 @@ NuiCameraStats NuiCamera::GetStats() const {
 }
 
 void NuiCamera::FeedThreadMain() {
-  if (GetNuiTrackingObserver().enabled())
+  if (GetNuiTrackingObserver().enabled()) {
     GetNuiTrackingObserver().SessionStarted(TrackingNowUs());
+  }
   uint64_t last_sequence = 0;
   const char* stop_reason = "the camera was shut down";
   while (feed_running_.load(std::memory_order_acquire)) {
@@ -845,7 +846,9 @@ void NuiCamera::FeedThreadMain() {
       break;
     }
     CompletePendingRequests();
-    if (GetNuiTrackingObserver().enabled()) FlushTrackingRow(TrackingNowUs());
+    if (GetNuiTrackingObserver().enabled()) {
+      FlushTrackingRow(TrackingNowUs());
+    }
     if (!have_frame) {
       if (std::chrono::steady_clock::now() - wait_started <
           kFrameWaitTimeout / 2) {
@@ -869,12 +872,15 @@ void NuiCamera::FeedThreadMain() {
       words[3] = uint32_t(frame->timestamp_us >> 32);
       capture->RecordEvent(paired_capture::Kind::kDepthSource, 0, words);
     }
-    if (GetNuiTrackingObserver().enabled())
+    if (GetNuiTrackingObserver().enabled()) {
       GetNuiTrackingObserver().SourceFrame(frame->sequence, TrackingNowUs());
+    }
     last_sequence = frame->sequence;
     FeedDepthFrame(*frame);
     FeedColourFrame();
-    if (GetNuiTrackingObserver().enabled()) FlushTrackingRow(TrackingNowUs());
+    if (GetNuiTrackingObserver().enabled()) {
+      FlushTrackingRow(TrackingNowUs());
+    }
   }
   // Whatever brought the loop here, the feed is over: say so where a stage
   // diagnosis will see it, and stop claiming to be streaming. Anything queued
@@ -882,10 +888,10 @@ void NuiCamera::FeedThreadMain() {
   feed_running_.store(false, std::memory_order_release);
   if (GetNuiTrackingObserver().enabled()) {
     FlushTrackingRow(TrackingNowUs());
-    auto first_end =
-        GetNuiTrackingObserver().TakeFirstFeedEnd(TrackingNowUs());
-    if (first_end)
+    auto first_end = GetNuiTrackingObserver().TakeFirstFeedEnd(TrackingNowUs());
+    if (first_end) {
       LogTrackingStats(*first_end, "cumulative through first feed end");
+    }
   }
   XELOGW(
       "NUI: frame feed stopped, {}, after {} depth and {} colour frames, {} "
@@ -901,9 +907,10 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     // The runtime only ever wants the newest frame, so one that arrives with
     // no buffer waiting for it is dropped rather than queued up.
     depth_frames_dropped_.fetch_add(1, std::memory_order_relaxed);
-    if (GetNuiTrackingObserver().enabled())
+    if (GetNuiTrackingObserver().enabled()) {
       GetNuiTrackingObserver().DepthDelivery(
           NuiTrackingObserver::Delivery::kNoBuffer, TrackingNowUs());
+    }
     return;
   }
 
@@ -913,17 +920,19 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     XELOGW("NUI: a {}x{} depth frame does not fit the guest's {} byte buffer",
            frame.width, frame.height, request.length);
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
-    if (GetNuiTrackingObserver().enabled())
+    if (GetNuiTrackingObserver().enabled()) {
       GetNuiTrackingObserver().DepthDelivery(
           NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
+    }
     return;
   }
 
   if (!IsRequestStillWritable(request)) {
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
-    if (GetNuiTrackingObserver().enabled())
+    if (GetNuiTrackingObserver().enabled()) {
       GetNuiTrackingObserver().DepthDelivery(
           NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
+    }
     return;
   }
 
@@ -962,26 +971,27 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
   // "The avatar").
   const uint64_t guest_stamp_ms =
       NuiCameraFrameTimestampMillis(Clock::QueryGuestUptimeMillis());
-  WriteNuiCameraFrameResult(
-      memory->TranslateVirtual<uint8_t*>(request.request), sequence,
-      guest_stamp_ms);
+  WriteNuiCameraFrameResult(memory->TranslateVirtual<uint8_t*>(request.request),
+                            sequence, guest_stamp_ms);
   auto* paired = paired_capture::Active();
   const uint64_t paired_copy_qpc = paired ? paired->TickNow() : 0;
   const bool log_first_copy =
       cvars::replay_timing_observe &&
       !timing_first_copy_logged.exchange(true, std::memory_order_relaxed);
   const uint64_t copy_us = log_first_copy ? TrackingNowUs() : 0;
-  if (GetNuiTrackingObserver().enabled())
+  if (GetNuiTrackingObserver().enabled()) {
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kCopied, TrackingNowUs(),
         frame.timestamp_us, guest_stamp_ms);
+  }
   if (cvars::nui_log_messages) {
     XELOGD("NUI: depth frame {} (host {}) fed to request {:08X}", sequence,
            frame.sequence, request.request);
   }
-  if (GetNuiTrackingObserver().enabled())
+  if (GetNuiTrackingObserver().enabled()) {
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kCompletionCalled, TrackingNowUs());
+  }
   CompleteRequest(request, X_STATUS_SUCCESS, request.length);
   if (paired) {
     paired_capture::Words words{};
@@ -997,18 +1007,20 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     paired->RecordEvent(paired_capture::Kind::kDepthReturn, 0, words);
   }
   const uint64_t return_us = log_first_copy ? TrackingNowUs() : 0;
-  if (GetNuiTrackingObserver().enabled())
+  if (GetNuiTrackingObserver().enabled()) {
     GetNuiTrackingObserver().DepthDelivery(
         NuiTrackingObserver::Delivery::kReturned, TrackingNowUs());
+  }
   if (log_first_copy) {
     // This copy may precede the worker's rewind. Offline consumers must
     // compare host_sequence with first_post_rewind_publish before using it
     // as a post-rewind delivery anchor.
-    XELOGI("Replay timing NUI first_depth_copy_return copy_us={} "
-           "return_us={} host_publish_us={} host_sequence={} "
-           "guest_stamp_ms={} guest_sequence={}",
-           copy_us, return_us, frame.timestamp_us, frame.sequence,
-           guest_stamp_ms, sequence);
+    XELOGI(
+        "Replay timing NUI first_depth_copy_return copy_us={} "
+        "return_us={} host_publish_us={} host_sequence={} "
+        "guest_stamp_ms={} guest_sequence={}",
+        copy_us, return_us, frame.timestamp_us, frame.sequence, guest_stamp_ms,
+        sequence);
   }
 }
 

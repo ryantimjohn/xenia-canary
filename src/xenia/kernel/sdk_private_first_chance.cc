@@ -332,7 +332,8 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
   registers.gpr[1] = uint32_t(fault.modeled_context->r[1]);
   registers.gpr[31] = uint32_t(fault.modeled_context->r[31]);
   registers.low32_valid = (1u << 1) | (1u << 31);
-  uint32_t raw_saved_lr = 0;  // No caller return evidence for the initial fault.
+  uint32_t raw_saved_lr =
+      0;  // No caller return evidence for the initial fault.
   for (size_t depth = 0; depth < kMaxFrames; ++depth) {
     auto frame = evidence.metadata.LookupFrame(registers.control_pc);
     if (frame.status != ExceptionMetadataStatus::kValid || !frame.function ||
@@ -472,9 +473,8 @@ void Search(KernelState* kernel, cpu::ThreadState* thread,
 std::optional<uint32_t> sdk_private::SelectSuspendedCallSite(
     uint32_t saved_lr, uint32_t callee_entry,
     const cpu::ExceptionMetadataInput& owned_image) {
-  if (saved_lr < 4 || (saved_lr & 3) || !callee_entry ||
-      (callee_entry & 3) || !owned_image.read ||
-      owned_image.image_base >= owned_image.image_end ||
+  if (saved_lr < 4 || (saved_lr & 3) || !callee_entry || (callee_entry & 3) ||
+      !owned_image.read || owned_image.image_base >= owned_image.image_end ||
       owned_image.image_end > (uint64_t{1} << 32)) {
     return std::nullopt;
   }
@@ -485,8 +485,8 @@ std::optional<uint32_t> sdk_private::SelectSuspendedCallSite(
            std::any_of(owned_image.sections.begin(), owned_image.sections.end(),
                        [&](const auto& section) {
                          return section.available && section.readable &&
-                                section.executable && address >= section.begin &&
-                                end <= section.end;
+                                section.executable &&
+                                address >= section.begin && end <= section.end;
                        });
   };
   if (!code(call_pc) || !code(callee_entry)) {
@@ -498,7 +498,8 @@ std::optional<uint32_t> sdk_private::SelectSuspendedCallSite(
   }
   const uint32_t word = ReadBe32(bytes);
   if ((word >> 26) != 18 || (word & 3) != 1) {
-    return std::nullopt;  // Relative BL only; never subtract from an arbitrary LR.
+    return std::nullopt;  // Relative BL only; never subtract from an arbitrary
+                          // LR.
   }
   const uint32_t encoded = word & 0x03FFFFFC;
   const uint64_t magnitude =

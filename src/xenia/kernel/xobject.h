@@ -230,11 +230,10 @@ class XObject {
       X_OBJECT_TYPES as_type = UndefinedObject, bool already_locked = false,
       util::NativeObjectFailure* failure = nullptr);
   template <typename T>
-  static object_ref<T> GetNativeObject(KernelState* kernel_state,
-                                       void* native_ptr,
-                                       X_OBJECT_TYPES as_type = UndefinedObject,
-                                       bool already_locked = false,
-                                       util::NativeObjectFailure* failure = nullptr);
+  static object_ref<T> GetNativeObject(
+      KernelState* kernel_state, void* native_ptr,
+      X_OBJECT_TYPES as_type = UndefinedObject, bool already_locked = false,
+      util::NativeObjectFailure* failure = nullptr);
 
   // Priority increment stored by the most recent signal operation
   // (KeSetEvent, KeReleaseSemaphore, etc.).  Read by the waiter on wake
@@ -423,9 +422,10 @@ object_ref<T> XObject::GetNativeObject(KernelState* kernel_state,
                                        void* native_ptr, X_OBJECT_TYPES as_type,
                                        bool already_locked,
                                        util::NativeObjectFailure* failure) {
-  return object_ref<T>(reinterpret_cast<T*>(
-      GetNativeObject(kernel_state, native_ptr, as_type, already_locked, failure)
-          .release()));
+  return object_ref<T>(
+      reinterpret_cast<T*>(GetNativeObject(kernel_state, native_ptr, as_type,
+                                           already_locked, failure)
+                               .release()));
 }
 
 }  // namespace kernel

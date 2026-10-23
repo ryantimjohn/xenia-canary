@@ -525,8 +525,9 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
 
   auto& observer = GetNuiTrackingObserver();
   std::optional<NuiTrackingObserver::HudSample> observer_sample;
-  if (observer.enabled())
+  if (observer.enabled()) {
     observer_sample.emplace(NuiTrackingObserver::ReadHudSample(*args));
+  }
 
   NuiHudSkeletonFrame frame;
   for (size_t i = 0; i < kNuiSkeletonCount; i++) {
@@ -580,7 +581,9 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
 
   uint32_t taken_id = 0;
   if (!UpdateGuideFromFrame(*args, frame.frames, &taken_id)) {
-    if (observer_sample) observer.Hud(*observer_sample, NowUs());
+    if (observer_sample) {
+      observer.Hud(*observer_sample, NowUs());
+    }
     return X_E_SUCCESS;
   }
   // Having answered 0x8301000B, the runtime reads the two engaged ids back out

@@ -1,8 +1,8 @@
 // SDK-DERIVED FORK-ONLY WORK: Eligible for this fork's kinect branch after
 // validation. MUST NOT enter upstream PRs or cherry-pick series targeting
 // xenia-canary:canary_experimental, or any other upstream contribution.
-// .github/CONTRIBUTING.md excludes XDK-derived information, not just copied code.
-// See SDK_DERIVED_PRIVATE.md for provenance and integration policy.
+// .github/CONTRIBUTING.md excludes XDK-derived information, not just copied
+// code. See SDK_DERIVED_PRIVATE.md for provenance and integration policy.
 
 #ifndef XENIA_KERNEL_SDK_PRIVATE_GUEST_CONTEXT_H_
 #define XENIA_KERNEL_SDK_PRIVATE_GUEST_CONTEXT_H_

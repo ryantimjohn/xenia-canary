@@ -79,9 +79,10 @@ void ShutdownLogging();
 void FlushLog();
 
 // Private capture shutdown only; does not replace FlushLog. Waits at most two
-// seconds for an ordered marker's sink Flush calls to return. Not disk durability
-// or an acknowledgment of concurrent records claimed after the marker. Logging
-// initialization/shutdown and sink ownership must remain stable during this call.
+// seconds for an ordered marker's sink Flush calls to return. Not disk
+// durability or an acknowledgment of concurrent records claimed after the
+// marker. Logging initialization/shutdown and sink ownership must remain stable
+// during this call.
 enum class LogDrainResult { kComplete, kUnavailable, kWriterThread, kTimedOut };
 LogDrainResult DrainLogForCaptureExit(std::chrono::milliseconds timeout);
 

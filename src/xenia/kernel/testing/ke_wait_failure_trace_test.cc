@@ -14,8 +14,9 @@
 
 namespace xe::kernel::util::test {
 
-TEST_CASE("Ke wait failure log admission never exceeds sixteen under contention",
-          "[ke_wait_failure_trace]") {
+TEST_CASE(
+    "Ke wait failure log admission never exceeds sixteen under contention",
+    "[ke_wait_failure_trace]") {
   WaitFailureLogBudget budget;
   std::array<std::atomic<uint32_t>, 17> seen{};
   std::atomic<uint32_t> ready{0}, accepted{0}, invalid{0};
@@ -24,26 +25,39 @@ TEST_CASE("Ke wait failure log admission never exceeds sixteen under contention"
   for (unsigned i = 0; i != 8; ++i) {
     workers.emplace_back([&] {
       ++ready;
-      while (!go.load()) std::this_thread::yield();
+      while (!go.load()) {
+        std::this_thread::yield();
+      }
       for (unsigned n = 0; n != 64; ++n) {
         const auto sequence = budget.TryClaim();
-        if (!sequence) continue;
+        if (!sequence) {
+          continue;
+        }
         ++accepted;
-        if (sequence > 16) ++invalid;
-        else ++seen[sequence];
+        if (sequence > 16) {
+          ++invalid;
+        } else {
+          ++seen[sequence];
+        }
       }
     });
   }
-  while (ready.load() != 8) std::this_thread::yield();
+  while (ready.load() != 8) {
+    std::this_thread::yield();
+  }
   go = true;
-  for (auto& worker : workers) worker.join();
+  for (auto& worker : workers) {
+    worker.join();
+  }
   CHECK(accepted.load() == 16);
   CHECK(invalid.load() == 0);
   for (unsigned sequence = 1; sequence <= 16; ++sequence) {
     CHECK(seen[sequence].load() == 1);
   }
   CHECK_FALSE(budget.HasCapacity());
-  for (unsigned n = 0; n != 64; ++n) CHECK(budget.TryClaim() == 0);
+  for (unsigned n = 0; n != 64; ++n) {
+    CHECK(budget.TryClaim() == 0);
+  }
 }
 
 // The existing unsupported resolver branch calls assert_always(). Do not
@@ -67,7 +81,8 @@ TEST_CASE("Ke resolver diagnostics distinguish unsupported native first use",
     auto object = XObject::GetNativeObject(nullptr, &header, UndefinedObject,
                                            false, &failure);
     CHECK_FALSE(bool(object));
-    CHECK(failure.reason == NativeObjectFailure::Reason::kUnsupportedFirstUseType);
+    CHECK(failure.reason ==
+          NativeObjectFailure::Reason::kUnsupportedFirstUseType);
     CHECK(failure.effective_type == uint32_t(type));
     CHECK(failure.header_type_read);
     CHECK(failure.header_type == uint32_t(type));
@@ -75,7 +90,8 @@ TEST_CASE("Ke resolver diagnostics distinguish unsupported native first use",
     CHECK_FALSE(failure.stashed_handle_read);
     CHECK(failure.stashed_handle == 0);
     CHECK(std::memcmp(&before, &header, sizeof(header)) == 0);
-    // The default-disabled resolver path remains valid without diagnostic output.
+    // The default-disabled resolver path remains valid without diagnostic
+    // output.
     CHECK_FALSE(bool(XObject::GetNativeObject(nullptr, &header)));
     CHECK(std::memcmp(&before, &header, sizeof(header)) == 0);
   }
@@ -83,8 +99,8 @@ TEST_CASE("Ke resolver diagnostics distinguish unsupported native first use",
   header.type = EventNotificationObject;
   header.wait_list.flink_ptr = signature;
   NativeObjectFailure failure;
-  CHECK_FALSE(bool(XObject::GetNativeObject(nullptr, &header,
-      TimerSynchronizationObject, false, &failure)));
+  CHECK_FALSE(bool(XObject::GetNativeObject(
+      nullptr, &header, TimerSynchronizationObject, false, &failure)));
   CHECK(failure.effective_type == uint32_t(TimerSynchronizationObject));
   CHECK_FALSE(failure.header_type_read);
   CHECK(failure.header_type == 0);

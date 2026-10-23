@@ -20,12 +20,14 @@ struct Fixture {
   X_KTIMER timer{};
   bool identity = true;  // Accessed only under global, as in production.
   std::shared_ptr<NativeTimerState> state;
-  explicit Fixture(bool manual = false, NativeTimerState::Publish publish = {}) {
+  explicit Fixture(bool manual = false,
+                   NativeTimerState::Publish publish = {}) {
     auto event = manual ? threading::Event::CreateManualResetEvent(false)
                         : threading::Event::CreateAutoResetEvent(false);
     REQUIRE(event);
     state = std::make_shared<NativeTimerState>(
-        std::move(event), [this] { return identity ? &timer : nullptr; }, publish);
+        std::move(event), [this] { return identity ? &timer : nullptr; },
+        publish);
   }
   ~Fixture() {
     state->Invalidate();
@@ -58,6 +60,7 @@ class QueryEvent final : public threading::Event {
     return !fail && event_->TryQuery(info);
   }
   bool fail = false;
+
  private:
   std::unique_ptr<threading::Event> event_;
 };
@@ -84,7 +87,7 @@ TEST_CASE("Private native timer really blocks and wakes WaitAny index two",
   auto first = threading::Event::CreateManualResetEvent(false);
   auto second = threading::Event::CreateAutoResetEvent(false);
   threading::WaitHandle* handles[] = {first.get(), second.get(),
-                                     fixture.state->wait_handle()};
+                                      fixture.state->wait_handle()};
   auto waiter = std::async(std::launch::async, [&] {
     return threading::WaitAny(handles, 3, false, 2s);
   });
@@ -162,8 +165,9 @@ TEST_CASE("Private native timer expiry before queue publication is retained",
         threading::WaitResult::kSuccess);
 }
 
-TEST_CASE("Private native timer invalidation and reuse cannot update new header",
-          "[native_timer]") {
+TEST_CASE(
+    "Private native timer invalidation and reuse cannot update new header",
+    "[native_timer]") {
   ManualQueue queue;
   Fixture old(false, queue.publisher());
   bool previous;
@@ -199,7 +203,8 @@ TEST_CASE("Private native timer shutdown drains an in-flight publication",
     return fixture.state->Arm(-10000, &previous);
   });
   auto entered_future = entered.get_future();
-  const bool did_enter = entered_future.wait_for(2s) == std::future_status::ready;
+  const bool did_enter =
+      entered_future.wait_for(2s) == std::future_status::ready;
   if (!did_enter) {
     release.set_value();
     publisher.get();
@@ -211,8 +216,8 @@ TEST_CASE("Private native timer shutdown drains an in-flight publication",
     drain_started.set_value();
     fixture.state->Drain();
   });
-  const bool started = drain_started.get_future().wait_for(2s) ==
-                       std::future_status::ready;
+  const bool started =
+      drain_started.get_future().wait_for(2s) == std::future_status::ready;
   const bool draining = drain.wait_for(10ms) == std::future_status::timeout;
   release.set_value();  // Always release before checks that could unwind.
   CHECK(publisher.get());
@@ -226,11 +231,12 @@ TEST_CASE("Private native timer shutdown drains an in-flight publication",
 
 TEST_CASE("Private native timer failed publication cannot claim successful arm",
           "[native_timer]") {
-  Fixture fixture(false, [](std::function<void(void*)>,
-                            NativeTimerState::Clock::time_point)
-                             -> std::weak_ptr<NativeTimerState::Item> {
-    throw std::runtime_error("synthetic publication failure");
-  });
+  Fixture fixture(
+      false,
+      [](std::function<void(void*)>, NativeTimerState::Clock::time_point)
+          -> std::weak_ptr<NativeTimerState::Item> {
+        throw std::runtime_error("synthetic publication failure");
+      });
   bool previous;
   CHECK_FALSE(fixture.state->Arm(-10000, &previous));
   CHECK(uint32_t(fixture.timer.header.inserted) == 0);
@@ -285,25 +291,27 @@ TEST_CASE("Private native timer queued weak callback does not retain storage",
   CHECK(uint32_t(timer.header.signal_state) == 13);
 }
 
-TEST_CASE("Private native timer production association rejects reinitialized header",
-          "[native_timer]") {
+TEST_CASE(
+    "Private native timer production association rejects reinitialized header",
+    "[native_timer]") {
   X_KTIMER timer{};
   timer.header.type = TimerSynchronizationObject;
   timer.header.wait_list.flink_ptr = kXObjSignature;
   timer.header.wait_list.blink_ptr = 0x1234;
-  REQUIRE(NativeTimerAssociationMatches(timer, TimerSynchronizationObject,
-                                        0x1234));
-  CHECK_FALSE(NativeTimerAssociationMatches(timer, TimerNotificationObject,
-                                            0x1234));
-  CHECK_FALSE(NativeTimerAssociationMatches(timer, TimerSynchronizationObject,
-                                            0x5678));
-  timer.header.wait_list.flink_ptr = 0;  // Inline KeInitialize erased signature.
-  CHECK_FALSE(NativeTimerAssociationMatches(timer, TimerSynchronizationObject,
-                                            0x1234));
+  REQUIRE(
+      NativeTimerAssociationMatches(timer, TimerSynchronizationObject, 0x1234));
+  CHECK_FALSE(
+      NativeTimerAssociationMatches(timer, TimerNotificationObject, 0x1234));
+  CHECK_FALSE(
+      NativeTimerAssociationMatches(timer, TimerSynchronizationObject, 0x5678));
+  timer.header.wait_list.flink_ptr =
+      0;  // Inline KeInitialize erased signature.
+  CHECK_FALSE(
+      NativeTimerAssociationMatches(timer, TimerSynchronizationObject, 0x1234));
   timer.header.wait_list.flink_ptr = kXObjSignature;
   timer.header.type = TimerNotificationObject;
-  CHECK_FALSE(NativeTimerAssociationMatches(timer, TimerSynchronizationObject,
-                                            0x1234));
+  CHECK_FALSE(
+      NativeTimerAssociationMatches(timer, TimerSynchronizationObject, 0x1234));
   CHECK(NativeTimerAssociationMatches(timer, TimerNotificationObject, 0x1234));
 }
 
@@ -315,27 +323,29 @@ TEST_CASE("Private native timer quiesce waits for an executing callback",
   std::promise<void> entered, release, closing;
   auto released = release.get_future().share();
   auto state = std::make_shared<NativeTimerState>(
-      threading::Event::CreateAutoResetEvent(false), [&]() -> X_KTIMER* {
+      threading::Event::CreateAutoResetEvent(false),
+      [&]() -> X_KTIMER* {
         if (hold.load()) {
           entered.set_value();
           released.wait();  // Test-only controlled callback inside global.
         }
         return &timer;
-      }, queue.publisher());
+      },
+      queue.publisher());
   bool previous;
   REQUIRE(state->Arm(-10000, &previous));
   hold = true;
-  auto callback = std::async(std::launch::async,
-                             [&] { queue.callbacks[0](nullptr); });
-  const bool did_enter = entered.get_future().wait_for(2s) ==
-                         std::future_status::ready;
+  auto callback =
+      std::async(std::launch::async, [&] { queue.callbacks[0](nullptr); });
+  const bool did_enter =
+      entered.get_future().wait_for(2s) == std::future_status::ready;
   auto quiesce = std::async(std::launch::async, [&] {
     closing.set_value();
     state->Invalidate();
     state->Drain();
   });
-  const bool did_close = closing.get_future().wait_for(2s) ==
-                         std::future_status::ready;
+  const bool did_close =
+      closing.get_future().wait_for(2s) == std::future_status::ready;
   const bool waiting = quiesce.wait_for(10ms) == std::future_status::timeout;
   release.set_value();
   callback.get();

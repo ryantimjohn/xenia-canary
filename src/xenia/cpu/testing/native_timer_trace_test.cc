@@ -26,14 +26,19 @@ TEST_CASE("Native timer trace selects only exact undefined function candidates",
   CHECK(Select(0x75, "KeInitializeTimerEx", true, false) == kNotSelected);
 }
 
-TEST_CASE("Native timer raw capture preserves full registers without interpretation",
-          "[native_timer_trace]") {
+TEST_CASE(
+    "Native timer raw capture preserves full registers without interpretation",
+    "[native_timer_trace]") {
   uint64_t gpr[32];
-  for (uint64_t i = 0; i != 32; ++i) gpr[i] = (i << 56) | (i << 32) | (31 - i);
+  for (uint64_t i = 0; i != 32; ++i) {
+    gpr[i] = (i << 56) | (i << 32) | (31 - i);
+  }
   uint64_t before[32];
   std::memcpy(before, gpr, sizeof(gpr));
   auto capture = Capture(gpr, 0xABCDEF0182869F18ULL);
-  for (uint32_t n = 0; n != 6; ++n) CHECK(capture.r3_to_r8[n] == gpr[n + 3]);
+  for (uint32_t n = 0; n != 6; ++n) {
+    CHECK(capture.r3_to_r8[n] == gpr[n + 3]);
+  }
   CHECK(capture.lr == 0xABCDEF0182869F18ULL);
   // High and low halves are retained, not presumed two distinct ABI arguments.
   CHECK(uint32_t(capture.r3_to_r8[1] >> 32) == 0x04000004);
@@ -58,25 +63,39 @@ TEST_CASE("Native timer per-export caps remain independent under concurrency",
   REQUIRE(budget.HasCapacity(1));
   REQUIRE(budget.HasCapacity(2));
   std::vector<std::thread> workers;
-  for (unsigned i = 0; i != 8; ++i) workers.emplace_back([&] {
-    ++ready;
-    while (!go.load()) std::this_thread::yield();
-    for (unsigned n = 0; n != 64; ++n) {
-      for (uint32_t index = 0; index != 3; ++index) {
-        const auto sequence = budget.TryClaim(index);
-        if (!sequence) continue;
-        if (sequence > 16) ++invalid;
-        else ++seen[index][sequence];
+  for (unsigned i = 0; i != 8; ++i) {
+    workers.emplace_back([&] {
+      ++ready;
+      while (!go.load()) {
+        std::this_thread::yield();
       }
-    }
-  });
-  while (ready.load() != 8) std::this_thread::yield();
+      for (unsigned n = 0; n != 64; ++n) {
+        for (uint32_t index = 0; index != 3; ++index) {
+          const auto sequence = budget.TryClaim(index);
+          if (!sequence) {
+            continue;
+          }
+          if (sequence > 16) {
+            ++invalid;
+          } else {
+            ++seen[index][sequence];
+          }
+        }
+      }
+    });
+  }
+  while (ready.load() != 8) {
+    std::this_thread::yield();
+  }
   go = true;
-  for (auto& worker : workers) worker.join();
+  for (auto& worker : workers) {
+    worker.join();
+  }
   CHECK(invalid.load() == 0);
   for (uint32_t index = 0; index != 3; ++index) {
-    for (uint32_t sequence = 1; sequence <= 16; ++sequence)
+    for (uint32_t sequence = 1; sequence <= 16; ++sequence) {
       CHECK(seen[index][sequence].load() == 1);
+    }
     CHECK_FALSE(budget.HasCapacity(index));
     CHECK(budget.TryClaim(index) == 0);
   }

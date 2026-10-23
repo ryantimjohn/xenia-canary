@@ -13,9 +13,9 @@
 #include "xenia/base/threading.h"
 #include "xenia/kernel/xthread.h"
 #if XE_PLATFORM_WIN32
-#include <windows.h>
 #include <fcntl.h>
 #include <io.h>
+#include <windows.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -23,7 +23,8 @@
 
 DEFINE_string(poll_counters, "",
               "Private aggregate XNotifyGetNext/KeWaitMultiple snapshot; "
-              "fresh absolute sidecar only, empty disables.", "Kernel");
+              "fresh absolute sidecar only, empty disables.",
+              "Kernel");
 
 namespace xe::kernel::xam::poll_counters {
 namespace {
@@ -34,29 +35,45 @@ void AtomicCount(std::atomic<uint64_t>& value,
                  std::atomic<uint64_t>& saturation) {
   uint64_t old = value.load(std::memory_order_relaxed);
   for (unsigned n = 0; n != 8; ++n) {
-    if (old == UINT64_MAX) break;
-    if (value.compare_exchange_weak(old, old + 1,
-                                   std::memory_order_relaxed)) return;
+    if (old == UINT64_MAX) {
+      break;
+    }
+    if (value.compare_exchange_weak(old, old + 1, std::memory_order_relaxed)) {
+      return;
+    }
   }
   saturation.store(1, std::memory_order_relaxed);
 }
 FILE* CreateNew(const std::filesystem::path& path) {
-  if (!path.is_absolute()) return nullptr;
+  if (!path.is_absolute()) {
+    return nullptr;
+  }
 #if XE_PLATFORM_WIN32
-  HANDLE handle = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-                              nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL,
-                              nullptr);
-  if (handle == INVALID_HANDLE_VALUE) return nullptr;
+  HANDLE handle =
+      CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return nullptr;
+  }
   int fd = _open_osfhandle(reinterpret_cast<intptr_t>(handle),
-                          _O_BINARY | _O_WRONLY);
-  if (fd < 0) { CloseHandle(handle); return nullptr; }
+                           _O_BINARY | _O_WRONLY);
+  if (fd < 0) {
+    CloseHandle(handle);
+    return nullptr;
+  }
   FILE* file = _fdopen(fd, "wb");
-  if (!file) _close(fd);
+  if (!file) {
+    _close(fd);
+  }
 #else
   int fd = open(path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0600);
-  if (fd < 0) return nullptr;
+  if (fd < 0) {
+    return nullptr;
+  }
   FILE* file = fdopen(fd, "wb");
-  if (!file) close(fd);
+  if (!file) {
+    close(fd);
+  }
 #endif
   return file;
 }
@@ -66,11 +83,21 @@ void AddElapsed(Elapsed& into, uint64_t ticks, uint64_t& saturation) {
   SaturatingAdd(into.sum, ticks, saturation);
 }
 unsigned ResultClass(uint32_t result) {
-  if (result < 64) return 0;
-  if (result == 0x102) return 1;
-  if (result == 0xC0) return 2;
-  if (result >= 0x80 && result < 0xC0) return 3;
-  if (result == 0xC000000D || result == 0xC0000001) return 4;
+  if (result < 64) {
+    return 0;
+  }
+  if (result == 0x102) {
+    return 1;
+  }
+  if (result == 0xC0) {
+    return 2;
+  }
+  if (result >= 0x80 && result < 0xC0) {
+    return 3;
+  }
+  if (result == 0xC000000D || result == 0xC0000001) {
+    return 4;
+  }
   return 5;
 }
 }  // namespace
@@ -80,8 +107,12 @@ void Range::Add(uint64_t value) {
   max = std::max(max, value);
 }
 void SaturatingAdd(uint64_t& field, uint64_t amount, uint64_t& saturation) {
-  if (amount > UINT64_MAX - field) { field = UINT64_MAX; saturation = 1; }
-  else field += amount;
+  if (amount > UINT64_MAX - field) {
+    field = UINT64_MAX;
+    saturation = 1;
+  } else {
+    field += amount;
+  }
 }
 uint64_t RawQpc() {
 #if XE_PLATFORM_WIN32
@@ -102,9 +133,13 @@ std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
                                          uint64_t qpf, Write write) {
   // This raw scalar format is qualified only on little-endian hosts.
   uint16_t endian = 1;
-  if (!qpf || *reinterpret_cast<uint8_t*>(&endian) != 1) return nullptr;
+  if (!qpf || *reinterpret_cast<uint8_t*>(&endian) != 1) {
+    return nullptr;
+  }
   FILE* file = CreateNew(path);
-  if (!file) return nullptr;
+  if (!file) {
+    return nullptr;
+  }
   auto session = std::unique_ptr<Session>(new Session(file, qpf, write));
   if (!session->snapshot_.start) {
     fclose(file);
@@ -114,7 +149,9 @@ std::unique_ptr<Session> Session::Create(const std::filesystem::path& path,
   // An interrupted startup leaves an explicitly unfrozen partial header.
   constexpr size_t prefix = offsetof(Snapshot, slots);
   if (fwrite(&session->snapshot_, 1, prefix, file) != prefix || fflush(file)) {
-    fclose(file); session->file_ = nullptr; return nullptr;
+    fclose(file);
+    session->file_ = nullptr;
+    return nullptr;
   }
   try {
     session->writer_ = std::thread(&Session::Writer, session.get());
@@ -136,7 +173,9 @@ Session::~Session() {
 bool Session::Enter() {
   uint64_t old = gate_.load(std::memory_order_relaxed);
   for (unsigned n = 0; n != 8 && !(old & kClosed); ++n) {
-    if (gate_.compare_exchange_weak(old, old + 1)) return true;
+    if (gate_.compare_exchange_weak(old, old + 1)) {
+      return true;
+    }
   }
   return false;
 }
@@ -145,13 +184,18 @@ void Session::Leave() { gate_.fetch_sub(1); }
 Operation Session::Begin(Api api, uint32_t guest, uint32_t native,
                          uint64_t caller) {
   if (!Enter()) {
-    AtomicCount(excluded_entry_, global_saturation_); return Operation();
+    AtomicCount(excluded_entry_, global_saturation_);
+    return Operation();
   }
   const uint64_t key = (uint64_t(guest) << 32) | native;
   size_t index = kSlots;
   // Permanent slots avoid deletion/reuse races. Thread-local cache does not
   // dereference an old session, and checks the currently claimed key again.
-  struct Cache { Session* session = nullptr; uint64_t key = 0; size_t slot = 0; };
+  struct Cache {
+    Session* session = nullptr;
+    uint64_t key = 0;
+    size_t slot = 0;
+  };
   thread_local Cache cache;
   if (key && cache.session == this && cache.key == key &&
       keys_[cache.slot].load() == key) {
@@ -161,12 +205,15 @@ Operation Session::Begin(Api api, uint32_t guest, uint32_t native,
       uint64_t existing = keys_[n].load();
       if (existing == key ||
           (!existing && keys_[n].compare_exchange_strong(existing, key))) {
-        index = n; cache = {this, key, n}; break;
+        index = n;
+        cache = {this, key, n};
+        break;
       }
     }
   }
   if (index == kSlots) {
-    AtomicCount(slot_overflow_, global_saturation_); Leave();
+    AtomicCount(slot_overflow_, global_saturation_);
+    Leave();
     return Operation();
   }
   auto& slot = snapshot_.slots[index];
@@ -177,22 +224,30 @@ Operation Session::Begin(Api api, uint32_t guest, uint32_t native,
   for (auto& value : stats.callers) {
     if (!value.count || value.lr == caller) {
       value.lr = caller;
-      SaturatingAdd(value.count, 1, slot.saturation); saved = true; break;
+      SaturatingAdd(value.count, 1, slot.saturation);
+      saved = true;
+      break;
     }
   }
-  if (!saved) SaturatingAdd(stats.caller_overflow, 1, slot.saturation);
+  if (!saved) {
+    SaturatingAdd(stats.caller_overflow, 1, slot.saturation);
+  }
   const bool sample = (stats.started & 1023) == 0;
   Leave();
   return Operation(this, index, api, sample);
 }
 bool Session::Commit(Operation& op) {
-  if (Enter()) return true;
+  if (Enter()) {
+    return true;
+  }
   AtomicCount(excluded_completion_, global_saturation_);
   op.session_ = nullptr;
   return false;
 }
 void Session::Abandon(Operation& op) {
-  if (!Commit(op)) return;
+  if (!Commit(op)) {
+    return;
+  }
   auto& slot = snapshot_.slots[op.slot_];
   SaturatingAdd(slot.api[size_t(op.api_)].abandoned, 1, slot.saturation);
   op.session_ = nullptr;
@@ -200,21 +255,31 @@ void Session::Abandon(Operation& op) {
 }
 Operation::Operation(Session* session, size_t slot, Api api, bool sample)
     : session_(session), slot_(slot), api_(api), sample_(sample) {}
-Operation::~Operation() { if (session_) session_->Abandon(*this); }
+Operation::~Operation() {
+  if (session_) {
+    session_->Abandon(*this);
+  }
+}
 void Operation::StartElapsed() {
-  if (session_ && sample_) begin_ = RawQpc();
+  if (session_ && sample_) {
+    begin_ = RawQpc();
+  }
 }
 void Operation::EndElapsed() {
   if (session_ && sample_) {
     const auto end = RawQpc();
     timed_ = begin_ && end >= begin_;
-    if (timed_) elapsed_ = end - begin_;
+    if (timed_) {
+      elapsed_ = end - begin_;
+    }
   }
 }
 void Operation::FinishNotify(Notify outcome, uint32_t filter, uint64_t before,
                              uint64_t after) {
   auto* session = session_;
-  if (!session || !session->Commit(*this)) return;
+  if (!session || !session->Commit(*this)) {
+    return;
+  }
   auto& slot = session->snapshot_.slots[slot_];
   SaturatingAdd(slot.api[size_t(api_)].completed, 1, slot.saturation);
   const size_t index = size_t(outcome);
@@ -226,9 +291,12 @@ void Operation::FinishNotify(Notify outcome, uint32_t filter, uint64_t before,
     bucket.filter.Add(filter);
     // Invalid-output/handle outcomes have no queue observation.
     if (index >= size_t(Notify::kAnyDequeue)) {
-      bucket.before.Add(before); bucket.after.Add(after);
+      bucket.before.Add(before);
+      bucket.after.Add(after);
     }
-    if (timed_) AddElapsed(bucket.elapsed, elapsed_, slot.saturation);
+    if (timed_) {
+      AddElapsed(bucket.elapsed, elapsed_, slot.saturation);
+    }
   }
   session_ = nullptr;
   session->Leave();
@@ -238,24 +306,36 @@ void Operation::FinishWait(uint32_t count, uint32_t type, bool alertable,
                            uint64_t timeout, bool host_known, uint32_t host_ms,
                            uint32_t result) {
   auto* session = session_;
-  if (!session || !session->Commit(*this)) return;
+  if (!session || !session->Commit(*this)) {
+    return;
+  }
   auto& slot = session->snapshot_.slots[slot_];
   SaturatingAdd(slot.api[size_t(api_)].completed, 1, slot.saturation);
   // Class4 means timeout unavailable: preserve the existing invalid-object
   // early return without dereferencing a timeout that the API never read.
-  unsigned tc = !timeout_known ? 4 : !timeout_present ? 0 : !timeout ? 1 :
-      (timeout >> 63) ? 2 : 3;
+  unsigned tc = !timeout_known     ? 4
+                : !timeout_present ? 0
+                : !timeout         ? 1
+                : (timeout >> 63)  ? 2
+                                   : 3;
   unsigned wt = type < 2 ? type : 2;
   auto& bucket = slot.wait[(tc * 3 + wt) * 6 + ResultClass(result)];
   SaturatingAdd(bucket.count, 1, slot.saturation);
-  bucket.object_count.Add(count); bucket.result.Add(result);
-  if (alertable) SaturatingAdd(bucket.alertable, 1, slot.saturation);
+  bucket.object_count.Add(count);
+  bucket.result.Add(result);
+  if (alertable) {
+    SaturatingAdd(bucket.alertable, 1, slot.saturation);
+  }
   if (timeout_known && timeout_present) {
     SaturatingAdd(bucket.raw_present, 1, slot.saturation);
     bucket.raw_timeout_ordered.Add(timeout ^ kClosed);
   }
-  if (host_known) bucket.host_ms.Add(host_ms);
-  if (timed_) AddElapsed(bucket.elapsed, elapsed_, slot.saturation);
+  if (host_known) {
+    bucket.host_ms.Add(host_ms);
+  }
+  if (timed_) {
+    AddElapsed(bucket.elapsed, elapsed_, slot.saturation);
+  }
   session_ = nullptr;
   session->Leave();
 }
@@ -286,7 +366,8 @@ void Session::Writer() {
         // outstanding. Late completion cannot change this frozen relation.
         if (api.completed <= api.started &&
             api.abandoned <= api.started - api.completed) {
-          api.outstanding_at_cutoff = api.started - api.completed - api.abandoned;
+          api.outstanding_at_cutoff =
+              api.started - api.completed - api.abandoned;
         } else {
           slot.saturation = 1;
           api.outstanding_at_cutoff = UINT64_MAX;
@@ -296,14 +377,18 @@ void Session::Writer() {
     snapshot_.frozen = 1;
     clean = snapshot_.cutoff && snapshot_.exclusion_sample_end_qpc &&
             fseek(file_, 0, SEEK_SET) == 0 &&
-            (write_ ? write_(file_, snapshot_) :
-             fwrite(&snapshot_, 1, sizeof(snapshot_), file_) == sizeof(snapshot_)) &&
+            (write_ ? write_(file_, snapshot_)
+                    : fwrite(&snapshot_, 1, sizeof(snapshot_), file_) ==
+                          sizeof(snapshot_)) &&
             fflush(file_) == 0;
   }
-  if (fclose(file_)) clean = false;
+  if (fclose(file_)) {
+    clean = false;
+  }
   file_ = nullptr;
   lock.lock();
-  clean_ = clean; done_ = true;
+  clean_ = clean;
+  done_ = true;
   lock.unlock();
   condition_.notify_all();
 }
@@ -315,31 +400,44 @@ bool Session::Close(std::chrono::milliseconds timeout) {
     condition_.notify_one();
   }
   if (!condition_.wait_for(lock, timeout, [this] { return done_; })) {
-    timed_out_ = true; return false;
+    timed_out_ = true;
+    return false;
   }
   const bool clean = clean_ && !timed_out_;
   lock.unlock();
-  if (writer_.joinable()) writer_.join();
+  if (writer_.joinable()) {
+    writer_.join();
+  }
   return clean;
 }
 Operation Begin(Api api) {
   auto* session = active.load(std::memory_order_acquire);
-  if (!session) return Operation();
+  if (!session) {
+    return Operation();
+  }
   auto* thread = XThread::GetCurrentThread();
   return session->Begin(api, thread ? thread->thread_id() : 0,
                         xe::threading::current_thread_system_id(),
                         thread ? thread->thread_state()->context()->lr : 0);
 }
 bool StartFromFlag() {
-  if (cvars::poll_counters.empty()) return true;
-  if (owned_session) return false;
+  if (cvars::poll_counters.empty()) {
+    return true;
+  }
+  if (owned_session) {
+    return false;
+  }
 #if XE_PLATFORM_WIN32
   LARGE_INTEGER frequency;
-  if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0)
+  if (!QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) {
     return false;
+  }
   auto session = Session::Create(xe::to_path(cvars::poll_counters),
                                  uint64_t(frequency.QuadPart));
-  if (!session) { XELOGE("Poll counters: fresh sidecar failed"); return false; }
+  if (!session) {
+    XELOGE("Poll counters: fresh sidecar failed");
+    return false;
+  }
   owned_session = session.release();
   active.store(owned_session, std::memory_order_release);
   return true;
@@ -349,14 +447,17 @@ bool StartFromFlag() {
 }
 bool CloseForExit(std::chrono::milliseconds timeout) {
   auto* session = active.load(std::memory_order_acquire);
-  if (!session) return true;
+  if (!session) {
+    return true;
+  }
   bool clean = session->Close(timeout);
   active.store(nullptr, std::memory_order_release);
   // No snapshot reads on failed drain: short mutations may still exist.
-  XELOGI("Poll counters close: complete={} frozen_snapshot_only={} "
-         "write_or_drain_failure={} start_qpc={} cutoff_qpc={} bytes={}",
-         clean, clean, !clean, clean ? session->snapshot().start : 0,
-         clean ? session->snapshot().cutoff : 0, sizeof(Snapshot));
+  XELOGI(
+      "Poll counters close: complete={} frozen_snapshot_only={} "
+      "write_or_drain_failure={} start_qpc={} cutoff_qpc={} bytes={}",
+      clean, clean, !clean, clean ? session->snapshot().start : 0,
+      clean ? session->snapshot().cutoff : 0, sizeof(Snapshot));
   return clean;
 }
 static_assert(std::is_trivially_copyable<Snapshot>::value);

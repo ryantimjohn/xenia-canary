@@ -149,9 +149,10 @@ uint32_t InputGetKeystroke(observe::Api api, lpdword_t user_index_ptr,
     words[8] = keystroke->hid_code;
     paired_user = keystroke->user_index;
   }
-  if (paired_words)
+  if (paired_words) {
     paired->RecordEvent(paired_capture::Kind::kKeystroke, paired_user,
                         *paired_words);
+  }
   if (entry.enabled) {
     observe::Snapshot(completion, keystroke);
   }
@@ -271,9 +272,10 @@ dword_result_t XamInputGetState_entry(dword_t user_index, dword_t flags,
       words[12] = uint32_t(int32_t(input_state->gamepad.thumb_ry));
     }
   }
-  if (paired_words)
+  if (paired_words) {
     paired->RecordEvent(paired_capture::Kind::kInputState, user_index,
                         *paired_words, true);
+  }
 
   if (completion.route == observe::Route::kDriver && input_state &&
       result == X_ERROR_SUCCESS) {

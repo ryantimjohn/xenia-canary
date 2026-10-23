@@ -12,7 +12,9 @@
 namespace xe::hid::replay {
 namespace {
 void Put(std::vector<uint8_t>& b, size_t at, uint64_t value, size_t n) {
-  for (size_t i = 0; i < n; ++i) b[at + i] = uint8_t(value >> (8 * i));
+  for (size_t i = 0; i < n; ++i) {
+    b[at + i] = uint8_t(value >> (8 * i));
+  }
 }
 struct Sample {
   uint64_t time;
@@ -24,12 +26,16 @@ std::vector<uint8_t> Bytes(std::initializer_list<Sample> samples,
   std::vector<uint8_t> b(24 + 32 * samples.size());
   const uint8_t magic[] = {'X', 'E', 'C', 'T', 'R', 'L', '1', 0};
   std::copy(std::begin(magic), std::end(magic), b.begin());
-  Put(b, 8, duration, 8); Put(b, 16, samples.size(), 4);
+  Put(b, 8, duration, 8);
+  Put(b, 16, samples.size(), 4);
   size_t p = 24;
   for (auto e : samples) {
-    Put(b, p, e.time, 8); Put(b, p + 8, e.port, 4);
-    Put(b, p + 12, e.status, 4); Put(b, p + 16, e.packet, 4);
-    Put(b, p + 20, e.buttons, 2); p += 32;
+    Put(b, p, e.time, 8);
+    Put(b, p + 8, e.port, 4);
+    Put(b, p + 12, e.status, 4);
+    Put(b, p + 16, e.packet, 4);
+    Put(b, p + 20, e.buttons, 2);
+    p += 32;
   }
   return b;
 }
@@ -42,17 +48,21 @@ struct File {
            ("xenia-controller-replay-" + std::to_string(tick) + "-" +
             std::to_string(serial++) + ".xctrl");
     std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(b.data()), std::streamsize(b.size()));
+    out.write(reinterpret_cast<const char*>(b.data()),
+              std::streamsize(b.size()));
     REQUIRE(out.good());
   }
-  ~File() { std::error_code ec; std::filesystem::remove(path, ec); }
+  ~File() {
+    std::error_code ec;
+    std::filesystem::remove(path, ec);
+  }
 };
 }  // namespace
 
 TEST_CASE("Replay holds state until timestamp, capabilities never arm clock",
           "[hid][replay]") {
-  File file(Bytes({{0, 0, 0, 4, 0}, {100, 0, 0, 5, X_INPUT_GAMEPAD_A},
-                   {300, 0, 0, 6, 0}}));
+  File file(Bytes(
+      {{0, 0, 0, 4, 0}, {100, 0, 0, 5, X_INPUT_GAMEPAD_A}, {300, 0, 0, 6, 0}}));
   uint64_t now = 10000;
   ReplayInputDriver driver(nullptr, 0, file.path, [&] { return now; });
   REQUIRE(driver.Setup() == X_STATUS_SUCCESS);
@@ -90,9 +100,12 @@ TEST_CASE("Replay holds state until timestamp, capabilities never arm clock",
 TEST_CASE("Replay preserves all state extrema and neutralizes EOF once",
           "[hid][replay]") {
   auto bytes = Bytes({{0, 0, 0, 0xFFFFFFFFu, X_INPUT_GAMEPAD_A}});
-  bytes[24 + 22] = 255; bytes[24 + 23] = 254;
-  Put(bytes, 24 + 24, 0x8000, 2); Put(bytes, 24 + 26, 0x7FFF, 2);
-  Put(bytes, 24 + 28, 0xFFFF, 2); Put(bytes, 24 + 30, 1, 2);
+  bytes[24 + 22] = 255;
+  bytes[24 + 23] = 254;
+  Put(bytes, 24 + 24, 0x8000, 2);
+  Put(bytes, 24 + 26, 0x7FFF, 2);
+  Put(bytes, 24 + 28, 0xFFFF, 2);
+  Put(bytes, 24 + 30, 1, 2);
   File file(bytes);
   uint64_t now = 10;
   ReplayInputDriver driver(nullptr, 0, file.path, [&] { return now; });
@@ -128,7 +141,8 @@ TEST_CASE("Replay preserves all state extrema and neutralizes EOF once",
 
 TEST_CASE("Replay disconnect, reconnect, other ports and uncaptured keystrokes",
           "[hid][replay]") {
-  File file(Bytes({{0, 0, 0, 1, 0}, {100, 0, 1167, 0, 0},
+  File file(Bytes({{0, 0, 0, 1, 0},
+                   {100, 0, 1167, 0, 0},
                    {200, 0, 0, 9, X_INPUT_GAMEPAD_B},
                    {300, 0, 1167, 0, 0}}));
   uint64_t now = 0;
@@ -146,7 +160,8 @@ TEST_CASE("Replay disconnect, reconnect, other ports and uncaptured keystrokes",
   now = 100;
   CHECK(driver.GetState(0, &state) == X_ERROR_DEVICE_NOT_CONNECTED);
   CHECK(driver.GetCapabilities(0, 0, &caps) == X_ERROR_DEVICE_NOT_CONNECTED);
-  CHECK(driver.GetKeystroke(XUserIndexAny, 0, &key) == X_ERROR_DEVICE_NOT_CONNECTED);
+  CHECK(driver.GetKeystroke(XUserIndexAny, 0, &key) ==
+        X_ERROR_DEVICE_NOT_CONNECTED);
   CHECK(driver.SetState(0, &vibration) == X_ERROR_DEVICE_NOT_CONNECTED);
   now = 200;
   REQUIRE(driver.GetState(0, &state) == X_ERROR_SUCCESS);
@@ -158,8 +173,10 @@ TEST_CASE("Replay disconnect, reconnect, other ports and uncaptured keystrokes",
 
 TEST_CASE("Replay coalesces elapsed states without stretching missed taps",
           "[hid][replay]") {
-  File file(Bytes({{0, 0, 0, 1, 0}, {10, 0, 0, 2, X_INPUT_GAMEPAD_A},
-                   {20, 0, 0, 3, 0}, {20, 0, 0, 4, X_INPUT_GAMEPAD_B}}));
+  File file(Bytes({{0, 0, 0, 1, 0},
+                   {10, 0, 0, 2, X_INPUT_GAMEPAD_A},
+                   {20, 0, 0, 3, 0},
+                   {20, 0, 0, 4, X_INPUT_GAMEPAD_B}}));
   uint64_t now = 0;
   ReplayInputDriver driver(nullptr, 0, file.path, [&] { return now; });
   REQUIRE(driver.Setup() == X_STATUS_SUCCESS);
@@ -172,7 +189,8 @@ TEST_CASE("Replay coalesces elapsed states without stretching missed taps",
 }
 
 TEST_CASE("Replay keeps recorded ports independent", "[hid][replay]") {
-  File file(Bytes({{0, 0, 1167, 0, 0}, {0, 3, 0, 8, X_INPUT_GAMEPAD_Y},
+  File file(Bytes({{0, 0, 1167, 0, 0},
+                   {0, 3, 0, 8, X_INPUT_GAMEPAD_Y},
                    {100, 0, 0, 1, X_INPUT_GAMEPAD_A}}));
   uint64_t now = 0;
   ReplayInputDriver driver(nullptr, 0, file.path, [&] { return now; });
@@ -190,8 +208,8 @@ TEST_CASE("Replay keeps recorded ports independent", "[hid][replay]") {
 
 TEST_CASE("Replay parser rejects malformed timelines and setup fails closed",
           "[hid][replay]") {
-  auto original = Bytes({{0, 0, 0, 0, 0}, {100, 0, 0, 1, 0},
-                         {200, 0, 0, 2, 0}});
+  auto original =
+      Bytes({{0, 0, 0, 0, 0}, {100, 0, 0, 1, 0}, {200, 0, 0, 2, 0}});
   Recording out;
   std::string error;
   REQUIRE(ParseRecording(original, &out, &error));

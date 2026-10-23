@@ -334,7 +334,9 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
   // Private fork observer: reuse the exact computed duration, including the
   // same DWORD narrowing used by the Windows wait backend. No second clock
   // conversion and no change to the duration passed to the wait.
-  if (observed_host_ms) *observed_host_ms = uint32_t(timeout_ms.count());
+  if (observed_host_ms) {
+    *observed_host_ms = uint32_t(timeout_ms.count());
+  }
 
   X_STATUS status;
   uint32_t boost_increment = 0;
@@ -465,11 +467,9 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
   guest_object_ptr_ = native_ptr;
 }
 
-object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
-                                             void* native_ptr,
-                                             X_OBJECT_TYPES as_type,
-                                             bool already_locked,
-                                             util::NativeObjectFailure* failure) {
+object_ref<XObject> XObject::GetNativeObject(
+    KernelState* kernel_state, void* native_ptr, X_OBJECT_TYPES as_type,
+    bool already_locked, util::NativeObjectFailure* failure) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -503,7 +503,8 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
                  ->LookupObject<XObject>(handle, true)
                  .release();
     if (result && NativeTimerCandidateEnabled() &&
-        (type == TimerNotificationObject || type == TimerSynchronizationObject) &&
+        (type == TimerNotificationObject ||
+         type == TimerSynchronizationObject) &&
         (result->type() != XObject::Type::Timer ||
          !static_cast<XTimer*>(result)->MatchesNative(
              kernel_state->memory()->HostToGuestVirtual(native_ptr)))) {
@@ -517,8 +518,12 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     } else if (failure) {
       const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
       *failure = {util::NativeObjectFailure::Reason::kStashedLookupMiss,
-                  uint32_t(type), read_type, read_type ? uint32_t(type) : 0,
-                  signature_word, true, handle};
+                  uint32_t(type),
+                  read_type,
+                  read_type ? uint32_t(type) : 0,
+                  signature_word,
+                  true,
+                  handle};
     }
   } else {
     // First use, create new.
@@ -570,9 +575,14 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         result = nullptr;
         if (failure) {
           const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
-          *failure = {util::NativeObjectFailure::Reason::kUnsupportedFirstUseType,
-                      uint32_t(type), read_type, read_type ? uint32_t(type) : 0,
-                      signature_word, false, 0};
+          *failure = {
+              util::NativeObjectFailure::Reason::kUnsupportedFirstUseType,
+              uint32_t(type),
+              read_type,
+              read_type ? uint32_t(type) : 0,
+              signature_word,
+              false,
+              0};
         }
     }
     // Stash pointer in struct.

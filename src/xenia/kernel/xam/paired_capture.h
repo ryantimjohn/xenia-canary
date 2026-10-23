@@ -59,13 +59,12 @@ struct Counts {
 // QPF/u64, start QPC/u64, reserved zeroes. Record: kind/u32, key/u32,
 // QPC/u64, 24 scalar words/u32. Footer: magic[8], six counts/u64, admission
 // cutoff QPC/u64. Float values use their IEEE-754 bit pattern in one word.
-std::array<uint8_t, kHeaderBytes> EncodeHeader(uint64_t qpf,
-                                                uint64_t start_qpc,
-                                                uint32_t queue_limit,
-                                                uint32_t record_limit);
+std::array<uint8_t, kHeaderBytes> EncodeHeader(uint64_t qpf, uint64_t start_qpc,
+                                               uint32_t queue_limit,
+                                               uint32_t record_limit);
 std::array<uint8_t, kRecordBytes> EncodeRecord(const Record& record);
 std::array<uint8_t, kFooterBytes> EncodeFooter(const Counts& counts,
-                                                uint64_t cutoff_qpc);
+                                               uint64_t cutoff_qpc);
 uint32_t FloatBits(float value);
 struct FileSummary {
   uint64_t qpf = 0;
@@ -113,9 +112,8 @@ class Session {
   };
   // Exclusive create-new output. No directory creation or overwrite.
   static std::unique_ptr<Session> Create(const std::filesystem::path& path,
-                                          uint64_t qpf, Tick tick,
-                                          Limits limits,
-                                          BeforeFooter before_footer = {});
+                                         uint64_t qpf, Tick tick, Limits limits,
+                                         BeforeFooter before_footer = {});
   ~Session();
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;

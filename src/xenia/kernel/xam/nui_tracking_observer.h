@@ -89,7 +89,9 @@ class NuiTrackingObserver {
   bool enabled() const { return enabled_; }
 
   void SessionStarted(uint64_t now_us) {
-    if (!enabled_) return;
+    if (!enabled_) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     StartWindow(now_us);
     Count([](Stats& s) { ++s.sessions; });
@@ -110,7 +112,9 @@ class NuiTrackingObserver {
       const auto& slot = frame.skeletons[i];
       sample.states[i] = slot.tracking_state;
       sample.ids[i] = slot.tracking_id;
-      if (sample.states[i] != 2) continue;
+      if (sample.states[i] != 2) {
+        continue;
+      }
       sample.quality_nonzero += slot.quality_flags != 0;
       for (size_t j = 0; j < kNuiSkeletonPositionCount; ++j) {
         const uint32_t joint_state = slot.position_tracking_state[j];
@@ -126,33 +130,49 @@ class NuiTrackingObserver {
   }
 
   void SourceFrame(uint64_t sequence, uint64_t now_us) {
-    if (!enabled_) return;
+    if (!enabled_) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     Count([&](Stats& s) {
-      if (!s.source_frames) s.source_first = sequence;
+      if (!s.source_frames) {
+        s.source_first = sequence;
+      }
       ++s.source_frames;
       s.source_last = sequence;
-      if (last_source_sequence_ && sequence > last_source_sequence_ + 1)
+      if (last_source_sequence_ && sequence > last_source_sequence_ + 1) {
         s.source_skipped += sequence - last_source_sequence_ - 1;
-      if (last_source_sequence_ && sequence <= last_source_sequence_)
+      }
+      if (last_source_sequence_ && sequence <= last_source_sequence_) {
         ++s.source_resets;
+      }
     });
     last_source_sequence_ = sequence;
     StartWindow(now_us);
   }
 
   enum class Delivery {
-    kNoBuffer, kInvalidBuffer, kCopied, kCompletionCalled, kReturned
+    kNoBuffer,
+    kInvalidBuffer,
+    kCopied,
+    kCompletionCalled,
+    kReturned
   };
   void DepthDelivery(Delivery kind, uint64_t now_us, uint64_t host_stamp_us = 0,
                      uint64_t guest_stamp_ms = 0) {
-    if (!enabled_) return;
+    if (!enabled_) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     StartWindow(now_us);
     Count([&](Stats& s) {
       switch (kind) {
-        case Delivery::kNoBuffer: ++s.no_buffer; break;
-        case Delivery::kInvalidBuffer: ++s.invalid_buffer; break;
+        case Delivery::kNoBuffer:
+          ++s.no_buffer;
+          break;
+        case Delivery::kInvalidBuffer:
+          ++s.invalid_buffer;
+          break;
         case Delivery::kCopied:
           ++s.copied_stamped;
           if (!host_stamp_us || host_stamp_us > now_us) {
@@ -161,12 +181,17 @@ class NuiTrackingObserver {
             s.host_age_max_ms =
                 std::max(s.host_age_max_ms, (now_us - host_stamp_us) / 1000);
           }
-          if (last_delivery_us_ && now_us >= last_delivery_us_)
+          if (last_delivery_us_ && now_us >= last_delivery_us_) {
             s.delivery_gap_max_ms = std::max(
                 s.delivery_gap_max_ms, (now_us - last_delivery_us_) / 1000);
+          }
           break;
-        case Delivery::kCompletionCalled: ++s.completion_called; break;
-        case Delivery::kReturned: ++s.callback_returned; break;
+        case Delivery::kCompletionCalled:
+          ++s.completion_called;
+          break;
+        case Delivery::kReturned:
+          ++s.callback_returned;
+          break;
       }
     });
     if (kind == Delivery::kCopied) {
@@ -177,7 +202,9 @@ class NuiTrackingObserver {
   }
 
   void Hud(const HudSample& sample, uint64_t now_us) {
-    if (!enabled_) return;
+    if (!enabled_) {
+      return;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     StartWindow(now_us);
     uint32_t matches = 0;
@@ -192,7 +219,9 @@ class NuiTrackingObserver {
     std::array<uint32_t, 6> tracked_set{};
     size_t tracked_count = 0;
     for (size_t i = 0; i < sample.ids.size(); ++i) {
-      if (sample.states[i] != 2 || !sample.ids[i]) continue;
+      if (sample.states[i] != 2 || !sample.ids[i]) {
+        continue;
+      }
       tracked_slots[i] = sample.ids[i];
       tracked_set[tracked_count++] = sample.ids[i];
     }
@@ -208,37 +237,53 @@ class NuiTrackingObserver {
                                   tracked_slots != last_tracked_slots_;
     Count([&](Stats& s) {
       ++s.hud_frames;
-      if (matches == 1) ++s.timestamp_exact;
-      else if (matches > 1) ++s.timestamp_ambiguous;
-      else ++s.timestamp_unmatched;
-      if (matches == 1 && now_us >= copied_us)
+      if (matches == 1) {
+        ++s.timestamp_exact;
+      } else if (matches > 1) {
+        ++s.timestamp_ambiguous;
+      } else {
+        ++s.timestamp_unmatched;
+      }
+      if (matches == 1 && now_us >= copied_us) {
         s.hud_lag_max_ms =
             std::max(s.hud_lag_max_ms, (now_us - copied_us) / 1000);
-      else
+      } else {
         ++s.hud_lag_unknown;
+      }
       for (size_t i = 0; i < sample.states.size(); ++i) {
         ++s.slot_states[std::min<uint32_t>(sample.states[i], 3)];
         const uint32_t before = last_ids_[i], after = sample.ids[i];
-        if (!before && after) ++s.id_appeared;
-        else if (before && !after) ++s.id_disappeared;
-        else if (before && after && before != after) ++s.id_replaced;
+        if (!before && after) {
+          ++s.id_appeared;
+        } else if (before && !after) {
+          ++s.id_disappeared;
+        } else if (before && after && before != after) {
+          ++s.id_replaced;
+        }
       }
-      for (size_t i = 0; i < sample.joint_states.size(); ++i)
+      for (size_t i = 0; i < sample.joint_states.size(); ++i) {
         s.joint_states[i] += sample.joint_states[i];
+      }
       s.tracked_set_changed += set_changed;
       s.same_set_slot_reassigned += slots_reassigned;
       if (!sample.guide_took) {
         ++s.guide_not_selected;
       } else {
         uint32_t slot_matches = 0;
-        for (size_t i = 0; i < sample.ids.size(); ++i)
+        for (size_t i = 0; i < sample.ids.size(); ++i) {
           if (sample.guide_selected_id &&
               sample.ids[i] == sample.guide_selected_id &&
-              sample.states[i] == 2)
+              sample.states[i] == 2) {
             ++slot_matches;
-        if (slot_matches == 1) ++s.guide_selected_matched;
-        else if (slot_matches > 1) ++s.guide_selected_ambiguous;
-        else ++s.guide_selected_unmatched;
+          }
+        }
+        if (slot_matches == 1) {
+          ++s.guide_selected_matched;
+        } else if (slot_matches > 1) {
+          ++s.guide_selected_ambiguous;
+        } else {
+          ++s.guide_selected_unmatched;
+        }
       }
       s.quality_nonzero += sample.quality_nonzero;
       s.nonfinite_vectors += sample.nonfinite_vectors;
@@ -253,10 +298,13 @@ class NuiTrackingObserver {
   // Called only by the feed thread, after any guest callback has returned.
   // The copy leaves the observer mutex before formatting or logging.
   std::optional<Snapshot> TakeRow(uint64_t now_us) {
-    if (!enabled_) return std::nullopt;
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!window_start_us_ || now_us < window_start_us_ + 1000000)
+    if (!enabled_) {
       return std::nullopt;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!window_start_us_ || now_us < window_start_us_ + 1000000) {
+      return std::nullopt;
+    }
     const uint64_t start_us = window_start_us_;
     window_start_us_ = now_us;
     if (rows_ >= 360) {
@@ -272,9 +320,13 @@ class NuiTrackingObserver {
   // Only the first feed end prints a cumulative snapshot. All later session
   // counters remain available through Summary and the bounded periodic rows.
   std::optional<Snapshot> TakeFirstFeedEnd(uint64_t now_us) {
-    if (!enabled_) return std::nullopt;
+    if (!enabled_) {
+      return std::nullopt;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
-    if (first_end_logged_) return std::nullopt;
+    if (first_end_logged_) {
+      return std::nullopt;
+    }
     first_end_logged_ = true;
     return Snapshot{total_, observer_start_us_, now_us, 0};
   }
@@ -285,10 +337,18 @@ class NuiTrackingObserver {
   }
 
  private:
-  template <typename F> void Count(F&& f) { f(row_); f(total_); }
+  template <typename F>
+  void Count(F&& f) {
+    f(row_);
+    f(total_);
+  }
   void StartWindow(uint64_t now_us) {
-    if (!window_start_us_) window_start_us_ = now_us ? now_us : 1;
-    if (!observer_start_us_) observer_start_us_ = window_start_us_;
+    if (!window_start_us_) {
+      window_start_us_ = now_us ? now_us : 1;
+    }
+    if (!observer_start_us_) {
+      observer_start_us_ = window_start_us_;
+    }
   }
 
   const bool enabled_;
@@ -301,7 +361,10 @@ class NuiTrackingObserver {
   bool first_end_logged_ = false;
   uint64_t last_source_sequence_ = 0;
   uint64_t last_delivery_us_ = 0;
-  struct Stamp { uint64_t guest_ms = 0; uint64_t copied_us = 0; };
+  struct Stamp {
+    uint64_t guest_ms = 0;
+    uint64_t copied_us = 0;
+  };
   std::array<Stamp, 16> stamps_{};
   size_t next_stamp_ = 0;
   std::array<uint32_t, 6> last_ids_{};

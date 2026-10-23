@@ -2568,8 +2568,7 @@ TEST_CASE(
   builder.SourceOffset(kPC - 4);
   // Synthetic setup bypasses StoreGPR's per-instruction trace bookkeeping,
   // which is initialized by the full PPCHIRBuilder::Emit loop, not its ctor.
-  builder.StoreContext(real_hir::GPROffset(0),
-                       builder.LoadConstantUint64(kR0));
+  builder.StoreContext(real_hir::GPROffset(0), builder.LoadConstantUint64(kR0));
   auto entry = builder.LoadGPR(10);
   auto computed = builder.Add(entry, builder.LoadConstantInt64(1));
   builder.StoreContext(real_hir::GPROffset(10), computed);

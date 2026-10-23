@@ -60,7 +60,8 @@ class ReplayInputDriver final : public InputDriver {
     }
   };
   static void LogTimingEvents(const TimingEvents& events);
-  // All public polling paths share this lock, including first-poll clock arming.
+  // All public polling paths share this lock, including first-poll clock
+  // arming.
   void Advance(bool start, TimingEvents* timing = nullptr);
   std::filesystem::path path_;
   Clock clock_;

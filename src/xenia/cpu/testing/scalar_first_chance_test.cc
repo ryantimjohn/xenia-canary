@@ -621,7 +621,8 @@ TEST_CASE("Scalar boundary control reloads native operands after CALL_EXTERN",
                       builder.Truncate(LoadGPR(builder, 10), hir::INT32_TYPE));
         StoreGPR(builder, 10, builder.LoadConstantUint64(2));
         builder.Return();
-        return true;
+        // Add the fallthrough edge before normal CFG simplification.
+        return builder.Finalize();
       });
   REQUIRE(processor->AddModule(std::move(module)));
   processor->backend()->CommitExecutableRange(kCode, kCode + 0x10000);

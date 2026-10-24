@@ -28,6 +28,9 @@
 #include "xenia/xbox.h"
 
 namespace xe {
+namespace pacing {
+struct Record;
+}
 class Emulator;
 }  // namespace xe
 
@@ -110,6 +113,7 @@ class GraphicsSystem {
   void WriteRegister(uint32_t addr, uint32_t value);
 
   void MarkVblank();
+  void MarkVblank(pacing::Record* observation);
 
   Memory* memory_ = nullptr;
   cpu::Processor* processor_ = nullptr;

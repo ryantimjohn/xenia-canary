@@ -18,11 +18,13 @@
 #include "xenia/base/string.h"
 #include "xenia/cpu/backend/x64/x64_backend.h"
 #include "xenia/cpu/backend/x64/x64_code_cache.h"
+#include "xenia/cpu/backend/x64/x64_delay_source_map.h"
 #include "xenia/cpu/backend/x64/x64_emitter.h"
 #include "xenia/cpu/backend/x64/x64_function.h"
 #include "xenia/cpu/cpu_flags.h"
 #include "xenia/cpu/hir/hir_builder.h"
 #include "xenia/cpu/hir/label.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/processor.h"
 
 namespace xe {
@@ -72,6 +74,13 @@ bool X64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
                             std::unique_ptr<FunctionDebugInfo> debug_info) {
   SCOPE_profile_cpu_f("cpu");
 
+  // Structural checkpoint requests have no native producer or publication
+  // contract. Reject even orphaned/malformed requests before
+  // emission/placement.
+  if (ppc::ContainsCheckpointHIR(*builder)) {
+    return false;
+  }
+
   // Reset when we leave.
   xe::make_reset_scope(this);
 
@@ -94,6 +103,7 @@ bool X64Assembler::Assemble(GuestFunction* function, HIRBuilder* builder,
   function->set_debug_info(std::move(debug_info));
   static_cast<X64Function*>(function)->Setup(
       reinterpret_cast<uint8_t*>(machine_code), code_size);
+  delay_source_map::MaybeRecord(*function);
 
   // Install into indirection table.
   uint64_t host_address = reinterpret_cast<uint64_t>(machine_code);

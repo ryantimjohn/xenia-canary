@@ -10,6 +10,7 @@
 #ifndef XENIA_BASE_LOGGING_H_
 #define XENIA_BASE_LOGGING_H_
 
+#include <chrono>
 #include <cstdarg>
 #include <cstdint>
 #include <string>
@@ -76,6 +77,14 @@ class DebugPrintLogSink final : public LogSink {
 void InitializeLogging(const std::string_view app_name);
 void ShutdownLogging();
 void FlushLog();
+
+// Private capture shutdown only; does not replace FlushLog. Waits at most two
+// seconds for an ordered marker's sink Flush calls to return. Not disk
+// durability or an acknowledgment of concurrent records claimed after the
+// marker. Logging initialization/shutdown and sink ownership must remain stable
+// during this call.
+enum class LogDrainResult { kComplete, kUnavailable, kWriterThread, kTimedOut };
+LogDrainResult DrainLogForCaptureExit(std::chrono::milliseconds timeout);
 
 namespace logging {
 

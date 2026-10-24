@@ -16,12 +16,14 @@
 
 DECLARE_bool(nui_allow_tilt);
 DECLARE_bool(nui_log_messages);
+DECLARE_bool(nui_observe_tracking);
 DECLARE_int32(nui_log_play_frames);
 DECLARE_int32(nui_tilt_override);
 DECLARE_bool(nui_accelerometer);
 DECLARE_bool(nui_show_depth_preview);
 DECLARE_string(nui_record);
 DECLARE_string(nui_replay);
+DECLARE_bool(nui_replay_deadline_timing);
 DECLARE_bool(nui_guide_gesture);
 DECLARE_int32(nui_guide_angle_min);
 DECLARE_int32(nui_guide_angle_max);

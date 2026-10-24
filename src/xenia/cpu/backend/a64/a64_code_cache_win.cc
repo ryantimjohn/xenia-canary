@@ -230,6 +230,9 @@ class Win32A64CodeCache : public A64CodeCache {
   void* LookupUnwindInfo(uint64_t host_pc) override;
 
  private:
+  size_t QueryUnwindStorageSize() const override {
+    return xe::round_up(kMaxUnwindSize, size_t{16});
+  }
   UnwindReservation RequestUnwindReservation(uint8_t* entry_address) override;
   void PlaceCode(uint32_t guest_address, void* machine_code,
                  const EmitFunctionInfo& func_info, void* code_execute_address,

@@ -15,6 +15,7 @@
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <optional>
 
 #include "xenia/base/logging.h"
 #include "xenia/emulator.h"
@@ -25,6 +26,7 @@
 #include "xenia/kernel/xam/nui_guide_frame.h"
 #include "xenia/kernel/xam/nui_messages.h"
 #include "xenia/kernel/xam/nui_player_mask.h"
+#include "xenia/kernel/xam/nui_tracking_observer.h"
 #include "xenia/kernel/xconfig.h"
 #include "xenia/nui/nui_flags.h"
 #include "xenia/nui/nui_gpu_readback.h"
@@ -32,6 +34,11 @@
 namespace xe {
 namespace kernel {
 namespace xam {
+
+NuiTrackingObserver& GetNuiTrackingObserver() {
+  static NuiTrackingObserver observer(cvars::nui_observe_tracking);
+  return observer;
+}
 
 namespace {
 
@@ -516,6 +523,12 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
   const auto* args =
       kernel_state_->memory()->TranslateVirtual<const NuiMsg2B002*>(buffer_ptr);
 
+  auto& observer = GetNuiTrackingObserver();
+  std::optional<NuiTrackingObserver::HudSample> observer_sample;
+  if (observer.enabled()) {
+    observer_sample.emplace(NuiTrackingObserver::ReadHudSample(*args));
+  }
+
   NuiHudSkeletonFrame frame;
   for (size_t i = 0; i < kNuiSkeletonCount; i++) {
     frame.tracking_states[i] = args->skeletons[i].tracking_state;
@@ -568,6 +581,9 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
 
   uint32_t taken_id = 0;
   if (!UpdateGuideFromFrame(*args, frame.frames, &taken_id)) {
+    if (observer_sample) {
+      observer.Hud(*observer_sample, NowUs());
+    }
     return X_E_SUCCESS;
   }
   // Having answered 0x8301000B, the runtime reads the two engaged ids back out
@@ -584,6 +600,11 @@ X_HRESULT NuiState::HandleHudSkeletonFrame(uint32_t buffer_ptr,
         kernel_state_->memory()->TranslateVirtual<uint8_t*>(engaged_ids_ptr);
     xe::store_and_swap<uint32_t>(engaged_ids, taken_id);
     xe::store_and_swap<uint32_t>(engaged_ids + sizeof(uint32_t), 0);
+  }
+  if (observer_sample) {
+    observer_sample->guide_took = true;
+    observer_sample->guide_selected_id = taken_id;
+    observer.Hud(*observer_sample, NowUs());
   }
   return kNuiHudTookSkeleton;
 }

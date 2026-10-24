@@ -1391,6 +1391,8 @@ class TestCommand(BaseBuildCommand):
             "xenia-base-tests",
             "xenia-cpu-tests",
             "xenia-gpu-tests",
+            "xenia-hid-keyboard-tests",
+            "xenia-hid-replay-tests",
             "xenia-kernel-tests",
             "xenia-nui-tests",
             "xenia-vfs-tests",

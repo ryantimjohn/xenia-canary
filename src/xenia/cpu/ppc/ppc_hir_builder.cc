@@ -72,6 +72,16 @@ PPCHIRBuilder::~PPCHIRBuilder() = default;
 
 PPCBuiltins* PPCHIRBuilder::builtins() const { return frontend_->builtins(); }
 
+void PPCHIRBuilder::MaybeEmitScalarAccessFirstChance(uint32_t guest_pc,
+                                                     uint32_t raw_instruction) {
+  if (auto* handler = frontend_->processor()->RegisterScalarAccessFirstChance(
+          function_, guest_pc, raw_instruction)) {
+    // CALL_EXTERN is a context-promotion boundary. Emit it before computing
+    // operands so a returning helper cannot leave cached pre-call operands.
+    CallExtern(handler);
+  }
+}
+
 void PPCHIRBuilder::Reset() {
   function_ = nullptr;
   start_address_ = 0;
@@ -83,6 +93,11 @@ void PPCHIRBuilder::Reset() {
 }
 
 bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
+  return Emit(function, flags, nullptr, nullptr);
+}
+
+bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags,
+                         SourceWordObserver observer, void* observer_context) {
   SCOPE_profile_cpu_f("cpu");
 
   Memory* memory = frontend_->memory();
@@ -124,6 +139,9 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
     trace_info_.dest_count = 0;
     uint32_t code =
         xe::load_and_swap<uint32_t>(memory->TranslateVirtual(address));
+    if (observer) {
+      observer(observer_context, address, code);
+    }
     auto opcode = LookupOpcode(code);
     auto& opcode_info = GetOpcodeInfo(opcode);
 
@@ -156,6 +174,9 @@ bool PPCHIRBuilder::Emit(GuestFunction* function, uint32_t flags) {
 
     // Stash instruction offset. It's either the SOURCE_OFFSET or the COMMENT.
     instr_offset_list_[offset] = first_instr;
+    // Keep label/source bookkeeping ahead of this call: forward branches must
+    // enter before the barrier and observe preinstruction context too.
+    frontend_->EmitGuestGPRCheckpoint(*this, address);
 
     if (opcode == PPCOpcode::kInvalid) {
       XELOGE("Invalid instruction {:08X} {:08X}", address, code);

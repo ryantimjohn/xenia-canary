@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <memory>
@@ -19,13 +20,18 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
 #include "xenia/base/debugging.h"
+#include "xenia/base/frame_timing.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/pacing_observer.h"
 #include "xenia/base/platform.h"
 #include "xenia/base/profiling.h"
+#include "xenia/base/swap_entry_observer.h"
 #include "xenia/base/threading.h"
 #include "xenia/config.h"
 #include "xenia/debug/ui/debug_window.h"
 #include "xenia/emulator.h"
+#include "xenia/kernel/xam/paired_capture.h"
+#include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/kernel/xam/xam_module.h"
 #include "xenia/ui/file_picker.h"
 #include "xenia/ui/window.h"
@@ -60,6 +66,7 @@
 #include "xenia/hid/keyboard/keyboard_hid.h"
 #endif  // XE_PLATFORM_LINUX
 #include "xenia/hid/nop/nop_hid.h"
+#include "xenia/hid/replay/replay_input_driver.h"
 #if !XE_PLATFORM_ANDROID
 #include "xenia/hid/sdl/sdl_hid.h"
 #endif  // !XE_PLATFORM_ANDROID
@@ -78,23 +85,25 @@
 #if XE_PLATFORM_WIN32
 #define APU_OPTIONS "[any, nop, sdl, xaudio2]"
 #define GPU_OPTIONS "[any, d3d12, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl, keyboard, xinput]"
+#define HID_OPTIONS "[any, nop, sdl, keyboard, xinput, replay]"
 #define NUI_OPTIONS "[any, kinect, replay, nop]"
 #elif XE_PLATFORM_LINUX
 #define APU_OPTIONS "[any, alsa, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl, keyboard]"
+#define HID_OPTIONS "[any, nop, sdl, keyboard, replay]"
 #define NUI_OPTIONS "[any, replay, nop]"
 #else
 #define APU_OPTIONS "[any, nop, sdl]"
 #define GPU_OPTIONS "[any, vulkan, null]"
-#define HID_OPTIONS "[any, nop, sdl]"
+#define HID_OPTIONS "[any, nop, sdl, replay]"
 #define NUI_OPTIONS "[any, replay, nop]"
 #endif
 
 DEFINE_string(apu, "any", "Audio system. Use: " APU_OPTIONS, "APU");
 DEFINE_string(gpu, "any", "Graphics system. Use: " GPU_OPTIONS, "GPU");
 DEFINE_string(hid, "any", "Input system. Use: " HID_OPTIONS, "HID");
+DEFINE_path(hid_replay, "",
+            "Controller timeline file for exclusive --hid=replay.", "HID");
 DEFINE_string(nui, "any", "NUI (Kinect) system. Use: " NUI_OPTIONS, "Kinect");
 
 DEFINE_path(
@@ -141,6 +150,10 @@ DEFINE_transient_bool(portable, true,
 #endif
 
 DECLARE_bool(debug);
+DECLARE_string(frame_timing);
+DECLARE_string(pacing_observer);
+DECLARE_string(swap_entry_observer);
+DECLARE_string(poll_counters);
 
 DEFINE_bool(discord, true, "Enable Discord rich presence", "General");
 
@@ -458,7 +471,17 @@ std::unique_ptr<gpu::GraphicsSystem> EmulatorApp::CreateGraphicsSystem() {
 std::vector<std::unique_ptr<hid::InputDriver>> EmulatorApp::CreateInputDrivers(
     ui::Window* window) {
   std::vector<std::unique_ptr<hid::InputDriver>> drivers;
-  if (cvars::hid.compare("nop") == 0) {
+  if (cvars::hid == "replay") {
+    // Explicit opt-in only; never register with the 'any' factory or fall back
+    // to physical input when a recording is invalid.
+    auto driver = std::make_unique<hid::replay::ReplayInputDriver>(
+        window, EmulatorWindow::kZOrderHidInput, cvars::hid_replay);
+    if (XSUCCEEDED(driver->Setup())) {
+      drivers.emplace_back(std::move(driver));
+    } else {
+      XELOGE("HID replay: setup failed; no input driver enabled");
+    }
+  } else if (cvars::hid.compare("nop") == 0) {
     drivers.emplace_back(
         xe::hid::nop::Create(window, EmulatorWindow::kZOrderHidInput));
   } else {
@@ -532,6 +555,34 @@ bool EmulatorApp::OnInitialize() {
   XELOGI("Storage root: {}", storage_root);
 
   config::SetupConfig(storage_root);
+
+  // Open the private scalar sidecar before guest threads can produce events.
+  // Empty (the default) performs no file or thread work.
+  if (!kernel::xam::paired_capture::StartFromFlag()) {
+    return false;
+  }
+  if (!frame_timing::StartFromFlag()) {
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
+  if (!pacing::StartFromFlag()) {
+    frame_timing::CloseForExit(std::chrono::seconds(2));
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
+  if (!swap_entry::StartFromFlag()) {
+    pacing::CloseForExit(std::chrono::seconds(2));
+    frame_timing::CloseForExit(std::chrono::seconds(2));
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
+  if (!kernel::xam::poll_counters::StartFromFlag()) {
+    swap_entry::CloseForExit(std::chrono::seconds(2));
+    pacing::CloseForExit(std::chrono::seconds(2));
+    frame_timing::CloseForExit(std::chrono::seconds(2));
+    kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+    return false;
+  }
 
 #if XE_ARCH_AMD64 == 1
   amd64::InitFeatureFlags();
@@ -611,7 +662,27 @@ void EmulatorApp::OnDestroy() {
   // TODO(DrChat): Remove this code and do a proper exit.
   XELOGI("Cheap-skate exit!");
 
-  xe::FlushLog();
+  // Normal GUI close quick_exits and skips static destructors. Bound the
+  // writer drain here; a missing footer identifies an incomplete sidecar.
+  swap_entry::CloseForExit(std::chrono::seconds(2));
+  pacing::CloseForExit(std::chrono::seconds(2));
+  kernel::xam::poll_counters::CloseForExit(std::chrono::seconds(2));
+  frame_timing::CloseForExit(std::chrono::seconds(2));
+  kernel::xam::paired_capture::CloseForExit(std::chrono::seconds(2));
+
+  if (!cvars::frame_timing.empty() || !cvars::poll_counters.empty() ||
+      !cvars::pacing_observer.empty() || !cvars::swap_entry_observer.empty()) {
+    if (xe::DrainLogForCaptureExit(std::chrono::seconds(2)) !=
+        xe::LogDrainResult::kComplete) {
+      // Fixed-size direct indication; never queue a failure behind the drain.
+      // Like sink I/O itself, an OS stderr write has no hard wall-time
+      // guarantee.
+      std::fputs("Capture log drain failed before quick_exit\n", stderr);
+      std::quick_exit(EXIT_FAILURE);
+    }
+  } else {
+    xe::FlushLog();
+  }
 
   std::quick_exit(EXIT_SUCCESS);
 }

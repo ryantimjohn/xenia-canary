@@ -42,6 +42,12 @@ union XNotificationKey {
 
 class XNotifyListener : public XObject {
  public:
+  // Private fork-only observation, copied under the existing dequeue lock.
+  // Queue nonemptiness implies expected signal by the queue contract; no
+  // event query is performed and this is not an observed event state.
+  struct QueueObservation {
+    uint64_t before = 0, after = 0;
+  };
   static const XObject::Type kObjectType = XObject::Type::NotifyListener;
 
   explicit XNotifyListener(KernelState* kernel_state);
@@ -54,8 +60,10 @@ class XNotifyListener : public XObject {
   void Initialize(uint64_t mask, uint32_t is_system, uint32_t max_version);
 
   void EnqueueNotification(XNotificationID id, uint32_t data);
-  bool DequeueNotification(XNotificationID* out_id, uint32_t* out_data);
-  bool DequeueNotification(XNotificationID id, uint32_t* out_data);
+  bool DequeueNotification(XNotificationID* out_id, uint32_t* out_data,
+                           QueueObservation* observation = nullptr);
+  bool DequeueNotification(XNotificationID id, uint32_t* out_data,
+                           QueueObservation* observation = nullptr);
 
   bool Save(ByteStream* stream) override;
   static object_ref<XNotifyListener> Restore(KernelState* kernel_state,

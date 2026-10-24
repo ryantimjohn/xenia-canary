@@ -178,6 +178,9 @@ class KernelState {
   xex2_opt_execution_info* GetExecutionInfo() const;
   uint32_t title_id() const;
   bool is_title_open() const;
+  // Private native timer lifecycle gate; guarded by global_critical_region.
+  bool native_timers_closing() const { return native_timers_closing_; }
+  void set_native_timers_closing(bool value) { native_timers_closing_ = value; }
   const std::unique_ptr<xam::SpaInfo> title_xdbf() const;
   const std::unique_ptr<xam::SpaInfo> module_xdbf(
       object_ref<UserModule> exec_module) const;
@@ -332,6 +335,7 @@ class KernelState {
   std::array<uint32_t, 0x11> xbdm_counters_address = {};
 
  private:
+  bool native_timers_closing_ = false;
   void LoadKernelModule(object_ref<KernelModule> kernel_module);
   void InitializeProcess(X_KPROCESS* process, uint32_t type,
                          char priority_class, char default_priority,

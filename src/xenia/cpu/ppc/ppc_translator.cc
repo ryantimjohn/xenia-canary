@@ -9,19 +9,27 @@
 
 #include "xenia/cpu/ppc/ppc_translator.h"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <string_view>
+
 #include "xenia/base/assert.h"
 #include "xenia/base/byte_order.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/memory.h"
 #include "xenia/base/profiling.h"
 #include "xenia/base/reset_scope.h"
 #include "xenia/base/string.h"
 #include "xenia/cpu/compiler/compiler_passes.h"
 #include "xenia/cpu/cpu_flags.h"
+#include "xenia/cpu/ppc/ppc_checkpoint_hir.h"
 #include "xenia/cpu/ppc/ppc_frontend.h"
 #include "xenia/cpu/ppc/ppc_hir_builder.h"
 #include "xenia/cpu/ppc/ppc_opcode_info.h"
 #include "xenia/cpu/ppc/ppc_scanner.h"
+#include "xenia/cpu/private_delay_guest_source.h"
 #include "xenia/cpu/processor.h"
 #include "xenia/cpu/xex_module.h"
 
@@ -33,6 +41,12 @@ DEFINE_bool(disable_context_promotion, false,
             "some sports games, but will reduce performance.",
             "CPU");
 
+DEFINE_bool(
+    private_delay_guest_source_trace, false,
+    "Private one-shot bounded PPC source observation for guest function "
+    "829E6360; joins compiler-owned host source-map evidence.",
+    "CPU");
+
 namespace xe {
 namespace cpu {
 namespace ppc {
@@ -41,7 +55,125 @@ using xe::cpu::backend::Backend;
 using xe::cpu::compiler::Compiler;
 namespace passes = xe::cpu::compiler::passes;
 
-PPCTranslator::PPCTranslator(PPCFrontend* frontend) : frontend_(frontend) {
+namespace {
+std::atomic<bool> guest_source_attempted{false};
+
+struct GuestSourceCapture {
+  std::array<uint32_t, private_delay_guest_source::kMaxWords> words{};
+  uint32_t first = private_delay_guest_source::kSelectedFunction;
+  size_t observed = 0;
+  bool contiguous = true;
+};
+
+void ObserveGuestWord(void* context, uint32_t address, uint32_t code) {
+  auto& capture = *static_cast<GuestSourceCapture*>(context);
+  if (uint64_t(address) != uint64_t(capture.first) + capture.observed * 4) {
+    capture.contiguous = false;
+  }
+  if (capture.observed < capture.words.size()) {
+    capture.words[capture.observed] = code;
+  }
+  ++capture.observed;
+}
+
+// Only called on the selected compilation after the process-wide one-shot
+// admission. The ordinary Translate path has no capture object or source copy.
+bool EmitSelectedGuestSource(PPCHIRBuilder* builder, GuestFunction* function,
+                             uint32_t emit_flags,
+                             std::unique_ptr<FunctionDebugInfo>* debug_info) {
+  GuestSourceCapture capture;
+  if (!builder->Emit(function, emit_flags, ObserveGuestWord, &capture)) {
+    XELOGI("XGUESTWORDS001 unavailable reason=emit_failed function={:08X}",
+           function->address());
+    return false;
+  }
+  const uint32_t end = function->end_address();
+  const uint32_t first = function->address();
+  if (end < first || (end - first) % 4 || !capture.contiguous ||
+      capture.observed != size_t((end - first) / 4) + 1) {
+    XELOGI(
+        "XGUESTWORDS001 unavailable reason=range_or_contiguity "
+        "function={:08X} end={:08X} observed={}",
+        first, end, capture.observed);
+    return true;
+  }
+  if (*debug_info && (*debug_info)->source_disasm()) {
+    XELOGI(
+        "XGUESTWORDS001 unavailable reason=source_disasm_occupied "
+        "function={:08X}",
+        first);
+    return true;
+  }
+  const size_t count =
+      std::min(capture.observed, private_delay_guest_source::kMaxWords);
+  StringBuffer text;
+  text.AppendFormat(
+      "XGUESTWORDS001:f={:08X}:e={:08X}:a={:08X}:n={:02X}:p={:X}:c=1:w=", first,
+      end, first, count,
+      unsigned(capture.observed > private_delay_guest_source::kMaxWords));
+  for (size_t i = 0; i < count; ++i) {
+    text.AppendFormat("{:08X}", capture.words[i]);
+  }
+  if (text.length() > private_delay_guest_source::kMaxTextBytes) {
+    XELOGI(
+        "XGUESTWORDS001 unavailable reason=serialization_cap "
+        "function={:08X}",
+        first);
+    return true;
+  }
+  private_delay_guest_source::Record parsed;
+  if (!private_delay_guest_source::ParseRecord(
+          std::string_view(text.buffer(), text.length()), end, &parsed)) {
+    XELOGI(
+        "XGUESTWORDS001 unavailable reason=serialization_invalid "
+        "function={:08X}",
+        first);
+    return true;
+  }
+  if (!*debug_info) {
+    debug_info->reset(new FunctionDebugInfo());
+  }
+  (*debug_info)->set_source_disasm(xe_strdup(text.buffer()));
+  return true;
+}
+
+class CheckpointPairValidationPass final : public compiler::CompilerPass {
+ public:
+  bool Run(hir::HIRBuilder* builder) override {
+    const auto result = VerifyCheckpointHIR(*builder);
+    return result == CheckpointHIRResult::kNoPairs ||
+           result ==
+               CheckpointHIRResult::kStructuralPairRequiresFullProducerProof;
+  }
+};
+}  // namespace
+
+bool AddDormantCheckpointPasses(compiler::Compiler& compiler,
+                                const backend::MachineInfo* machine_info) {
+  if (!machine_info) {
+    return false;
+  }
+  // This recipe is never selected by Translate. It establishes HIR structure,
+  // not modeled-state materialization, native descriptors or executable code.
+  compiler.AddPass(std::make_unique<CheckpointPairValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::ControlFlowAnalysisPass>());
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(
+      std::make_unique<passes::RegisterAllocationPass>(machine_info));
+  compiler.AddPass(std::make_unique<passes::ValidationPass>());
+  compiler.AddPass(std::make_unique<passes::FinalizationPass>());
+  compiler.AddPass(std::make_unique<CheckpointPairValidationPass>());
+  return true;
+}
+
+PPCTranslator::PPCTranslator(PPCFrontend* frontend)
+    : frontend_(frontend),
+      compilation_options_(frontend->compilation_options()) {
+  if (compilation_options_.profile != CompilationProfile::kOrdinary) {
+    return;
+  }
+
   Backend* backend = frontend->processor()->backend();
 
   scanner_.reset(new PPCScanner(frontend));
@@ -179,6 +311,13 @@ void PPCTranslator::DumpHIR(GuestFunction* function, PPCHIRBuilder* builder) {
 }
 bool PPCTranslator::Translate(GuestFunction* function,
                               uint32_t debug_info_flags) {
+  // Direct translator calls must not bypass the unsupported profile gate.
+  if (compilation_options_.profile != CompilationProfile::kOrdinary ||
+      (function->compiled_profile() != CompilationProfile::kUncompiled &&
+       function->compiled_profile() != compilation_options_.profile)) {
+    return false;
+  }
+
   SCOPE_profile_cpu_f("cpu");
   HirBuilderScope hir_build_scope{builder_.get()};
   // Reset() all caching when we leave.
@@ -186,6 +325,23 @@ bool PPCTranslator::Translate(GuestFunction* function,
   xe::make_reset_scope(compiler_);
   xe::make_reset_scope(assembler_);
   xe::make_reset_scope(&string_buffer_);
+
+  bool selected_source = false;
+  if (cvars::private_delay_guest_source_trace &&
+      function->address() == private_delay_guest_source::kSelectedFunction) {
+    bool unclaimed = false;
+    selected_source = guest_source_attempted.compare_exchange_strong(
+        unclaimed, true, std::memory_order_acq_rel);
+    if (selected_source &&
+        ((debug_info_flags & DebugInfoFlags::kDebugInfoDisasmSource) ||
+         cvars::disassemble_functions)) {
+      XELOGI(
+          "XGUESTWORDS001 unavailable reason=global_disassembly_conflict "
+          "function={:08X}",
+          function->address());
+      selected_source = false;
+    }
+  }
 
   // NOTE: we only want to do this when required, as it's expensive to build.
   if (cvars::disassemble_functions) {
@@ -210,6 +366,10 @@ bool PPCTranslator::Translate(GuestFunction* function,
 
   // Scan the function to find its extents and gather debug data.
   if (!scanner_->Scan(function, debug_info.get())) {
+    if (selected_source) {
+      XELOGI("XGUESTWORDS001 unavailable reason=scan_failed function={:08X}",
+             function->address());
+    }
     return false;
   }
 
@@ -246,7 +406,11 @@ bool PPCTranslator::Translate(GuestFunction* function,
   if (debug_info) {
     emit_flags |= PPCHIRBuilder::EMIT_DEBUG_COMMENTS;
   }
-  if (!builder_->Emit(function, emit_flags)) {
+  const bool emitted = selected_source
+                           ? EmitSelectedGuestSource(builder_.get(), function,
+                                                     emit_flags, &debug_info)
+                           : builder_->Emit(function, emit_flags);
+  if (!emitted) {
     return false;
   }
 
@@ -277,9 +441,21 @@ bool PPCTranslator::Translate(GuestFunction* function,
     return false;
   }
 
+  CompilationProfile expected = CompilationProfile::kUncompiled;
+  if (!function->compiled_profile_.compare_exchange_strong(
+          expected, compilation_options_.profile, std::memory_order_release,
+          std::memory_order_relaxed) &&
+      expected != compilation_options_.profile) {
+    return false;
+  }
+
   return true;
 }
-void PPCTranslator::Reset() { builder_->ResetPools(); }
+void PPCTranslator::Reset() {
+  if (builder_) {
+    builder_->ResetPools();
+  }
+}
 void PPCTranslator::DumpSource(GuestFunction* function,
                                StringBuffer* string_buffer) {
   Memory* memory = frontend_->memory();

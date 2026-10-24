@@ -1236,6 +1236,36 @@ void HIRBuilder::ContextBarrier() {
   AppendInstr(OPCODE_CONTEXT_BARRIER_info, 0);
 }
 
+Instr* HIRBuilder::PPCCheckpointRequest(uint64_t pair_id, uint32_t guest_pc,
+                                        uint32_t raw_instruction,
+                                        Value* old_base) {
+  assert_true(old_base->type == INT64_TYPE);
+  Instr* i = AppendInstr(OPCODE_PPC_CHECKPOINT_REQUEST_info, 0);
+  i->src1.offset = pair_id;
+  i->src2.offset = (uint64_t{guest_pc} << 32) | raw_instruction;
+  i->set_src3(old_base);
+  return i;
+}
+
+Value* HIRBuilder::PPCCheckpointLwz(uint64_t pair_id, Value* ea) {
+  assert_true(ea->type == INT32_TYPE);
+  Instr* i =
+      AppendInstr(OPCODE_PPC_CHECKPOINT_LWZ_info, 0, AllocValue(INT32_TYPE));
+  i->set_src1(ea);
+  i->src2.offset = pair_id;
+  i->src3.value = nullptr;
+  return i->dest;
+}
+
+void HIRBuilder::PPCCheckpointStw(uint64_t pair_id, Value* ea,
+                                  Value* old_source) {
+  assert_true(ea->type == INT32_TYPE && old_source->type == INT32_TYPE);
+  Instr* i = AppendInstr(OPCODE_PPC_CHECKPOINT_STW_info, 0);
+  i->src1.offset = pair_id;
+  i->set_src2(ea);
+  i->set_src3(old_source);
+}
+
 Value* HIRBuilder::LoadMmio(cpu::MMIORange* mmio_range, uint32_t address,
                             TypeName type) {
   Instr* i = AppendInstr(OPCODE_LOAD_MMIO_info, 0, AllocValue(type));

@@ -9,6 +9,7 @@
 
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/kernel/xam/xam_private.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
 #include "xenia/kernel/xnotifylistener.h"
@@ -55,11 +56,15 @@ DECLARE_XAM_EXPORT1(XamNotifyCreateListenerInternal, kNone, kImplemented);
 
 dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
                                     lpdword_t id_ptr, lpdword_t param_ptr) {
+  auto observation = poll_counters::Begin(poll_counters::Api::kNotify);
+  observation.StartElapsed();
   if (param_ptr) {
     *param_ptr = 0;
   }
 
   if (!id_ptr) {
+    observation.EndElapsed();
+    observation.FinishNotify(poll_counters::Notify::kInvalidOutput, match_id);
     return 0;
   }
   *id_ptr = 0;
@@ -68,19 +73,24 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
   auto listener =
       kernel_state()->object_table()->LookupObject<XNotifyListener>(handle);
   if (!listener) {
+    observation.EndElapsed();
+    observation.FinishNotify(poll_counters::Notify::kInvalidHandle, match_id);
     return 0;
   }
 
   bool dequeued = false;
   uint32_t id = 0;
   uint32_t param = 0;
+  XNotifyListener::QueueObservation queue;
   if (match_id) {
     // Asking for a specific notification
     id = match_id;
-    dequeued = listener->DequeueNotification(match_id, &param);
+    dequeued = listener->DequeueNotification(match_id, &param,
+                                             observation ? &queue : nullptr);
   } else {
     // Just get next.
-    dequeued = listener->DequeueNotification(&id, &param);
+    dequeued = listener->DequeueNotification(&id, &param,
+                                             observation ? &queue : nullptr);
   }
 
   *id_ptr = dequeued ? id : 0;
@@ -90,6 +100,14 @@ dword_result_t XNotifyGetNext_entry(dword_t handle, dword_t match_id,
   if (param_ptr) {
     *param_ptr = dequeued ? param : 0;
   }
+  observation.EndElapsed();
+  const auto outcome =
+      match_id ? (dequeued       ? poll_counters::Notify::kFilteredDequeue
+                  : queue.before ? poll_counters::Notify::kFilteredPending
+                                 : poll_counters::Notify::kFilteredEmpty)
+               : (dequeued ? poll_counters::Notify::kAnyDequeue
+                           : poll_counters::Notify::kAnyEmpty);
+  observation.FinishNotify(outcome, match_id, queue.before, queue.after);
   return dequeued ? 1 : 0;
 }
 DECLARE_XAM_EXPORT2(XNotifyGetNext, kNone, kImplemented, kHighFrequency);

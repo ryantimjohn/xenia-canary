@@ -39,10 +39,17 @@ class PPCHIRBuilder : public hir::HIRBuilder {
     EMIT_DEBUG_COMMENTS = 1 << 0,
   };
   bool Emit(GuestFunction* function, uint32_t flags);
+  // Private compiler observation. The ordinary two-argument ABI is retained;
+  // a null observer follows the same emission path without copying source.
+  using SourceWordObserver = void (*)(void*, uint32_t, uint32_t);
+  bool Emit(GuestFunction* function, uint32_t flags,
+            SourceWordObserver observer, void* observer_context);
 
   GuestFunction* function() const { return function_; }
   Function* LookupFunction(uint32_t address);
   Label* LookupLabel(uint32_t address);
+  void MaybeEmitScalarAccessFirstChance(uint32_t guest_pc,
+                                        uint32_t raw_instruction);
 
   Value* LoadLR();
   void StoreLR(Value* value);

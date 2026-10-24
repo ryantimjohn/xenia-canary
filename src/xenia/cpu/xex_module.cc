@@ -9,6 +9,8 @@
 
 #include "xenia/cpu/xex_module.h"
 
+#include <cstring>
+
 #include "third_party/fmt/include/fmt/format.h"
 
 #include "xenia/base/byte_order.h"
@@ -146,6 +148,149 @@ const PESection* XexModule::GetPESection(const char* name) {
     }
   }
   return nullptr;
+}
+
+ExceptionMetadataSnapshot XexModule::GetExceptionMetadataSnapshot() const {
+  auto global_lock = global_critical_region::AcquireDirect();
+  ExceptionMetadataSnapshot failure;
+  failure.image_base = base_address_;
+  failure.status = ExceptionMetadataStatus::kInvalid;
+  for (const auto& section : pe_sections_) {
+    failure.sections.push_back(
+        {section.name, section.address,
+         uint64_t(section.address) + section.size,
+         (section.flags & kXEPESectionMemoryRead) != 0,
+         (section.flags & kXEPESectionMemoryExecute) != 0, section.flags});
+  }
+  for (const auto& library : import_libs_) {
+    for (const auto& import : library.imports) {
+      failure.imports.push_back(
+          {library.name, import.ordinal, import.thunk_address});
+    }
+  }
+  auto fail = [&failure](const char* diagnostic) {
+    failure.diagnostics.emplace_back(diagnostic);
+    for (auto& section : failure.sections) {
+      section.available = false;
+      section.availability_diagnostic = diagnostic;
+    }
+    return failure;
+  };
+  if (!loaded_ || !base_address_) {
+    failure.status = ExceptionMetadataStatus::kMissing;
+    return fail("Module is not loaded");
+  }
+  auto* heap = memory()->LookupHeap(base_address_);
+  if (!heap || base_address_ < heap->heap_base() ||
+      uint64_t(base_address_) - heap->heap_base() >= heap->heap_size()) {
+    return fail("Module base is outside its heap");
+  }
+  HeapAllocationInfo allocation{};
+  if (!heap->QueryRegionInfo(base_address_, &allocation) ||
+      allocation.allocation_base != base_address_ ||
+      !(allocation.state & kMemoryAllocationCommit) ||
+      !allocation.allocation_size) {
+    return fail("Module allocation is unavailable");
+  }
+  // Descriptor pointers come from the owned XEX header, not guest memory.
+  // Bound the array before reading and sum page sizes in 64 bits rather than
+  // relying on image_size()'s existing 32-bit arithmetic.
+  const uintptr_t header_begin =
+      reinterpret_cast<uintptr_t>(xex_header_mem_.data());
+  const uintptr_t descriptors =
+      reinterpret_cast<uintptr_t>(security_info_.page_descriptors);
+  const uint64_t descriptor_bytes =
+      uint64_t(security_info_.page_descriptor_count) *
+      sizeof(xex2_page_descriptor);
+  if (!security_info_.page_descriptor_count || descriptors < header_begin ||
+      descriptors - header_begin > xex_header_mem_.size() ||
+      descriptor_bytes >
+          xex_header_mem_.size() - (descriptors - header_begin)) {
+    return fail("Page descriptors are outside the owned XEX header");
+  }
+  uint64_t image_size = 0;
+  for (uint32_t i = 0; i < security_info_.page_descriptor_count; ++i) {
+    xex2_page_descriptor descriptor;
+    std::memcpy(&descriptor.value,
+                reinterpret_cast<const uint8_t*>(descriptors) +
+                    size_t(i) * sizeof(descriptor),
+                sizeof(descriptor.value));
+    descriptor.value = xe::byte_swap(descriptor.value);
+    image_size += uint64_t(descriptor.page_count) * heap->page_size();
+    if (image_size > allocation.allocation_size) {
+      return fail("Page descriptor extent exceeds the module allocation");
+    }
+  }
+  const uint64_t image_end = uint64_t(base_address_) + image_size;
+  if (!image_size || image_end > (uint64_t{1} << 32)) {
+    return fail("Invalid loaded module extent");
+  }
+  return ReadExceptionMetadataSnapshot(memory(), base_address_, image_end,
+                                       failure.sections, failure.imports);
+}
+
+ExceptionMetadataSnapshot XexModule::ReadExceptionMetadataSnapshot(
+    Memory* memory, uint32_t image_base, uint64_t image_end,
+    std::span<const ExceptionMetadataSection> sections,
+    std::span<const ExceptionMetadataImport> imports) {
+  auto global_lock = global_critical_region::AcquireDirect();
+  ExceptionMetadataSnapshot failure;
+  failure.image_base = image_base;
+  failure.image_end = image_end;
+  failure.sections.assign(sections.begin(), sections.end());
+  failure.imports.assign(imports.begin(), imports.end());
+  failure.status = ExceptionMetadataStatus::kInvalid;
+  auto* heap = memory ? memory->LookupHeap(image_base) : nullptr;
+  HeapAllocationInfo allocation{};
+  if (!heap || image_base < heap->heap_base() ||
+      uint64_t(image_base) - heap->heap_base() >= heap->heap_size() ||
+      !heap->QueryRegionInfo(image_base, &allocation) ||
+      allocation.allocation_base != image_base ||
+      !(allocation.state & kMemoryAllocationCommit) ||
+      image_end <= image_base || image_end > (uint64_t{1} << 32) ||
+      image_end - image_base > allocation.allocation_size) {
+    failure.diagnostics.emplace_back("Invalid loaded allocation for metadata");
+    for (auto& section : failure.sections) {
+      section.available = false;
+      section.availability_diagnostic =
+          "Invalid loaded allocation for metadata";
+    }
+    return failure;
+  }
+  // Keep the declared range, without clipping or assuming why it is
+  // unavailable. Some supplied images declare unrelated sections beyond their
+  // allocation.
+  for (auto& section : failure.sections) {
+    if (section.begin < image_base || section.end <= section.begin ||
+        section.end > image_end) {
+      section.available = false;
+      section.availability_diagnostic =
+          "Declared extent is outside loaded image";
+    } else if (heap->QueryRangeAccess(section.begin,
+                                      uint32_t(section.end - 1)) ==
+               xe::memory::PageAccess::kNoAccess) {
+      section.available = false;
+      section.availability_diagnostic =
+          "Declared range is not committed/readable";
+    }
+  }
+  ExceptionMetadataInput input;
+  input.image_base = image_base;
+  input.image_end = image_end;
+  input.sections = failure.sections;
+  input.imports = failure.imports;
+  input.read = [memory, heap](uint32_t address, std::span<uint8_t> output) {
+    const uint64_t end = uint64_t(address) + output.size();
+    if (output.empty() || end > (uint64_t{1} << 32) ||
+        heap->QueryRangeAccess(address, uint32_t(end - 1)) ==
+            xe::memory::PageAccess::kNoAccess) {
+      return false;
+    }
+    std::memcpy(output.data(), memory->TranslateVirtual(address),
+                output.size());
+    return true;
+  };
+  return ParseExceptionMetadata(input);
 }
 
 uint32_t XexModule::GetProcAddress(uint16_t ordinal) const {

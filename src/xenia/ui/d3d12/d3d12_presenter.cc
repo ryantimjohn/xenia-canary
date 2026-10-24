@@ -16,6 +16,7 @@
 
 #include "xenia/base/assert.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/frame_timing.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/math.h"
 #include "xenia/ui/d3d12/d3d12_provider.h"
@@ -1083,10 +1084,12 @@ Presenter::PaintResult D3D12Presenter::PaintAndPresentImpl(
   // fullscreen is ever used in, the allow tearing flag must not be passed in
   // fullscreen, but DXGI fullscreen is largely unneeded with the flip
   // presentation model used in Direct3D 12).
+  const uint64_t present_begin_qpc = frame_timing::BeginD3D12Present();
   HRESULT present_result = paint_context_.swap_chain->Present(
       0, DXGI_PRESENT_RESTART | (paint_context_.swap_chain_allows_tearing
                                      ? DXGI_PRESENT_ALLOW_TEARING
                                      : 0));
+  frame_timing::EndD3D12Present(present_begin_qpc, uint32_t(present_result));
   // Even if presentation has failed, work might have been enqueued anyway
   // internally before the failure according to Jesse Natalie from the DirectX
   // Discord server.

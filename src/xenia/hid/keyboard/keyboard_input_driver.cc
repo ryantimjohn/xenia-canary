@@ -229,11 +229,16 @@ KeyboardInputDriver::KeyboardInputDriver(xe::ui::Window* window,
 #include "keyboard_binding_table.inc"
 #undef XE_HID_KEYBOARD_BINDING
 
-  window->AddInputListener(&window_input_listener_, window_z_order);
+  // A windowless driver can consume supplied events without registering UI.
+  if (window) {
+    window->AddInputListener(&window_input_listener_, window_z_order);
+  }
 }
 
 KeyboardInputDriver::~KeyboardInputDriver() {
-  window()->RemoveInputListener(&window_input_listener_);
+  if (window()) {
+    window()->RemoveInputListener(&window_input_listener_);
+  }
 }
 
 X_STATUS KeyboardInputDriver::Setup() { return X_STATUS_SUCCESS; }
@@ -282,7 +287,7 @@ X_RESULT KeyboardInputDriver::GetState(uint32_t user_index,
   int16_t thumb_rx = 0;
   int16_t thumb_ry = 0;
 
-  if (window()->HasFocus()) {
+  if (window() && window()->HasFocus()) {
     for (const KeyBinding& b : key_bindings_) {
       if (b.is_pressed) {
         switch (b.output_key) {
@@ -419,18 +424,7 @@ X_RESULT KeyboardInputDriver::GetKeystroke(uint32_t user_index, uint32_t flags,
   uint8_t hid_code = 0;
 
   if (!IsPassthroughEnabled()) {
-    if (IsKeyboardForUserEnabled(user_index)) {
-      for (const KeyBinding& key_binding : key_bindings_) {
-        if (key_binding.input_key != evt.virtual_key) {
-          continue;
-        }
-
-        if (key_binding.is_pressed) {
-          xinput_virtual_key = key_binding.output_key;
-          break;
-        }
-      }
-    }
+    xinput_virtual_key = evt.controller_key;
   } else {
     xinput_virtual_key = evt.virtual_key;
 
@@ -514,33 +508,34 @@ void KeyboardInputDriver::OnKey(ui::KeyEvent& e, bool is_down) {
   key.capital_pressed = e.is_capital_pressed();
 
   auto global_lock = global_critical_region_.Acquire();
-  key_events_.push_back(key);
-
-  bool uppercase = key.capital_pressed || key.shift_pressed;
-
-  // Update key binding state for the correct input case, otherwise we will
-  // trigger both inputs for uppercase and lowercase causing input to be
-  // registered twice.
+  KeyBinding* selected_binding = nullptr;
+  // Releases and repeats belong to the binding selected by the original press,
+  // even if Shift or Caps Lock changed while the physical key was held.
   for (auto& key_binding : key_bindings_) {
-    if (key_binding.input_key != key.virtual_key) {
-      continue;
-    }
-
-    if (key_binding.uppercase && uppercase) {
-      key_binding.is_pressed = is_down;
-      break;
-    }
-
-    if (key_binding.lowercase && !uppercase) {
-      key_binding.is_pressed = is_down;
-      break;
-    }
-
-    if (!key_binding.uppercase && !key_binding.lowercase) {
-      key_binding.is_pressed = is_down;
+    if (key_binding.input_key == key.virtual_key && key_binding.is_pressed) {
+      selected_binding = &key_binding;
       break;
     }
   }
+  if (!selected_binding && is_down) {
+    const bool uppercase = key.capital_pressed || key.shift_pressed;
+    for (auto& key_binding : key_bindings_) {
+      if (key_binding.input_key != key.virtual_key) {
+        continue;
+      }
+      if ((key_binding.uppercase && uppercase) ||
+          (key_binding.lowercase && !uppercase) ||
+          (!key_binding.uppercase && !key_binding.lowercase)) {
+        selected_binding = &key_binding;
+        break;
+      }
+    }
+  }
+  if (selected_binding) {
+    key.controller_key = selected_binding->output_key;
+    selected_binding->is_pressed = is_down;
+  }
+  key_events_.push_back(key);
 }
 
 void KeyboardInputDriver::OnChar(ui::KeyEvent& e) {

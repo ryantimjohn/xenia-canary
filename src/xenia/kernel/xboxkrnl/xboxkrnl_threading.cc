@@ -8,19 +8,38 @@
  */
 
 #include "xenia/kernel/xboxkrnl/xboxkrnl_threading.h"
+
+#include <cstring>
+
 #include "xenia/base/atomic.h"
 #include "xenia/base/clock.h"
+#include "xenia/base/cvar.h"
+#include "xenia/base/logging.h"
 #include "xenia/base/platform.h"
+#include "xenia/base/threading.h"
 #include "xenia/cpu/processor.h"
+#include "xenia/kernel/util/guest_range.h"
+#include "xenia/kernel/util/native_object_failure.h"
 #include "xenia/kernel/util/shim_utils.h"
+#include "xenia/kernel/xam/poll_counters.h"
 #include "xenia/kernel/xboxkrnl/xboxkrnl_private.h"
 #include "xenia/kernel/xsemaphore.h"
 #include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
+DEFINE_bool(
+    ke_wait_failure_trace, false,
+    "Windows private fork-only first 16 KeWaitMultiple resolver failures. "
+    "Bounded early logs may perturb timing; not a performance probe.",
+    "Kernel");
+
 namespace xe {
 namespace kernel {
 namespace xboxkrnl {
+
+namespace {
+util::WaitFailureLogBudget wait_failure_log_budget;
+}  // namespace
 
 // r13 + 0x100: pointer to thread local state
 // Thread local state:
@@ -832,6 +851,59 @@ dword_result_t NtReleaseSemaphore_entry(dword_t sem_handle,
 DECLARE_XBOXKRNL_EXPORT2(NtReleaseSemaphore, kThreading, kImplemented,
                          kHighFrequency);
 
+void KeInitializeMutant_entry(pointer_t<X_KMUTANT> mutant_ptr,
+                              dword_t initial_owner) {
+  // Observed in title 373307D9: 0x8281B2F8 initializes this 0x20-byte object
+  // unowned; 0x82816C3C waits indefinitely on it, and 0x82816CA8 releases it.
+  // Recursive state follows the public NT mutex model (KeReleaseMutex).
+  if (!util::IsGuestRangeWritable(kernel_memory(), mutant_ptr.guest_address(),
+                                  sizeof(X_KMUTANT))) {
+    xe::FatalError("KeInitializeMutant: storage is not writable");
+  }
+  auto* current = XThread::GetCurrentThread();
+  auto* native =
+      kernel_memory()->TranslateVirtual<X_KMUTANT*>(mutant_ptr.guest_address());
+  if (!InitializeNativeMutant(native, !!initial_owner,
+                              current->guest_object())) {
+    xe::FatalError("KeInitializeMutant: native storage is already wrapped");
+  }
+  // Eager wrapping keeps initially owned host mutexes on their owner thread.
+  auto mutant =
+      XObject::GetNativeObject<XMutant>(kernel_state(), native, MutantObject);
+  assert_not_null(mutant);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeInitializeMutant, kThreading, kImplemented);
+
+dword_result_t KeReleaseMutant_entry(pointer_t<X_KMUTANT> mutant_ptr,
+                                     dword_t increment, dword_t abandon,
+                                     dword_t wait) {
+  if (!util::IsGuestRangeWritable(kernel_memory(), mutant_ptr.guest_address(),
+                                  sizeof(X_KMUTANT))) {
+    xe::FatalError("KeReleaseMutant: storage is not writable");
+  }
+  auto* native =
+      kernel_memory()->TranslateVirtual<X_KMUTANT*>(mutant_ptr.guest_address());
+  auto object =
+      XObject::GetNativeObject<XObject>(kernel_state(), native, MutantObject);
+  // An existing registry marker can name another type or a copied object.
+  // GetNativeObject<T> does not validate its cast, so check before using it.
+  if (!object || object->type() != XMutant::kObjectType ||
+      object->guest_object() != mutant_ptr.guest_address()) {
+    xe::FatalError("KeReleaseMutant: invalid native mutant mapping");
+  }
+  auto* mutant = static_cast<XMutant*>(object.get());
+  int32_t previous_state = 0;
+  const X_STATUS status =
+      mutant->ReleaseMutant(increment, !!abandon, !!wait, &previous_state);
+  if (status != X_STATUS_SUCCESS) {
+    // The Ke interface raises on invalid releases; guest exception delivery
+    // is not implemented here, so fail visibly rather than return success.
+    xe::FatalError(fmt::format("KeReleaseMutant failed: {:08X}", status));
+  }
+  return static_cast<uint32_t>(previous_state);
+}
+DECLARE_XBOXKRNL_EXPORT1(KeReleaseMutant, kThreading, kImplemented);
+
 dword_result_t NtCreateMutant_entry(
     lpdword_t handle_out, pointer_t<X_OBJECT_ATTRIBUTES> obj_attributes,
     dword_t initial_owner) {
@@ -868,22 +940,23 @@ DECLARE_XBOXKRNL_EXPORT1(NtCreateMutant, kThreading, kImplemented);
 
 dword_result_t NtReleaseMutant_entry(dword_t mutant_handle,
                                      lpdword_t previous_count) {
-  // This doesn't seem to be supported.
-  // int32_t previous_count_ptr = SHIM_GET_ARG_32(2);
-
-  // Whatever arg 1 is all games seem to set it to 0, so whether it's
-  // abandon or wait we just say false. Which is good, cause they are
-  // both ignored.
-  uint32_t priority_increment = 0;
-  bool abandon = false;
-  bool wait = false;
-
+  if (previous_count &&
+      !util::IsGuestRangeWritable(
+          kernel_memory(), previous_count.guest_address(), sizeof(uint32_t))) {
+    return X_STATUS_ACCESS_VIOLATION;
+  }
   X_STATUS result = X_STATUS_SUCCESS;
 
   auto mutant =
       kernel_state()->object_table()->LookupObject<XMutant>(mutant_handle);
   if (mutant) {
-    mutant->ReleaseMutant(priority_increment, abandon, wait);
+    int32_t previous_state = 0;
+    result = mutant->ReleaseMutant(0, false, false, &previous_state);
+    if (result == X_STATUS_SUCCESS && previous_count) {
+      xe::store_and_swap<uint32_t>(
+          kernel_memory()->TranslateVirtual(previous_count.guest_address()),
+          static_cast<uint32_t>(previous_state));
+    }
   } else {
     result = X_STATUS_INVALID_HANDLE;
   }
@@ -1047,6 +1120,13 @@ dword_result_t KeWaitForMultipleObjects_entry(
     dword_t count, lpdword_t objects_ptr, dword_t wait_type,
     dword_t wait_reason, dword_t processor_mode, dword_t alertable,
     lpqword_t timeout_ptr, pointer_t<X_KWAIT_BLOCK> wait_block_array_ptr) {
+  auto observation = xam::poll_counters::Begin(xam::poll_counters::Api::kWait);
+#if XE_PLATFORM_WIN32
+  const bool trace_failure =
+      cvars::ke_wait_failure_trace && wait_failure_log_budget.HasCapacity();
+#else
+  const bool trace_failure = false;
+#endif
   assert_true(wait_type <= X_KWAIT_REASON::WaitAny);
 
   assert_true(count <= 64);
@@ -1054,10 +1134,53 @@ dword_result_t KeWaitForMultipleObjects_entry(
   {
     auto crit = global_critical_region::AcquireDirect();
     for (uint32_t n = 0; n < count; n++) {
-      auto object_ptr = kernel_memory()->TranslateVirtual(objects_ptr[n]);
+      util::NativeObjectFailure failure;
+      // Reuse the existing one array-element read; do not inspect other
+      // entries.
+      const uint32_t object_va = objects_ptr[n];
+      auto object_ptr = kernel_memory()->TranslateVirtual(object_va);
       auto object_ref = XObject::GetNativeObject<XObject>(
-          kernel_state(), object_ptr, UndefinedObject, true);
+          kernel_state(), object_ptr, UndefinedObject, true,
+          trace_failure ? &failure : nullptr);
       if (!object_ref) {
+        observation.FinishWait(count, wait_type, bool(alertable), false, false,
+                               0, false, 0, X_STATUS_INVALID_PARAMETER);
+        const uint32_t sequence =
+            trace_failure ? wait_failure_log_budget.TryClaim() : 0;
+        if (sequence) {
+          const uint64_t qpc = xam::poll_counters::RawQpc();
+          auto* thread = XThread::GetCurrentThread();
+          const uint32_t guest_id = thread ? thread->thread_id() : 0;
+          const uint32_t native_id = xe::threading::current_thread_system_id();
+          const auto* context = thread && thread->thread_state()
+                                    ? thread->thread_state()->context()
+                                    : nullptr;
+          const uint64_t lr = context ? context->lr : 0;
+          const char* reason =
+              failure.reason ==
+                      util::NativeObjectFailure::Reason::kStashedLookupMiss
+                  ? "stashed_lookup_miss"
+                  : "unsupported_first_use_type";
+          // The failed decision is now scalar data. Do not hold this critical
+          // region across logger allocation/locking. Retained prior objects
+          // remain alive until the unchanged function-scope array unwinds.
+          crit.unlock();
+          XELOGW(
+              "KeWait failure trace: seq={} limit=16 reason={} "
+              "guest_thread={} native_tid={} caller_lr_read={} "
+              "caller_lr={:016X} qpc={} "
+              "array={:08X} count={} wait_type={} failed_index={} "
+              "object={:08X} header_type_read={} header_type={:02X} "
+              "effective_type={:02X} signature_match={} "
+              "signature_word={:08X} stashed_handle_read={} "
+              "stashed_handle={:08X}",
+              sequence, reason, guest_id, native_id, context != nullptr, lr,
+              qpc, objects_ptr.guest_address(), uint32_t(count),
+              uint32_t(wait_type), n, object_va, failure.header_type_read,
+              failure.header_type, failure.effective_type,
+              failure.signature_word == kXObjSignature, failure.signature_word,
+              failure.stashed_handle_read, failure.stashed_handle);
+        }
         return X_STATUS_INVALID_PARAMETER;
       }
 
@@ -1065,9 +1188,16 @@ dword_result_t KeWaitForMultipleObjects_entry(
     }
   }
   uint64_t timeout = timeout_ptr ? static_cast<uint64_t>(*timeout_ptr) : 0u;
+  uint32_t observed_host_ms = 0;
+  observation.StartElapsed();
   X_STATUS result = XObject::WaitMultiple(
       uint32_t(count), reinterpret_cast<XObject**>(&objects[0]), wait_type,
-      wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr);
+      wait_reason, processor_mode, alertable, timeout_ptr ? &timeout : nullptr,
+      observation ? &observed_host_ms : nullptr);
+  observation.EndElapsed();
+  observation.FinishWait(count, wait_type, bool(alertable), true,
+                         bool(timeout_ptr), timeout, true, observed_host_ms,
+                         result);
   if (alertable) {
     if (result == X_STATUS_USER_APC) {
       xeProcessUserApcs(nullptr);
@@ -1933,16 +2063,31 @@ void xeKeInitializeTimerEx(X_KTIMER* timer, uint32_t type, uint32_t proctype,
                            PPCContext* context) {
   xenia_assert(proctype < 3);
   xenia_assert(type == 0 || type == 1);
-  // other fields are unmodified, they must carry through multiple calls of
-  // initialize
-  timer->header.process_type = proctype;
-  timer->header.inserted = 0;
-  timer->header.type =
-      type ? TimerSynchronizationObject : TimerNotificationObject;
-  timer->header.signal_state = 0;
-  util::XeInitializeListHead(&timer->header.wait_list, context);
-  timer->due_time = 0;
-  timer->period = 0;
+  std::vector<std::shared_ptr<NativeTimerState>> retired;
+  auto initialize = [&] {
+    // Other fields carry through multiple calls of initialize.
+    timer->header.process_type = proctype;
+    timer->header.inserted = 0;
+    timer->header.type =
+        type ? TimerSynchronizationObject : TimerNotificationObject;
+    timer->header.signal_state = 0;
+    util::XeInitializeListHead(&timer->header.wait_list, context);
+    timer->due_time = 0;
+    timer->period = 0;
+  };
+  if (NativeTimerCandidateEnabled()) {
+    {
+      auto lock = global_critical_region::AcquireDirect();
+      retired = XTimer::RetireNativeAt(
+          kernel_state(), kernel_state()->memory()->HostToGuestVirtual(timer));
+      initialize();
+    }
+    for (auto& state : retired) {
+      state->Drain();
+    }
+  } else {
+    initialize();
+  }
 }
 
 void KeInitializeTimerEx_entry(pointer_t<X_KTIMER> timer, dword_t type,
@@ -1951,8 +2096,68 @@ void KeInitializeTimerEx_entry(pointer_t<X_KTIMER> timer, dword_t type,
 }
 DECLARE_XBOXKRNL_EXPORT1(KeInitializeTimerEx, kThreading, kImplemented);
 
+namespace {
+object_ref<XTimer> ResolveCandidateTimer(PPCContext* context) {
+  auto lock = global_critical_region::AcquireDirect();
+  auto* kernel = kernel_state();
+  const uint32_t address = static_cast<uint32_t>(context->r[3]);
+  if (kernel->native_timers_closing() || !address ||
+      address > UINT32_MAX - sizeof(X_KTIMER) + 1 ||
+      !util::IsGuestRangeWritable(kernel->memory(), address,
+                                  sizeof(X_KTIMER))) {
+    return nullptr;
+  }
+  auto* timer = kernel->memory()->TranslateVirtual<X_KTIMER*>(address);
+  if (timer->header.type != TimerNotificationObject &&
+      timer->header.type != TimerSynchronizationObject) {
+    return nullptr;
+  }
+  return XObject::GetNativeObject<XTimer>(kernel, timer, UndefinedObject, true);
+}
+
+void PrivateKeSetTimer(PPCContext* context) {
+  // Private compiler/game contract inference: r4 is the complete signed
+  // LARGE_INTEGER and r5 the pointer. Not independent Xbox export ABI proof.
+  int64_t due;
+  std::memcpy(&due, &context->r[4], sizeof(due));
+  NativeTimerState::Clock::time_point checked;
+  if (context->r[5] || Clock::guest_time_scalar() != 1.0 ||
+      !NativeTimerState::RelativeDeadline(due, NativeTimerState::Clock::now(),
+                                          &checked)) {
+    xe::FatalError("Private KeSetTimer candidate: unsupported due/DPC/scalar");
+  }
+  auto timer = ResolveCandidateTimer(context);
+  bool previous = false;
+  if (!timer || !timer->SetNativeTimer(due, &previous)) {
+    xe::FatalError(
+        "Private KeSetTimer candidate: unavailable timer association");
+  }
+  context->r[3] = previous ? 1 : 0;
+}
+
+void PrivateKeCancelTimer(PPCContext* context) {
+  auto timer = ResolveCandidateTimer(context);
+  bool previous = false;
+  if (!timer || !timer->CancelNativeTimer(&previous)) {
+    xe::FatalError(
+        "Private KeCancelTimer candidate: unavailable timer association");
+  }
+  context->r[3] = previous ? 1 : 0;
+}
+}  // namespace
+
+void RegisterThreadingExports(xe::cpu::ExportResolver* export_resolver,
+                              KernelState* kernel) {
+  if (NativeTimerCandidateEnabled()) {
+    // Mutate existing entries, preserving the resolver's by-name pointer view.
+    // CLI/config parsing precedes Emulator::Setup and this registration.
+    export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeSetTimer,
+                                        &PrivateKeSetTimer);
+    export_resolver->SetFunctionMapping("xboxkrnl.exe", ordinals::KeCancelTimer,
+                                        &PrivateKeCancelTimer);
+  }
+}
+
 }  // namespace xboxkrnl
 }  // namespace kernel
 }  // namespace xe
-
-DECLARE_XBOXKRNL_EMPTY_REGISTER_EXPORTS(Threading);

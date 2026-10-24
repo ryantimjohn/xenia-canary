@@ -10,6 +10,7 @@
 #include "xenia/kernel/xam/nui_camera.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstring>
@@ -25,6 +26,8 @@
 #include "xenia/emulator.h"
 #include "xenia/kernel/kernel_state.h"
 #include "xenia/kernel/xam/nui_state.h"
+#include "xenia/kernel/xam/nui_tracking_observer.h"
+#include "xenia/kernel/xam/paired_capture.h"
 #include "xenia/nui/depth_frame.h"
 #include "xenia/nui/nui_depth_convert.h"
 #include "xenia/nui/nui_flags.h"
@@ -35,6 +38,58 @@ namespace kernel {
 namespace xam {
 
 namespace {
+
+// Process-wide, fixed telemetry budget. These are never reset by a stream
+// reconfiguration, so enabling observation cannot produce per-frame logs.
+std::atomic<bool> timing_trigger_logged{false};
+std::atomic<bool> timing_first_depth_logged{false};
+std::atomic<bool> timing_first_copy_logged{false};
+
+uint64_t TrackingNowUs() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now().time_since_epoch())
+          .count());
+}
+
+void LogTrackingStats(const NuiTrackingObserver::Snapshot& snapshot,
+                      const char* scope) {
+  const auto& s = snapshot.stats;
+  const uint64_t elapsed_ms = snapshot.end_us >= snapshot.start_us
+                                  ? (snapshot.end_us - snapshot.start_us) / 1000
+                                  : 0;
+  XELOGI(
+      "NUI tracking observer {}: row={} steady_us=[{},{}] elapsed_ms={} "
+      "sessions={} source={} seq=[{},{}] skipped={} "
+      "seq_resets={} no_buffer={} "
+      "invalid_buffer={} copied_stamped={} completion_called={} "
+      "callback_returned={} host_age_unknown={} host_age_max_ms={} "
+      "delivery_gap_max_ms={} hud={} slots=[{},{},{},{}] "
+      "joints=[{},{},{},{}] ids=[{},{},{}] tracked_set_changed={} "
+      "same_set_slot_reassigned={} guide=[{},{},{},{}] "
+      "timestamp=[{},{},{}] hud_lag_max_ms={} hud_lag_unknown={} "
+      "quality_nonzero={} nonfinite={} zero={}",
+      scope, snapshot.row_index, snapshot.start_us, snapshot.end_us, elapsed_ms,
+      s.sessions, s.source_frames, s.source_first, s.source_last,
+      s.source_skipped, s.source_resets, s.no_buffer, s.invalid_buffer,
+      s.copied_stamped, s.completion_called, s.callback_returned,
+      s.host_age_unknown, s.host_age_max_ms, s.delivery_gap_max_ms,
+      s.hud_frames, s.slot_states[0], s.slot_states[1], s.slot_states[2],
+      s.slot_states[3], s.joint_states[0], s.joint_states[1], s.joint_states[2],
+      s.joint_states[3], s.id_appeared, s.id_disappeared, s.id_replaced,
+      s.tracked_set_changed, s.same_set_slot_reassigned, s.guide_not_selected,
+      s.guide_selected_matched, s.guide_selected_unmatched,
+      s.guide_selected_ambiguous, s.timestamp_exact, s.timestamp_ambiguous,
+      s.timestamp_unmatched, s.hud_lag_max_ms, s.hud_lag_unknown,
+      s.quality_nonzero, s.nonfinite_vectors, s.zero_vectors);
+}
+
+void FlushTrackingRow(uint64_t now_us) {
+  auto row = GetNuiTrackingObserver().TakeRow(now_us);
+  if (row) {
+    LogTrackingStats(*row, "interval");
+  }
+}
 
 // Switch (read off the texture the runtime binds over the depth ring: format
 // word 0x1A22005A, whose endianness field is 1 = 8-in-16, so the GPU swaps
@@ -469,6 +524,11 @@ X_STATUS NuiCamera::HandleQueueBuffer(uint32_t request_ptr) {
     return X_STATUS_DEVICE_NOT_READY;
   }
 
+  const bool observe_timing = cvars::replay_timing_observe;
+  const bool log_first_depth =
+      observe_timing && is_depth &&
+      !timing_first_depth_logged.exchange(true, std::memory_order_relaxed);
+
   // This is where the title's stream begins: the camera has been configured,
   // the feed is running, and this is the first buffer the title has offered
   // for a frame to be written into, so the next frame the host publishes is
@@ -478,11 +538,30 @@ X_STATUS NuiCamera::HandleQueueBuffer(uint32_t request_ptr) {
   // A backend that replays a recording starts it over on this, so that the
   // recording's first frames are the title's first frames; a stop (code 2)
   // followed by a reconfiguration arms it again.
-  if (!stream_start_announced_.exchange(true, std::memory_order_acq_rel)) {
+  const bool announces_stream =
+      !stream_start_announced_.exchange(true, std::memory_order_acq_rel);
+  const bool log_trigger =
+      observe_timing && announces_stream &&
+      !timing_trigger_logged.exchange(true, std::memory_order_relaxed);
+  const uint64_t accepted_us =
+      (log_first_depth || log_trigger) ? TrackingNowUs() : 0;
+  if (announces_stream) {
     auto* system = nui_system();
     if (system) {
       system->OnGuestStreamStarted();
     }
+    if (auto* capture = paired_capture::Active()) {
+      paired_capture::Words words{};
+      words[0] = is_depth ? 1 : 2;
+      capture->RecordEvent(paired_capture::Kind::kStreamStart, 0, words);
+    }
+  }
+  if (log_trigger) {
+    XELOGI("Replay timing NUI first_stream_trigger host_us={} image={}",
+           accepted_us, is_depth ? "depth" : "colour");
+  }
+  if (log_first_depth) {
+    XELOGI("Replay timing NUI first_depth_accepted host_us={}", accepted_us);
   }
   return X_STATUS_PENDING;
 }
@@ -749,6 +828,9 @@ NuiCameraStats NuiCamera::GetStats() const {
 }
 
 void NuiCamera::FeedThreadMain() {
+  if (GetNuiTrackingObserver().enabled()) {
+    GetNuiTrackingObserver().SessionStarted(TrackingNowUs());
+  }
   uint64_t last_sequence = 0;
   const char* stop_reason = "the camera was shut down";
   while (feed_running_.load(std::memory_order_acquire)) {
@@ -764,6 +846,9 @@ void NuiCamera::FeedThreadMain() {
       break;
     }
     CompletePendingRequests();
+    if (GetNuiTrackingObserver().enabled()) {
+      FlushTrackingRow(TrackingNowUs());
+    }
     if (!have_frame) {
       if (std::chrono::steady_clock::now() - wait_started <
           kFrameWaitTimeout / 2) {
@@ -779,14 +864,35 @@ void NuiCamera::FeedThreadMain() {
     if (!frame || frame->sequence <= last_sequence) {
       continue;
     }
+    if (auto* capture = paired_capture::Active()) {
+      paired_capture::Words words{};
+      words[0] = uint32_t(frame->sequence);
+      words[1] = uint32_t(frame->sequence >> 32);
+      words[2] = uint32_t(frame->timestamp_us);
+      words[3] = uint32_t(frame->timestamp_us >> 32);
+      capture->RecordEvent(paired_capture::Kind::kDepthSource, 0, words);
+    }
+    if (GetNuiTrackingObserver().enabled()) {
+      GetNuiTrackingObserver().SourceFrame(frame->sequence, TrackingNowUs());
+    }
     last_sequence = frame->sequence;
     FeedDepthFrame(*frame);
     FeedColourFrame();
+    if (GetNuiTrackingObserver().enabled()) {
+      FlushTrackingRow(TrackingNowUs());
+    }
   }
   // Whatever brought the loop here, the feed is over: say so where a stage
   // diagnosis will see it, and stop claiming to be streaming. Anything queued
   // from here on is refused rather than left for a thread that is gone.
   feed_running_.store(false, std::memory_order_release);
+  if (GetNuiTrackingObserver().enabled()) {
+    FlushTrackingRow(TrackingNowUs());
+    auto first_end = GetNuiTrackingObserver().TakeFirstFeedEnd(TrackingNowUs());
+    if (first_end) {
+      LogTrackingStats(*first_end, "cumulative through first feed end");
+    }
+  }
   XELOGW(
       "NUI: frame feed stopped, {}, after {} depth and {} colour frames, {} "
       "dropped",
@@ -801,6 +907,10 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     // The runtime only ever wants the newest frame, so one that arrives with
     // no buffer waiting for it is dropped rather than queued up.
     depth_frames_dropped_.fetch_add(1, std::memory_order_relaxed);
+    if (GetNuiTrackingObserver().enabled()) {
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kNoBuffer, TrackingNowUs());
+    }
     return;
   }
 
@@ -810,11 +920,19 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
     XELOGW("NUI: a {}x{} depth frame does not fit the guest's {} byte buffer",
            frame.width, frame.height, request.length);
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
+    if (GetNuiTrackingObserver().enabled()) {
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
+    }
     return;
   }
 
   if (!IsRequestStillWritable(request)) {
     CompleteRequest(request, X_STATUS_UNSUCCESSFUL, 0);
+    if (GetNuiTrackingObserver().enabled()) {
+      GetNuiTrackingObserver().DepthDelivery(
+          NuiTrackingObserver::Delivery::kInvalidBuffer, TrackingNowUs());
+    }
     return;
   }
 
@@ -851,14 +969,59 @@ void NuiCamera::FeedDepthFrame(const xe::nui::DepthFrame& frame) {
   // title's avatar poser feeds its avateering engine only a frame whose stamp
   // has changed: without one, the avatar's limbs never move (docs/nui.md,
   // "The avatar").
-  WriteNuiCameraFrameResult(
-      memory->TranslateVirtual<uint8_t*>(request.request), sequence,
-      NuiCameraFrameTimestampMillis(Clock::QueryGuestUptimeMillis()));
+  const uint64_t guest_stamp_ms =
+      NuiCameraFrameTimestampMillis(Clock::QueryGuestUptimeMillis());
+  WriteNuiCameraFrameResult(memory->TranslateVirtual<uint8_t*>(request.request),
+                            sequence, guest_stamp_ms);
+  auto* paired = paired_capture::Active();
+  const uint64_t paired_copy_qpc = paired ? paired->TickNow() : 0;
+  const bool log_first_copy =
+      cvars::replay_timing_observe &&
+      !timing_first_copy_logged.exchange(true, std::memory_order_relaxed);
+  const uint64_t copy_us = log_first_copy ? TrackingNowUs() : 0;
+  if (GetNuiTrackingObserver().enabled()) {
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kCopied, TrackingNowUs(),
+        frame.timestamp_us, guest_stamp_ms);
+  }
   if (cvars::nui_log_messages) {
     XELOGD("NUI: depth frame {} (host {}) fed to request {:08X}", sequence,
            frame.sequence, request.request);
   }
+  if (GetNuiTrackingObserver().enabled()) {
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kCompletionCalled, TrackingNowUs());
+  }
   CompleteRequest(request, X_STATUS_SUCCESS, request.length);
+  if (paired) {
+    paired_capture::Words words{};
+    words[0] = uint32_t(frame.sequence);
+    words[1] = uint32_t(frame.sequence >> 32);
+    words[2] = uint32_t(frame.timestamp_us);
+    words[3] = uint32_t(frame.timestamp_us >> 32);
+    words[4] = sequence;
+    words[5] = uint32_t(guest_stamp_ms);
+    words[6] = uint32_t(guest_stamp_ms >> 32);
+    words[7] = uint32_t(paired_copy_qpc);
+    words[8] = uint32_t(paired_copy_qpc >> 32);
+    paired->RecordEvent(paired_capture::Kind::kDepthReturn, 0, words);
+  }
+  const uint64_t return_us = log_first_copy ? TrackingNowUs() : 0;
+  if (GetNuiTrackingObserver().enabled()) {
+    GetNuiTrackingObserver().DepthDelivery(
+        NuiTrackingObserver::Delivery::kReturned, TrackingNowUs());
+  }
+  if (log_first_copy) {
+    // This copy may precede the worker's rewind. Offline consumers must
+    // compare host_sequence with first_post_rewind_publish before using it
+    // as a post-rewind delivery anchor.
+    XELOGI(
+        "Replay timing NUI first_depth_copy_return copy_us={} "
+        "return_us={} host_publish_us={} host_sequence={} "
+        "guest_stamp_ms={} guest_sequence={}",
+        copy_us, return_us, frame.timestamp_us, frame.sequence, guest_stamp_ms,
+        sequence);
+  }
 }
 
 void NuiCamera::FeedColourFrame() {

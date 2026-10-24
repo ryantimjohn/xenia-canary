@@ -13,6 +13,7 @@
 #include "xenia/base/byte_stream.h"
 #include "xenia/base/clock.h"
 #include "xenia/base/cvar.h"
+#include "xenia/base/frame_timing.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/profiling.h"
 #include "xenia/gpu/gpu_flags.h"

@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "xenia/base/cvar.h"
@@ -63,7 +64,37 @@ enum class ExecutionState {
 
 class Processor {
  public:
-  Processor(Memory* memory, ExportResolver* export_resolver);
+  // Experimental search-only boundary. This is modeled emulator state, not a
+  // complete architectural CONTEXT. The snapshot is valid only during the
+  // callback. Normal return restores the live PPCContext before the original
+  // memory instruction. Host exceptions restore it before propagating. There is
+  // no disposition or resume operation.
+  // Disabled by default; Windows x64 LWZ/STW with RA=0 and a literal address
+  // wholly inside the protected zero guard only. Dynamic RA is unsupported.
+  // Eligibility observes current guard protection and instruction identity,
+  // and does not prevent concurrent mapping/code changes. Nested offers
+  // decline.
+  struct ScalarAccessFirstChance {
+    uint32_t guest_pc;
+    uint32_t raw_instruction;
+    uint32_t guest_address;
+    bool is_write;
+    const ppc::PPCContext* modeled_context;
+  };
+  using ScalarAccessFirstChanceHandler =
+      std::function<void(ThreadState*, const ScalarAccessFirstChance&)>;
+
+  void set_scalar_access_first_chance_handler(
+      ScalarAccessFirstChanceHandler handler);
+  // Translation-time registration. Returns null when disabled or unsupported.
+  // Sites retain immutable identities until Processor destruction, including
+  // after their originating module is removed. They never own guest code.
+  Function* RegisterScalarAccessFirstChance(GuestFunction* owner,
+                                            uint32_t guest_pc,
+                                            uint32_t raw_instruction);
+
+  Processor(Memory* memory, ExportResolver* export_resolver,
+            CompilationOptions compilation_options = {});
   ~Processor();
 
   Memory* memory() const { return memory_; }
@@ -71,6 +102,9 @@ class Processor {
   ppc::PPCFrontend* frontend() const { return frontend_.get(); }
   backend::Backend* backend() const { return backend_.get(); }
   ExportResolver* export_resolver() const { return export_resolver_; }
+  CompilationOptions compilation_options() const {
+    return compilation_options_;
+  }
 
   bool Setup(std::unique_ptr<backend::Backend> backend);
 
@@ -250,6 +284,7 @@ class Processor {
   bool DemandFunction(Function* function);
 
   Memory* memory_ = nullptr;
+  const CompilationOptions compilation_options_;
   std::unique_ptr<StackWalker> stack_walker_;
 
   std::function<DebugListener*(Processor*)> debug_listener_handler_;
@@ -280,6 +315,27 @@ class Processor {
   std::vector<Breakpoint*> breakpoints_;
 
   Irql irql_;
+
+  struct ScalarAccessFirstChanceSite {
+    Module* module;
+    uint64_t module_generation;
+    uint32_t guest_pc;
+    uint32_t raw_instruction;
+    Function* builtin;
+  };
+  static void ScalarAccessFirstChanceThunk(ppc::PPCContext* context, void* arg0,
+                                           void* arg1);
+  void OfferScalarAccessFirstChance(ppc::PPCContext* context,
+                                    const ScalarAccessFirstChanceSite& site);
+  // Append state to retain the offsets of existing Processor members.
+  uint64_t next_scalar_access_module_generation_ = 1;
+  bool scalar_access_site_limit_reported_ = false;
+  std::map<Module*, uint64_t> scalar_access_module_generations_;
+  std::map<std::tuple<uint64_t, uint32_t, uint32_t>,
+           std::unique_ptr<const ScalarAccessFirstChanceSite>>
+      scalar_access_first_chance_sites_;
+  std::shared_ptr<const ScalarAccessFirstChanceHandler>
+      scalar_access_first_chance_handler_;
 };
 
 }  // namespace cpu

@@ -30,6 +30,9 @@ DEFINE_bool(clock_source_raw, false,
             "invariant TSC. "
             "On a64, Use the CNTVCT_EL0 register as the time source",
             "CPU");
+DEFINE_bool(replay_timing_observe, false,
+            "Log a bounded set of scalar HID and NUI replay timing events.",
+            "Debug");
 
 namespace xe {
 

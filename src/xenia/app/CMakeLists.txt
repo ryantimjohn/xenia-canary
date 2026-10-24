@@ -98,6 +98,7 @@ target_link_libraries(xenia-app PRIVATE
   xenia-helper-sdl
   xenia-hid-sdl
   xenia-hid-keyboard
+  xenia-hid-replay
 )
 
 # Architecture-specific backend

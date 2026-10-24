@@ -23,6 +23,7 @@
 #include "xenia/kernel/xsemaphore.h"
 #include "xenia/kernel/xsymboliclink.h"
 #include "xenia/kernel/xthread.h"
+#include "xenia/kernel/xtimer.h"
 #include "xenia/xbox.h"
 
 namespace xe {
@@ -244,8 +245,12 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
       return X_STATUS_TIMEOUT;
-    default:
     case xe::threading::WaitResult::kAbandoned:
+      if (type() == Type::Mutant) {
+        static_cast<XMutant*>(this)->AbandonedWaitCallback();
+      }
+      return X_STATUS_ABANDONED_WAIT_0;
+    default:
     case xe::threading::WaitResult::kFailed:
       return X_STATUS_ABANDONED_WAIT_0;
   }
@@ -254,6 +259,25 @@ X_STATUS XObject::Wait(uint32_t wait_reason, uint32_t processor_mode,
 X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
                                 uint32_t wait_reason, uint32_t processor_mode,
                                 uint32_t alertable, uint64_t* opt_timeout) {
+  if (signal_object->type() == Type::Mutant) {
+    if (!wait_object->GetWaitHandle()) {
+      // Wait alone treats non-waitable objects as satisfied. A signal/wait
+      // call must reject such a waiter before changing the signal object.
+      return X_STATUS_INVALID_HANDLE;
+    }
+    // The public Win32 SignalObjectAndWait contract does not guarantee an
+    // atomic signal/wait pair. Use the normal mutant release and wait paths
+    // to keep recursive ownership and guest fields in step with the host.
+    // This is an NT analogy, not a verified console atomicity guarantee.
+    const X_STATUS release_status =
+        static_cast<XMutant*>(signal_object)->ReleaseMutant(0, false, false);
+    if (release_status != X_STATUS_SUCCESS) {
+      return release_status;
+    }
+    return wait_object->Wait(wait_reason, processor_mode, alertable,
+                             opt_timeout);
+  }
+
   auto timeout_ms =
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
@@ -279,8 +303,12 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
     case xe::threading::WaitResult::kTimeout:
       xe::threading::MaybeYield();
       return X_STATUS_TIMEOUT;
-    default:
     case xe::threading::WaitResult::kAbandoned:
+      if (wait_object->type() == Type::Mutant) {
+        static_cast<XMutant*>(wait_object)->AbandonedWaitCallback();
+      }
+      return X_STATUS_ABANDONED_WAIT_0;
+    default:
     case xe::threading::WaitResult::kFailed:
       return X_STATUS_ABANDONED_WAIT_0;
   }
@@ -289,7 +317,8 @@ X_STATUS XObject::SignalAndWait(XObject* signal_object, XObject* wait_object,
 X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
                                uint32_t wait_type, uint32_t wait_reason,
                                uint32_t processor_mode, uint32_t alertable,
-                               uint64_t* opt_timeout) {
+                               uint64_t* opt_timeout,
+                               uint32_t* observed_host_ms) {
   xe::threading::WaitHandle* wait_handles[64];
 
   for (size_t i = 0; i < count; ++i) {
@@ -301,6 +330,13 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
       opt_timeout ? std::chrono::milliseconds(Clock::ScaleGuestDurationMillis(
                         TimeoutTicksToMs(*opt_timeout)))
                   : std::chrono::milliseconds::max();
+
+  // Private fork observer: reuse the exact computed duration, including the
+  // same DWORD narrowing used by the Windows wait backend. No second clock
+  // conversion and no change to the duration passed to the wait.
+  if (observed_host_ms) {
+    *observed_host_ms = uint32_t(timeout_ms.count());
+  }
 
   X_STATUS status;
   uint32_t boost_increment = 0;
@@ -321,6 +357,10 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         status = X_STATUS_TIMEOUT;
         break;
       case xe::threading::WaitResult::kAbandoned:
+        if (objects[result.second]->type() == Type::Mutant) {
+          static_cast<XMutant*>(objects[result.second])
+              ->AbandonedWaitCallback();
+        }
         status = X_STATUS(X_STATUS_ABANDONED_WAIT_0 + result.second);
         break;
       default:
@@ -349,8 +389,17 @@ X_STATUS XObject::WaitMultiple(uint32_t count, XObject** objects,
         xe::threading::MaybeYield();
         status = X_STATUS_TIMEOUT;
         break;
-      default:
       case xe::threading::WaitResult::kAbandoned:
+        // An abandoned wait-all still acquires every mutex in the set.
+        // Ordinary callbacks retain recursion for current-owned mutants.
+        for (uint32_t i = 0; i < count; ++i) {
+          if (objects[i]->type() == Type::Mutant) {
+            objects[i]->WaitCallback();
+          }
+        }
+        status = X_STATUS_ABANDONED_WAIT_0;
+        break;
+      default:
       case xe::threading::WaitResult::kFailed:
         status = X_STATUS_ABANDONED_WAIT_0;
         break;
@@ -418,10 +467,9 @@ void XObject::SetNativePointer(uint32_t native_ptr, bool uninitialized) {
   guest_object_ptr_ = native_ptr;
 }
 
-object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
-                                             void* native_ptr,
-                                             X_OBJECT_TYPES as_type,
-                                             bool already_locked) {
+object_ref<XObject> XObject::GetNativeObject(
+    KernelState* kernel_state, void* native_ptr, X_OBJECT_TYPES as_type,
+    bool already_locked, util::NativeObjectFailure* failure) {
   assert_not_null(native_ptr);
 
   // Unfortunately the XDK seems to inline some KeInitialize calls, meaning
@@ -445,17 +493,37 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
     type = header->type;
   }
 
-  if (header->wait_list.flink_ptr == kXObjSignature) {
+  // Preserve the original single signature read. Diagnostic output reuses it.
+  const uint32_t signature_word = header->wait_list.flink_ptr;
+  if (signature_word == kXObjSignature) {
     // Already initialized.
     // TODO: assert if the type of the object != as_type
     uint32_t handle = header->wait_list.blink_ptr;
     result = kernel_state->object_table()
                  ->LookupObject<XObject>(handle, true)
                  .release();
+    if (result && NativeTimerCandidateEnabled() &&
+        (type == TimerNotificationObject ||
+         type == TimerSynchronizationObject) &&
+        (result->type() != XObject::Type::Timer ||
+         !static_cast<XTimer*>(result)->MatchesNative(
+             kernel_state->memory()->HostToGuestVirtual(native_ptr)))) {
+      result->Release();
+      result = nullptr;
+    }
     if (result) {
       // The only place the guest hands us a raw dispatch header, so the only
       // place a direct write to it can be picked up.
       result->SyncFromGuest();
+    } else if (failure) {
+      const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
+      *failure = {util::NativeObjectFailure::Reason::kStashedLookupMiss,
+                  uint32_t(type),
+                  read_type,
+                  read_type ? uint32_t(type) : 0,
+                  signature_word,
+                  true,
+                  handle};
     }
   } else {
     // First use, create new.
@@ -479,12 +547,23 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
         assert_true(success);
         result = sem;
       } break;
+      case X_OBJECT_TYPES::TimerNotificationObject:
+      case X_OBJECT_TYPES::TimerSynchronizationObject:
+        if (NativeTimerCandidateEnabled()) {
+          auto* timer = new XTimer(kernel_state);
+          if (timer->InitializeNative(native_ptr)) {
+            result = timer;
+          } else {
+            timer->ReleaseHandle();
+            timer->Release();
+          }
+          break;
+        }
+        [[fallthrough]];
       case X_OBJECT_TYPES::ProcessObject:
       case X_OBJECT_TYPES::QueueObject:
       case X_OBJECT_TYPES::ThreadObject:
       case X_OBJECT_TYPES::Spare1Object:
-      case X_OBJECT_TYPES::TimerNotificationObject:
-      case X_OBJECT_TYPES::TimerSynchronizationObject:
       case X_OBJECT_TYPES::ApcObject:
       case X_OBJECT_TYPES::DpcObject:
       case X_OBJECT_TYPES::DeviceQueueObject:
@@ -494,6 +573,17 @@ object_ref<XObject> XObject::GetNativeObject(KernelState* kernel_state,
       default:
         assert_always();
         result = nullptr;
+        if (failure) {
+          const bool read_type = as_type == X_OBJECT_TYPES::UndefinedObject;
+          *failure = {
+              util::NativeObjectFailure::Reason::kUnsupportedFirstUseType,
+              uint32_t(type),
+              read_type,
+              read_type ? uint32_t(type) : 0,
+              signature_word,
+              false,
+              0};
+        }
     }
     // Stash pointer in struct.
     // FIXME: This assumes the object contains a dispatch header (some don't!)

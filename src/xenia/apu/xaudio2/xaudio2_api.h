@@ -12,6 +12,8 @@
 
 #include <Audioclient.h>
 
+#include <cstddef>
+
 #include "xenia/base/platform_win.h"
 
 namespace xe {
@@ -94,7 +96,29 @@ struct XAUDIO2_VOICE_STATE {
   UINT64 SamplesPlayed;
 };
 
-struct XAUDIO2_PERFORMANCE_DATA;
+// Same layout for XAudio2 2.7, 2.8 and 2.9 in the Microsoft API reference:
+// https://learn.microsoft.com/windows/win32/api/xaudio2/ns-xaudio2-xaudio2_performance_data
+// Keep this local declaration alongside the versioned interfaces: including
+// the platform's xaudio2.h here would select only one interface version.
+struct XAUDIO2_PERFORMANCE_DATA {
+  UINT64 AudioCyclesSinceLastQuery;
+  UINT64 TotalCyclesSinceLastQuery;
+  UINT32 MinimumCyclesPerQuantum;
+  UINT32 MaximumCyclesPerQuantum;
+  UINT32 MemoryUsageInBytes;
+  UINT32 CurrentLatencyInSamples;
+  UINT32 GlitchesSinceEngineStarted;
+  UINT32 ActiveSourceVoiceCount;
+  UINT32 TotalSourceVoiceCount;
+  UINT32 ActiveSubmixVoiceCount;
+  UINT32 ActiveResamplerCount;
+  UINT32 ActiveMatrixMixCount;
+  UINT32 ActiveXmaSourceVoices;
+  UINT32 ActiveXmaStreams;
+};
+static_assert(sizeof(XAUDIO2_PERFORMANCE_DATA) == 64);
+static_assert(offsetof(XAUDIO2_PERFORMANCE_DATA, GlitchesSinceEngineStarted) ==
+              32);
 
 struct XAUDIO2_DEBUG_CONFIGURATION {
   UINT32 TraceMask;

@@ -12,6 +12,7 @@
 #include "xenia/base/cvar.h"
 #include "xenia/base/logging.h"
 #include "xenia/base/main_win.h"
+#include "xenia/base/pacing_observer.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/base/string.h"
 
@@ -55,10 +56,29 @@ static void RequestWin32HighResolutionTimer() {
     return;
   }
 
-  ULONG minimum_resolution, maximum_resolution, current_resolution;
-  nt_query_timer_resolution(&minimum_resolution, &maximum_resolution,
-                            &current_resolution);
-  nt_set_timer_resolution(maximum_resolution, true, &current_resolution);
+  ULONG minimum_resolution = 0, maximum_resolution = 0, current_resolution = 0;
+  // Observe only these existing calls, without adding a request or fresh query.
+  pacing::TimerMetadata metadata;
+  const NTSTATUS query_status = nt_query_timer_resolution(
+      &minimum_resolution, &maximum_resolution, &current_resolution);
+  metadata.flags = 1;
+  metadata.query_status = uint32_t(query_status);
+  if (query_status >= 0) {
+    metadata.flags |= 2;
+    metadata.minimum = minimum_resolution;
+    metadata.maximum = maximum_resolution;
+    metadata.query_current = current_resolution;
+    metadata.requested = maximum_resolution;
+  }
+  const NTSTATUS set_status =
+      nt_set_timer_resolution(maximum_resolution, true, &current_resolution);
+  metadata.flags |= 4;
+  metadata.set_status = uint32_t(set_status);
+  if (set_status >= 0) {
+    metadata.flags |= 8;
+    metadata.set_current = current_resolution;
+  }
+  pacing::SaveTimerMetadata(metadata);
 }
 
 static void RequestWin32MMCSS() {

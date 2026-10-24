@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_FUNCTION_H_
 #define XENIA_CPU_FUNCTION_H_
 
+#include <atomic>
 #include <memory>
 #include <vector>
 
@@ -22,6 +23,9 @@
 namespace xe {
 namespace cpu {
 class Export;
+namespace ppc {
+class PPCTranslator;
+}  // namespace ppc
 }  // namespace cpu
 
 namespace cpu {
@@ -31,6 +35,19 @@ struct SourceMapEntry {
   uint32_t hir_offset;     // Block ordinal (16b) | Instr ordinal (16b)
   uint32_t code_offset;    // Offset from emitted code start.
 };
+
+// Chosen before a processor creates its frontend or compiles any function.
+// The checkpoint profile is reserved until its ordered compiler path exists.
+enum class CompilationProfile : uint8_t {
+  kUncompiled,
+  kOrdinary,
+  kCheckpoint,
+};
+
+struct CompilationOptions {
+  CompilationProfile profile = CompilationProfile::kOrdinary;
+};
+
 enum class SaveRestoreType : uint8_t { NONE, GPR, VMX, FPR };
 
 class Function : public Symbol {
@@ -137,6 +154,11 @@ class GuestFunction : public Function {
   FunctionTraceData& trace_data() { return trace_data_; }
   std::vector<SourceMapEntry>& source_map() { return source_map_; }
 
+  // Describes completed compilation only, not publication or fault eligibility.
+  CompilationProfile compiled_profile() const {
+    return compiled_profile_.load(std::memory_order_acquire);
+  }
+
   ExternHandler extern_handler() const { return extern_handler_; }
   Export* export_data() const { return export_data_; }
   void SetupExtern(ExternHandler handler, Export* export_data = nullptr);
@@ -160,6 +182,11 @@ class GuestFunction : public Function {
   std::vector<SourceMapEntry> source_map_;
   ExternHandler extern_handler_ = nullptr;
   Export* export_data_ = nullptr;
+
+ private:
+  friend class ppc::PPCTranslator;
+  std::atomic<CompilationProfile> compiled_profile_ = {
+      CompilationProfile::kUncompiled};
 };
 
 }  // namespace cpu

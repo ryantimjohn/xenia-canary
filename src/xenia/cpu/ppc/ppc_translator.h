@@ -14,6 +14,7 @@
 
 #include "xenia/base/string_buffer.h"
 #include "xenia/cpu/backend/assembler.h"
+#include "xenia/cpu/backend/machine_info.h"
 #include "xenia/cpu/compiler/compiler.h"
 #include "xenia/cpu/function.h"
 
@@ -24,6 +25,11 @@ namespace ppc {
 class PPCFrontend;
 class PPCHIRBuilder;
 class PPCScanner;
+
+// Offline structural compiler recipe only. Production checkpoint profile gates
+// remain closed. The machine info must outlive the configured compiler.
+bool AddDormantCheckpointPasses(compiler::Compiler& compiler,
+                                const backend::MachineInfo* machine_info);
 
 class PPCTranslator {
  public:
@@ -38,6 +44,7 @@ class PPCTranslator {
   void DumpSource(GuestFunction* function, StringBuffer* string_buffer);
 
   PPCFrontend* frontend_;
+  const CompilationOptions compilation_options_;
   std::unique_ptr<PPCScanner> scanner_;
   std::unique_ptr<PPCHIRBuilder> builder_;
   std::unique_ptr<compiler::Compiler> compiler_;

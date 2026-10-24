@@ -287,6 +287,7 @@ int InstrEmit_lwax(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_lwz(PPCHIRBuilder& f, const InstrData& i) {
+  f.MaybeEmitScalarAccessFirstChance(i.address, i.code);
   // if RA = 0 then
   //   b <- 0
   // else
@@ -505,6 +506,7 @@ int InstrEmit_sthx(PPCHIRBuilder& f, const InstrData& i) {
 }
 
 int InstrEmit_stw(PPCHIRBuilder& f, const InstrData& i) {
+  f.MaybeEmitScalarAccessFirstChance(i.address, i.code);
   // if RA = 0 then
   //   b <- 0
   // else

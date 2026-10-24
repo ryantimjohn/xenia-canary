@@ -293,6 +293,11 @@ enum Opcode {
   OPCODE_RESERVED_LOAD,
   OPCODE_RESERVED_STORE,
 
+  // Dormant PPC structural requests. No backend implements these yet.
+  OPCODE_PPC_CHECKPOINT_REQUEST,
+  OPCODE_PPC_CHECKPOINT_LWZ,
+  OPCODE_PPC_CHECKPOINT_STW,
+
   __OPCODE_MAX_VALUE,  // Keep at end.
 };
 

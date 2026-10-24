@@ -11,6 +11,7 @@
 #include "xenia/base/assert.h"
 #include "xenia/base/chrono_steady_cast.h"
 #include "xenia/base/logging.h"
+#include "xenia/base/pacing_observer.h"
 #include "xenia/base/platform_win.h"
 #include "xenia/base/threading.h"
 #include "xenia/base/threading_timer_queue.h"
@@ -149,15 +150,23 @@ void MaybeYield() {
   // MemoryBarrier();
 }
 void NanoSleep(int64_t ns) {
-  // nanosleep is done in 100 nanosecond increments
-  int64_t in_nt_increments = ns / 100LL;
-  if (in_nt_increments == 0 && ns != 0) {
-    // if we're explicitly requesting a delay of 0 ns, let it go through,
-    // otherwise if it was less than a 100ns increment we round up to 100ns
-    in_nt_increments = 1;
-  }
-  in_nt_increments = -in_nt_increments;
+  int64_t in_nt_increments = pacing::NtInterval(ns);
   NtDelayExecutionPointer.invoke(0, &in_nt_increments);
+}
+void NanoSleep(int64_t ns, pacing::Record* observation) {
+  if (!observation) {
+    NanoSleep(ns);
+    return;
+  }
+  int64_t in_nt_increments = pacing::NtInterval(ns);
+  observation->requested_ns = ns;
+  observation->nt_interval = in_nt_increments;
+  observation->wait_begin = pacing::RawQpc();
+  const auto status =
+      NtDelayExecutionPointer.invoke<NTSTATUS>(0, &in_nt_increments);
+  observation->wait_end = pacing::RawQpc();
+  observation->nt_status = uint32_t(status);
+  observation->flags = 1;  // The NT call occurred; status is valid.
 }
 void SyncMemory() { MemoryBarrier(); }
 
@@ -336,6 +345,20 @@ class Win32Event : public Win32Handle<Event> {
     EventInfo result{};
     NtQueryEventPointer.invoke(handle_, 0, &result, sizeof(EventInfo), nullptr);
     return result;
+  }
+
+  bool TryQuery(EventInfo* out) override {
+    if (!out || !NtQueryEventPointer) {
+      return false;
+    }
+    EventInfo result{};
+    const auto status = NtQueryEventPointer.invoke<int32_t>(
+        handle_, 0, &result, sizeof(result), nullptr);
+    if (status < 0) {
+      return false;
+    }
+    *out = result;
+    return true;
   }
 };
 

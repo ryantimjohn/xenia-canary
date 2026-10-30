@@ -1194,10 +1194,12 @@ kernel suite.
   Reference and close do not read a preceding Object Manager header.
 - **Close:** `NtClose` (and XAM's `CloseHandle` and `XamTaskCloseHandle`, which
   close through it) runs `close_proc(object, count)` on the calling guest thread
-  with no kernel lock held, on every close from a guest thread, with the
-  handle's reference count before the close, and then releases the handle (a
-  Debug line, `NtClose(<handle>): close procedure <proc>(<object>, <count>) of
-  type <type>`). A close from a host thread has no guest thread to run the
+  with no kernel lock held, on every close from a guest thread. `count` is the
+  number of guest opens across the object's live handles before this close;
+  pointer references are excluded and duplicate handles are counted together.
+  It then releases the handle (a Debug line,
+  `NtClose(<handle>): close procedure <proc>(<object>, <count>) of type
+  <type>`). A close from a host thread has no guest thread to run the
   procedure on, so it skips it (a Debug line, `NtClose(<handle>) on a host
   thread: close procedure <proc> of type <type> is not run`) but releases the
   handle and sees to the dispatch header just the same (see "After the last
@@ -1775,17 +1777,14 @@ tracker reports no player at all.
 * **Colour and identity.** The colour ring receives constant black YUV 4:2:2.
   Identity messages provide the success answers needed for startup, without
   biometric enrolment, matching or callback delivery.
-* **Guest object lifetime.** A pointer reference from
-  `ObReferenceObjectByHandle` contributes to the first handle's count. A
-  concurrent close may therefore give a title-defined close procedure a count
-  above 1 and skip its last-handle cleanup. Conversely, `NtDuplicateObject`
-  keeps a separate count for the duplicate, so closing either handle may report
-  1 while the other remains open. Title `4D5308ED`'s observed stream closes
-  received 1, but another title can expose either discrepancy. Guest
-  `delete_proc` and `free_proc` are not called: xenia has no separate guest
-  pointer count to determine the last reference, and does not reclaim that
-  memory. A non-zero delete procedure is noted once at Debug; the NUI stream
-  type's delete procedure is 0.
+* **Guest object lifetime.** Xenia counts guest opens separately from pointer
+  references. Before each close, a title-defined `close_proc` receives the
+  number of guest opens across all live slots for the object, including
+  duplicate handles and excluding pointer references. Title `4D5308ED`'s
+  observed stream closes received 1. Guest `delete_proc` and `free_proc` are
+  not called: xenia keeps no guest pointer count to determine the last
+  reference, and does not reclaim that memory. A non-zero delete procedure is
+  noted once at Debug; the NUI stream type's delete procedure is 0.
 * **LZX coverage.** The `LDI*` implementation has one real-stream reference: the
   tracking database, 691 blocks and 22,614,016 decompressed bytes. Unit tests
   cover the shim's boundaries, not another title's asset stream.
